@@ -28,7 +28,62 @@ jobs:
       - name: Test Snowflake Connection
         run: snow connection test -x
 
-      # Future: PROD deployment steps
-      # - Deploy validated model from STAGE
-      # - Promote model version
-      # - Update inference service
+      - name: Verify model exists in PROD
+        run: |
+          snow sql -q "SHOW MODELS LIKE 'MLOPS_FRAUD_DETECTOR' IN SNOW_MLOPS_PROD.ML" -x
+
+      - name: Deploy inference service
+        run: |
+          snow sql -q "
+            USE WAREHOUSE SNOW_MLOPS_PROD_WH;
+
+            -- Create service from registered model (if not exists)
+            -- The model was replicated from STAGE by the deploy workflow
+            SELECT SYSTEM\$GET_SERVICE_STATUS('SNOW_MLOPS_PROD.ML.MLOPS_FRAUD_DETECTOR_SERVICE');
+          " -x || echo "Service does not exist yet - will be created"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Deploy PROD inference service
+        run: |
+          uv run python -c "
+          import sys
+          sys.path.insert(0, 'source')
+          from snowpark_session import create_snowpark_session
+          from snowflake.ml.registry import Registry
+
+          session = create_snowpark_session()
+          session.sql('USE WAREHOUSE SNOW_MLOPS_PROD_WH').collect()
+
+          reg = Registry(session=session, database_name='SNOW_MLOPS_PROD', schema_name='ML')
+          model = reg.get_model('MLOPS_FRAUD_DETECTOR')
+          mv = model.version('V1')
+
+          print('Deploying PROD inference service...')
+          try:
+              mv.create_service(
+                  service_name='MLOPS_FRAUD_DETECTOR_SERVICE',
+                  service_compute_pool='SNOW_MLOPS_PROD_POOL',
+                  image_build_compute_pool='SNOW_MLOPS_PROD_POOL',
+                  ingress_enabled=True,
+                  max_instances=2,
+                  gpu_requests=None,
+              )
+              print('Service created successfully!')
+          except Exception as e:
+              if 'already exists' in str(e).lower():
+                  print('Service already exists - skipping creation')
+              else:
+                  raise
+          session.close()
+          "
+        env:
+          SNOWFLAKE_CONNECTION_NAME: ""
+        timeout-minutes: 15

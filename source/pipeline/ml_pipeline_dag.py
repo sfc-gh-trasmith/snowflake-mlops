@@ -123,16 +123,10 @@ def train_model_remote() -> None:
     }
 
     # Load training data from Feature Store dataset
-    from snowflake.ml.feature_store import FeatureStore, CreationMode
+    from snowflake.ml.dataset import Dataset
 
-    fs = FeatureStore(
-        session=session,
-        database=db,
-        name=schema,
-        default_warehouse=cfg.get("warehouse", "SNOW_MLOPS_DEV_WH"),
-        creation_mode=CreationMode.FAIL_IF_NOT_EXIST,
-    )
-    dataset = fs.get_dataset("FRAUD_TRAINING_DATA", "V1")
+    dataset = Dataset.load(session=session, name=f"{db}.{schema}.FRAUD_TRAINING_DATA")
+    dataset.select_version("V1")
     df = dataset.read.to_pandas()
 
     # Feature columns
