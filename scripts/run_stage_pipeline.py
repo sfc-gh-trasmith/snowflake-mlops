@@ -35,7 +35,6 @@ PROD_DATABASE = "SNOW_MLOPS_PROD"
 PROD_SCHEMA = "ML"
 
 MODEL_NAME = "MLOPS_FRAUD_DETECTOR"
-MODEL_VERSION = "V1"
 
 
 @remote(
@@ -64,12 +63,28 @@ def train_and_register_stage() -> str:
 
     session = Session.builder.getOrCreate()
 
+    import subprocess
+
     db = "SNOW_MLOPS_STAGE"
     schema = "ML"
     source_db = "SNOW_MLOPS_PROD"
     source_schema = "ML"
     model_name = "MLOPS_FRAUD_DETECTOR"
-    version_name = "V1"
+
+    # Auto-increment version: query existing versions and compute next
+    try:
+        versions_df = session.sql(f"SHOW VERSIONS IN MODEL {db}.{schema}.{model_name}").collect()
+        existing = [r["name"] for r in versions_df]
+        max_v = max(int(v.replace("V", "")) for v in existing if v.startswith("V") and v[1:].isdigit())
+        version_name = f"V{max_v + 1}"
+    except Exception:
+        version_name = "V1"
+
+    # Get git SHA for traceability (may not be available in container)
+    try:
+        git_sha = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"]).decode().strip()
+    except Exception:
+        git_sha = "unknown"
 
     # Read training data from PROD source + STAGE feature views
     # (Feature views in STAGE also read from PROD source data)
@@ -165,35 +180,62 @@ def train_and_register_stage() -> str:
         version_name=version_name,
         conda_dependencies=["xgboost", "scikit-learn"],
         sample_input_data=X_test.head(10),
-        comment=f"STAGE pipeline: AUC={metrics['auc_roc']:.4f}, F1={metrics['f1']:.4f}",
+        comment=f"STAGE pipeline: AUC={metrics['auc_roc']:.4f}, F1={metrics['f1']:.4f} | git:{git_sha}",
     )
     print("  Model registered in STAGE!")
 
-    return json.dumps({"status": "success", "metrics": metrics})
+    return json.dumps({"status": "success", "metrics": metrics, "version": version_name})
 
 
-def replicate_model_to_prod(session):
-    """Copy the registered model from STAGE to PROD (same account, cross-database)."""
-    print(f"\nReplicating model: {STAGE_DATABASE}.{STAGE_SCHEMA}.{MODEL_NAME}/{MODEL_VERSION}")
-    print(f"  -> {PROD_DATABASE}.{PROD_SCHEMA}.{MODEL_NAME}/{MODEL_VERSION}")
+def replicate_model_to_prod(session, version: str):
+    """Copy the registered model version from STAGE to PROD."""
+    print(f"\nReplicating model: {STAGE_DATABASE}.{STAGE_SCHEMA}.{MODEL_NAME}/{version}")
+    print(f"  -> {PROD_DATABASE}.{PROD_SCHEMA}.{MODEL_NAME}/{version}")
 
-    # Drop existing model in PROD if it exists (to allow fresh copy)
+    # Check if model exists in PROD already
+    existing = session.sql(f"SHOW MODELS LIKE '{MODEL_NAME}' IN {PROD_DATABASE}.{PROD_SCHEMA}").collect()
+
+    if existing:
+        # Add version to existing model
+        try:
+            session.sql(f"""
+                ALTER MODEL {PROD_DATABASE}.{PROD_SCHEMA}.{MODEL_NAME}
+                  ADD VERSION {version}
+                  FROM MODEL {STAGE_DATABASE}.{STAGE_SCHEMA}.{MODEL_NAME}
+                  VERSION {version}
+            """).collect()
+        except Exception as e:
+            if "already exists" in str(e).lower():
+                print(f"  Version {version} already exists in PROD, dropping and re-adding...")
+                session.sql(f"ALTER MODEL {PROD_DATABASE}.{PROD_SCHEMA}.{MODEL_NAME} DROP VERSION {version}").collect()
+                session.sql(f"""
+                    ALTER MODEL {PROD_DATABASE}.{PROD_SCHEMA}.{MODEL_NAME}
+                      ADD VERSION {version}
+                      FROM MODEL {STAGE_DATABASE}.{STAGE_SCHEMA}.{MODEL_NAME}
+                      VERSION {version}
+                """).collect()
+            else:
+                raise
+    else:
+        # Create model with first version
+        session.sql(f"""
+            CREATE MODEL {PROD_DATABASE}.{PROD_SCHEMA}.{MODEL_NAME}
+              WITH VERSION {version}
+              FROM MODEL {STAGE_DATABASE}.{STAGE_SCHEMA}.{MODEL_NAME}
+              VERSION {version}
+        """).collect()
+
+    # Set as default version in PROD
     session.sql(f"""
-        DROP MODEL IF EXISTS {PROD_DATABASE}.{PROD_SCHEMA}.{MODEL_NAME}
-    """).collect()
-
-    # Copy model from STAGE to PROD
-    session.sql(f"""
-        CREATE MODEL {PROD_DATABASE}.{PROD_SCHEMA}.{MODEL_NAME}
-          WITH VERSION {MODEL_VERSION}
-          FROM MODEL {STAGE_DATABASE}.{STAGE_SCHEMA}.{MODEL_NAME}
-          VERSION {MODEL_VERSION}
+        ALTER MODEL {PROD_DATABASE}.{PROD_SCHEMA}.{MODEL_NAME}
+          SET DEFAULT_VERSION = {version}
     """).collect()
 
     # Verify
     result = session.sql(f"SHOW MODELS LIKE '{MODEL_NAME}' IN {PROD_DATABASE}.{PROD_SCHEMA}").collect()
     if result:
-        print("  Model replicated successfully to PROD!")
+        print(f"  Model replicated successfully! Default version: {version}")
+        print(f"  All versions in PROD: {result[0]['versions']}")
     else:
         raise RuntimeError("Model replication failed - model not found in PROD")
 
@@ -215,9 +257,13 @@ def main():
     result = job.result()
     print(f"  Training result: {result}")
 
+    # Extract version from result
+    result_data = json.loads(result)
+    version = result_data.get("version", "V1")
+
     # Step 2: Replicate model from STAGE to PROD
-    print("\n[2/2] Replicating model to PROD...")
-    replicate_model_to_prod(session)
+    print(f"\n[2/2] Replicating model {version} to PROD...")
+    replicate_model_to_prod(session, version)
 
     print("\n" + "=" * 60)
     print("STAGE PIPELINE COMPLETE")

@@ -48,7 +48,15 @@ def train_and_register() -> str:
     db = "SNOW_MLOPS_DEV"
     schema = "ML"
     model_name = "MLOPS_FRAUD_DETECTOR"
-    version_name = "V1"
+
+    # Auto-increment version
+    try:
+        versions_df = session.sql(f"SHOW VERSIONS IN MODEL {db}.{schema}.{model_name}").collect()
+        existing = [r["name"] for r in versions_df]
+        max_v = max(int(v.replace("V", "")) for v in existing if v.startswith("V") and v[1:].isdigit())
+        version_name = f"V{max_v + 1}"
+    except Exception:
+        version_name = "V1"
 
     # Read training data by joining Feature View DT with source labels
     print("Loading training data from Feature View + source tables...")
@@ -153,7 +161,7 @@ def train_and_register() -> str:
     )
     print("  Model registered!")
 
-    return json.dumps({"status": "success", "metrics": metrics})
+    return json.dumps({"status": "success", "metrics": metrics, "version": version_name})
 
 
 if __name__ == "__main__":

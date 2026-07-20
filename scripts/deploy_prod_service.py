@@ -18,7 +18,6 @@ PROD_WAREHOUSE = "SNOW_MLOPS_PROD_WH"
 PROD_COMPUTE_POOL = "SNOW_MLOPS_PROD_POOL"
 MODEL_NAME = "MLOPS_FRAUD_DETECTOR"
 SERVICE_NAME = "MLOPS_FRAUD_DETECTOR_SERVICE"
-MODEL_VERSION = "V1"
 
 
 def main():
@@ -36,13 +35,17 @@ def main():
         raise RuntimeError(f"Model {MODEL_NAME} not found in {PROD_DATABASE}.{PROD_SCHEMA}. Run STAGE pipeline first.")
     print(f"  Found: {MODEL_NAME} (versions: {models[0]['versions']})")
 
-    # Deploy inference service
+    # Deploy inference service using default (latest) version
     print(f"\n[2/3] Deploying inference service: {SERVICE_NAME}")
     from snowflake.ml.registry import Registry
 
     reg = Registry(session=session, database_name=PROD_DATABASE, schema_name=PROD_SCHEMA)
     model = reg.get_model(MODEL_NAME)
-    mv = model.version(MODEL_VERSION)
+
+    # Use the default version (set during replication)
+    default_version = models[0]["default_version_name"]
+    print(f"  Using default version: {default_version}")
+    mv = model.version(default_version)
 
     try:
         mv.create_service(
