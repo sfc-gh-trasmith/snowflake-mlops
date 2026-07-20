@@ -108,54 +108,54 @@
 flowchart TB
     subgraph data_layer [Data Layer - SNOW_MLOPS_PROD.ML]
         direction LR
-        RAW_TXN[RAW_TRANSACTIONS<br/>100K rows]
-        CUST_PROF[CUSTOMER_PROFILES<br/>5K customers]
-        MERCH[MERCHANT_DATA<br/>500 merchants]
+        RAW_TXN[RAW_TRANSACTIONS]
+        CUST_PROF[CUSTOMER_PROFILES]
+        MERCH[MERCHANT_DATA]
     end
 
     subgraph feature_eng [Feature Engineering]
         direction LR
         FS[Snowflake Feature Store]
-        DT1["Dynamic Table:<br/>CUSTOMER_RISK_FEATURES"]
-        DT2["Dynamic Table:<br/>TRANSACTION_CONTEXT_FEATURES"]
+        DT1[CUSTOMER_RISK_FEATURES DT]
+        DT2[TRANSACTION_CONTEXT_FEATURES DT]
         FS --> DT1
         FS --> DT2
     end
 
     subgraph training [Model Training - Compute Pool]
         direction LR
-        REMOTE["@remote ML Job<br/>CPU_X64_M"]
-        CV["5-Fold Stratified CV"]
-        XGB["XGBoost Classifier<br/>scale_pos_weight=33"]
+        REMOTE[ML Job - CPU_X64_M]
+        CV[5-Fold Stratified CV]
+        XGB[XGBoost Classifier]
         REMOTE --> CV --> XGB
     end
 
     subgraph evaluation [Evaluation + Quality Gate]
         direction LR
-        METRICS["Metrics:<br/>AUC-ROC, Precision,<br/>Recall, F1"]
-        GATE{"Quality Gate<br/>AUC >= 0.85?<br/>Precision >= 0.70?"}
+        METRICS[AUC-ROC / Precision / Recall / F1]
+        GATE{Quality Gate}
         METRICS --> GATE
     end
 
     subgraph registry [Model Registry]
         direction LR
-        REG_STAGE["STAGE Registry<br/>MLOPS_FRAUD_DETECTOR/V1"]
-        REG_PROD["PROD Registry<br/>(replicated)"]
+        REG_STAGE[STAGE: MLOPS_FRAUD_DETECTOR/V1]
+        REG_PROD[PROD: Model Replica]
         REG_STAGE -->|"CREATE MODEL...FROM MODEL"| REG_PROD
     end
 
     subgraph serving [Production Serving - SPCS]
         direction LR
-        SVC["Inference Service<br/>max_instances=2"]
-        GW["REST Gateway<br/>ingress_enabled=True"]
+        SVC[SPCS Inference Service]
+        GW[REST Gateway]
         SVC --> GW
     end
 
     subgraph cicd [CI/CD - GitHub Actions]
         direction LR
-        PR["PR Checks<br/>lint/format/test"]
-        STAGE_WF["STAGE Deploy<br/>(auto on merge)"]
-        PROD_WF["PROD Deploy<br/>(manual dispatch)"]
+        PR[PR Checks]
+        STAGE_WF[STAGE Deploy - auto]
+        PROD_WF[PROD Deploy - manual]
         PR --> STAGE_WF --> PROD_WF
     end
 
@@ -186,7 +186,7 @@ flowchart LR
 
     subgraph stage_env [STAGE Environment]
         MERGE[Merge to main]
-        S_TRAIN["Train Model<br/>(STAGE_POOL)"]
+        S_TRAIN[Train on STAGE_POOL]
         S_REG[Register Model]
         S_COPY["Replicate to PROD"]
         TEST -->|"approved"| MERGE
@@ -195,9 +195,9 @@ flowchart LR
     end
 
     subgraph prod_env [PROD Environment]
-        APPROVE["Manual Approval<br/>(workflow_dispatch)"]
+        APPROVE[Manual Approval]
         P_DEPLOY[Deploy Service]
-        P_READY["Service READY<br/>REST Gateway Live"]
+        P_READY[Service READY]
         S_COPY -->|"model in PROD"| APPROVE
         APPROVE --> P_DEPLOY --> P_READY
     end
@@ -414,9 +414,9 @@ sequenceDiagram
     </div>
   </section>
 
-  <script src="/libs/mermaid@10.9.6/mermaid.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.6/dist/mermaid.min.js"></script>
   <script>
-    mermaid.initialize({ startOnLoad: true, securityLevel: 'strict', theme: 'default' });
+    mermaid.initialize({ startOnLoad: true, theme: 'default' });
   </script>
 </body>
 </html>
