@@ -1,0 +1,51 @@
+#!/bin/bash
+# Infrastructure setup for Snowflake MLOps Demo
+# Prefix: SNOW_MLOPS_DEV
+# Usage: snow sql -f scripts/setup.sh
+#   OR copy/paste into Snowsight SQL worksheet
+
+set -e
+
+echo "=== Setting up SNOW_MLOPS_DEV infrastructure ==="
+
+snow sql -q "
+-- Database and Schema
+CREATE DATABASE IF NOT EXISTS SNOW_MLOPS_DEV;
+CREATE SCHEMA IF NOT EXISTS SNOW_MLOPS_DEV.ML;
+
+-- Warehouse for general operations
+CREATE WAREHOUSE IF NOT EXISTS SNOW_MLOPS_DEV_WH
+    WAREHOUSE_SIZE = 'MEDIUM'
+    AUTO_SUSPEND = 120
+    AUTO_RESUME = TRUE
+    INITIALLY_SUSPENDED = TRUE;
+
+-- Compute Pool for ML Jobs and Inference
+CREATE COMPUTE POOL IF NOT EXISTS SNOW_MLOPS_DEV_POOL
+    MIN_NODES = 1
+    MAX_NODES = 3
+    INSTANCE_FAMILY = CPU_X64_M
+    AUTO_SUSPEND_SECS = 300
+    AUTO_RESUME = TRUE;
+
+-- Internal stages for artifacts
+USE SCHEMA SNOW_MLOPS_DEV.ML;
+CREATE STAGE IF NOT EXISTS ML_ARTIFACTS
+    ENCRYPTION = (TYPE = 'SNOWFLAKE_SSE');
+CREATE STAGE IF NOT EXISTS DAG_STAGE
+    ENCRYPTION = (TYPE = 'SNOWFLAKE_SSE');
+CREATE STAGE IF NOT EXISTS JOB_STAGE
+    ENCRYPTION = (TYPE = 'SNOWFLAKE_SSE');
+
+-- Grant privileges
+GRANT EXECUTE TASK ON ACCOUNT TO ROLE ACCOUNTADMIN;
+GRANT EXECUTE MANAGED TASK ON ACCOUNT TO ROLE ACCOUNTADMIN;
+GRANT BIND SERVICE ENDPOINT ON ACCOUNT TO ROLE ACCOUNTADMIN;
+"
+
+echo "=== Infrastructure setup complete ==="
+echo "Database:      SNOW_MLOPS_DEV"
+echo "Schema:        SNOW_MLOPS_DEV.ML"
+echo "Warehouse:     SNOW_MLOPS_DEV_WH"
+echo "Compute Pool:  SNOW_MLOPS_DEV_POOL"
+echo "Stages:        ML_ARTIFACTS, DAG_STAGE, JOB_STAGE"

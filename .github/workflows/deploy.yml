@@ -1,0 +1,37 @@
+name: Deploy to Production
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  SNOWFLAKE_ACCOUNT: SFSENORTHAMERICA-TBSMITH-AWS1
+  SNOWFLAKE_DATABASE: SNOW_MLOPS_PROD
+  SNOWFLAKE_SCHEMA: ML
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Snowflake CLI
+        uses: snowflakedb/snowflake-actions@v3
+        with:
+          use-oidc: true
+
+      - name: Test Snowflake Connection
+        run: snow connection test -x
+
+      - name: Verify prod database access
+        run: |
+          snow sql -q "SELECT CURRENT_USER(), CURRENT_ROLE(), CURRENT_DATABASE()" -x
+
+      # Future: Add MLOps deployment steps here
+      # - snow sql -f scripts/setup_prod.sql -x
+      # - Deploy model pipeline to SNOW_MLOPS_PROD

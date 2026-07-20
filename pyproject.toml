@@ -1,0 +1,23 @@
+[project]
+name = "snowflake-mlops"
+version = "0.1.0"
+description = "End-to-end MLOps pipeline on Snowflake: Feature Store, ML Jobs, Model Registry, SPCS Inference"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "llvmlite>=0.48.0",
+    "snowflake-ml-python>=1.47.0",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.11.0",
+    "pytest>=8.0",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
