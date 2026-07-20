@@ -48,6 +48,4 @@ jobs:
 
       - name: Run STAGE ML Pipeline (train + register + replicate)
         run: uv run python scripts/run_stage_pipeline.py
-        env:
-          SNOWFLAKE_CONNECTION_NAME: ""
         timeout-minutes: 20

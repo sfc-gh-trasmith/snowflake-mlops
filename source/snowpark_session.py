@@ -207,6 +207,9 @@ def create_snowpark_session(connection_name: Optional[str] = None) -> Session:
     Handles all authentication methods (password, externalbrowser, private_key,
     token, etc.) and filters config to only keys that Snowpark accepts.
 
+    In CI environments (GitHub Actions with OIDC), detects SNOWFLAKE_TOKEN and
+    SNOWFLAKE_AUTHENTICATOR env vars and uses those directly.
+
     Args:
         connection_name: Explicit connection name. If None, resolved from env
             vars, TOML defaults, or agent settings.
@@ -214,6 +217,24 @@ def create_snowpark_session(connection_name: Optional[str] = None) -> Session:
     Returns:
         A connected Snowpark Session.
     """
+    # CI/OIDC detection: if SNOWFLAKE_TOKEN and SNOWFLAKE_ACCOUNT are set,
+    # use env vars directly (GitHub Actions snowflake-actions@v3 sets these)
+    if os.getenv("SNOWFLAKE_TOKEN") and os.getenv("SNOWFLAKE_ACCOUNT"):
+        config = {
+            "account": os.environ["SNOWFLAKE_ACCOUNT"],
+            "token": os.environ["SNOWFLAKE_TOKEN"],
+            "authenticator": "oauth",
+        }
+        if os.getenv("SNOWFLAKE_DATABASE"):
+            config["database"] = os.environ["SNOWFLAKE_DATABASE"]
+        if os.getenv("SNOWFLAKE_SCHEMA"):
+            config["schema"] = os.environ["SNOWFLAKE_SCHEMA"]
+        if os.getenv("SNOWFLAKE_WAREHOUSE"):
+            config["warehouse"] = os.environ["SNOWFLAKE_WAREHOUSE"]
+        if os.getenv("SNOWFLAKE_ROLE"):
+            config["role"] = os.environ["SNOWFLAKE_ROLE"]
+        return Session.builder.configs(config).create()
+
     snowflake_home = Path(os.environ.get("SNOWFLAKE_HOME", "~/.snowflake")).expanduser()
 
     all_connections, default_name = _load_all_connections(snowflake_home)
