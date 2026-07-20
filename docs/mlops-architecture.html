@@ -102,70 +102,35 @@
   <section id="architecture">
     <h2>Architecture</h2>
 
-    <h3>MLOps Lifecycle Flow</h3>
-    <p>The complete MLOps workflow within this project, from raw data to production inference:</p>
+    <h3>DEV Environment</h3>
+    <p>Local experimentation and full-cycle testing:</p>
     <pre class="mermaid">
-flowchart TB
-    subgraph data_layer [Data Layer - SNOW_MLOPS_PROD.ML]
-        direction LR
-        RAW_TXN[RAW_TRANSACTIONS]
-        CUST_PROF[CUSTOMER_PROFILES]
-        MERCH[MERCHANT_DATA]
-    end
+flowchart LR
+    PROD_DATA[(PROD Source Data)] --> FS[Feature Store]
+    FS --> TRAIN[Train on DEV_POOL]
+    TRAIN --> REG[Register Model]
+    REG --> SVC[Deploy Service]
+    SVC --> GW[REST Gateway]
+    </pre>
 
-    subgraph feature_eng [Feature Engineering]
-        direction LR
-        FS[Snowflake Feature Store]
-        DT1[CUSTOMER_RISK_FEATURES DT]
-        DT2[TRANSACTION_CONTEXT_FEATURES DT]
-        FS --> DT1
-        FS --> DT2
-    end
+    <h3>STAGE Environment</h3>
+    <p>Automated CI validation on merge to main:</p>
+    <pre class="mermaid">
+flowchart LR
+    PROD_DATA[(PROD Source Data)] --> FS[Feature Store]
+    FS --> TRAIN[Train on STAGE_POOL]
+    TRAIN --> REG[Register Model]
+    REG -->|"CREATE MODEL...FROM MODEL"| COPY[Replicate to PROD]
+    </pre>
 
-    subgraph training [Model Training - Compute Pool]
-        direction LR
-        REMOTE[ML Job - CPU_X64_M]
-        CV[5-Fold Stratified CV]
-        XGB[XGBoost Classifier]
-        REMOTE --> CV --> XGB
-    end
-
-    subgraph evaluation [Evaluation + Quality Gate]
-        direction LR
-        METRICS[AUC-ROC / Precision / Recall / F1]
-        GATE{Quality Gate}
-        METRICS --> GATE
-    end
-
-    subgraph registry [Model Registry]
-        direction LR
-        REG_STAGE[STAGE: MLOPS_FRAUD_DETECTOR/V1]
-        REG_PROD[PROD: Model Replica]
-        REG_STAGE -->|"CREATE MODEL...FROM MODEL"| REG_PROD
-    end
-
-    subgraph serving [Production Serving - SPCS]
-        direction LR
-        SVC[SPCS Inference Service]
-        GW[REST Gateway]
-        SVC --> GW
-    end
-
-    subgraph cicd [CI/CD - GitHub Actions]
-        direction LR
-        PR[PR Checks]
-        STAGE_WF[STAGE Deploy - auto]
-        PROD_WF[PROD Deploy - manual]
-        PR --> STAGE_WF --> PROD_WF
-    end
-
-    data_layer -->|"read-only"| feature_eng
-    feature_eng -->|"training data"| training
-    training --> evaluation
-    GATE -->|pass| registry
-    registry --> serving
-    cicd -.->|"orchestrates"| training
-    cicd -.->|"orchestrates"| serving
+    <h3>PROD Environment</h3>
+    <p>Production serving only (no training):</p>
+    <pre class="mermaid">
+flowchart LR
+    MODEL[(Replicated Model)] --> DEPLOY[Deploy Service]
+    DEPLOY --> SVC[SPCS Inference]
+    SVC --> GW[REST Gateway]
+    GW --> CLIENT[API Clients]
     </pre>
 
     <h3>Environment Promotion Pipeline</h3>
