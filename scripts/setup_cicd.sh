@@ -84,3 +84,41 @@ echo "     for the actual subject claim and update the user's WORKLOAD_IDENTITY"
 echo ""
 echo "To find your GitHub owner/repo IDs:"
 echo "  curl -s https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO} | jq '.id, .owner.id'"
+
+# =============================================================================
+# Step 4: GitHub Branch Protection & Repo Settings
+# Requires: gh CLI authenticated with repo admin access
+# =============================================================================
+echo ""
+echo "=== Setting up GitHub branch protection ==="
+
+# Require PRs to main (no direct pushes), status checks must pass, 1 reviewer
+gh api "repos/${GITHUB_OWNER}/${GITHUB_REPO}/branches/main/protection" -X PUT --input - <<'PROTECTION'
+{
+  "required_status_checks": {
+    "strict": true,
+    "contexts": ["lint-and-test"]
+  },
+  "enforce_admins": false,
+  "required_pull_request_reviews": {
+    "required_approving_review_count": 1,
+    "dismiss_stale_reviews": true
+  },
+  "restrictions": null,
+  "allow_force_pushes": false,
+  "allow_deletions": false
+}
+PROTECTION
+
+# Create GitHub Environments with protection rules
+gh api "repos/${GITHUB_OWNER}/${GITHUB_REPO}/environments/STAGE" -X PUT --input - <<< '{}'
+gh api "repos/${GITHUB_OWNER}/${GITHUB_REPO}/environments/PROD" -X PUT --input - <<< '{"reviewers":[{"type":"User","id":'"$(gh api user --jq '.id')"'}]}'
+
+echo ""
+echo "=== Branch protection configured ==="
+echo "  - PRs required to merge to main (no direct pushes)"
+echo "  - Status check 'lint-and-test' must pass"
+echo "  - 1 approving review required"
+echo "  - Stale reviews dismissed on new pushes"
+echo "  - Force pushes and branch deletion blocked"
+echo "  - PROD environment requires reviewer approval"
