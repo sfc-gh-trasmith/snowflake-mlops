@@ -9,15 +9,15 @@ permissions:
   contents: read
 
 env:
-  SNOWFLAKE_ACCOUNT: SFSENORTHAMERICA-TBSMITH-AWS1
+  SNOWFLAKE_ACCOUNT: ${{ vars.SNOWFLAKE_ACCOUNT }}
 
 jobs:
   deploy-stage:
     runs-on: ubuntu-latest
     environment: STAGE
     env:
-      SNOWFLAKE_DATABASE: SNOW_MLOPS_STAGE
-      SNOWFLAKE_SCHEMA: ML
+      SNOWFLAKE_DATABASE: ${{ vars.SNOWFLAKE_DATABASE_STAGE }}
+      SNOWFLAKE_SCHEMA: ${{ vars.SNOWFLAKE_SCHEMA }}
     steps:
       - uses: actions/checkout@v4
 
