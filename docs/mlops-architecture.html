@@ -102,6 +102,107 @@
   <section id="architecture">
     <h2>Architecture</h2>
 
+    <h3>MLOps Lifecycle Flow</h3>
+    <p>The complete MLOps workflow within this project, from raw data to production inference:</p>
+    <pre class="mermaid">
+flowchart TB
+    subgraph data_layer [Data Layer - SNOW_MLOPS_PROD.ML]
+        direction LR
+        RAW_TXN[RAW_TRANSACTIONS<br/>100K rows]
+        CUST_PROF[CUSTOMER_PROFILES<br/>5K customers]
+        MERCH[MERCHANT_DATA<br/>500 merchants]
+    end
+
+    subgraph feature_eng [Feature Engineering]
+        direction LR
+        FS[Snowflake Feature Store]
+        DT1["Dynamic Table:<br/>CUSTOMER_RISK_FEATURES"]
+        DT2["Dynamic Table:<br/>TRANSACTION_CONTEXT_FEATURES"]
+        FS --> DT1
+        FS --> DT2
+    end
+
+    subgraph training [Model Training - Compute Pool]
+        direction LR
+        REMOTE["@remote ML Job<br/>CPU_X64_M"]
+        CV["5-Fold Stratified CV"]
+        XGB["XGBoost Classifier<br/>scale_pos_weight=33"]
+        REMOTE --> CV --> XGB
+    end
+
+    subgraph evaluation [Evaluation + Quality Gate]
+        direction LR
+        METRICS["Metrics:<br/>AUC-ROC, Precision,<br/>Recall, F1"]
+        GATE{"Quality Gate<br/>AUC >= 0.85?<br/>Precision >= 0.70?"}
+        METRICS --> GATE
+    end
+
+    subgraph registry [Model Registry]
+        direction LR
+        REG_STAGE["STAGE Registry<br/>MLOPS_FRAUD_DETECTOR/V1"]
+        REG_PROD["PROD Registry<br/>(replicated)"]
+        REG_STAGE -->|"CREATE MODEL...FROM MODEL"| REG_PROD
+    end
+
+    subgraph serving [Production Serving - SPCS]
+        direction LR
+        SVC["Inference Service<br/>max_instances=2"]
+        GW["REST Gateway<br/>ingress_enabled=True"]
+        SVC --> GW
+    end
+
+    subgraph cicd [CI/CD - GitHub Actions]
+        direction LR
+        PR["PR Checks<br/>lint/format/test"]
+        STAGE_WF["STAGE Deploy<br/>(auto on merge)"]
+        PROD_WF["PROD Deploy<br/>(manual dispatch)"]
+        PR --> STAGE_WF --> PROD_WF
+    end
+
+    data_layer -->|"read-only"| feature_eng
+    feature_eng -->|"training data"| training
+    training --> evaluation
+    GATE -->|pass| registry
+    registry --> serving
+    cicd -.->|"orchestrates"| training
+    cicd -.->|"orchestrates"| serving
+    </pre>
+
+    <h3>Environment Promotion Pipeline</h3>
+    <p>How code and models flow through environments with approval gates:</p>
+    <pre class="mermaid">
+flowchart LR
+    subgraph developer [Developer Workflow]
+        CODE[Write Code] --> BRANCH[Feature Branch]
+        BRANCH --> PROPEN[Open PR]
+    end
+
+    subgraph checks [Automated Checks]
+        LINT[Ruff Lint]
+        FMT[Ruff Format]
+        TEST[Pytest]
+        PROPEN --> LINT --> FMT --> TEST
+    end
+
+    subgraph stage_env [STAGE Environment]
+        MERGE[Merge to main]
+        S_TRAIN["Train Model<br/>(STAGE_POOL)"]
+        S_REG[Register Model]
+        S_COPY["Replicate to PROD"]
+        TEST -->|"approved"| MERGE
+        MERGE -->|"auto-trigger"| S_TRAIN
+        S_TRAIN --> S_REG --> S_COPY
+    end
+
+    subgraph prod_env [PROD Environment]
+        APPROVE["Manual Approval<br/>(workflow_dispatch)"]
+        P_DEPLOY[Deploy Service]
+        P_READY["Service READY<br/>REST Gateway Live"]
+        S_COPY -->|"model in PROD"| APPROVE
+        APPROVE --> P_DEPLOY --> P_READY
+    end
+    </pre>
+
     <h3>Multi-Environment Data Flow</h3>
     <pre class="mermaid">
 flowchart TD
