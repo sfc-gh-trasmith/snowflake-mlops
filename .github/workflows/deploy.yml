@@ -1,9 +1,8 @@
-name: Deploy to Stage
+name: Deploy
 
 on:
   push:
-    branches: [stage]
-  workflow_dispatch:
+    branches: [main]
 
 permissions:
   id-token: write
@@ -11,12 +10,14 @@ permissions:
 
 env:
   SNOWFLAKE_ACCOUNT: SFSENORTHAMERICA-TBSMITH-AWS1
-  SNOWFLAKE_DATABASE: SNOW_MLOPS_STAGE
-  SNOWFLAKE_SCHEMA: ML
 
 jobs:
   deploy-stage:
     runs-on: ubuntu-latest
+    environment: STAGE
+    env:
+      SNOWFLAKE_DATABASE: SNOW_MLOPS_STAGE
+      SNOWFLAKE_SCHEMA: ML
     steps:
       - uses: actions/checkout@v4
 
@@ -28,7 +29,7 @@ jobs:
       - name: Test Snowflake Connection
         run: snow connection test -x
 
-      # Future: Add STAGE deployment steps here
+      # Future: STAGE deployment steps
       # - Feature Store refresh
       # - Model training + evaluation
-      # - Integration tests against STAGE
+      # - Integration tests
