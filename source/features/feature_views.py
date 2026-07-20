@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from config import DATABASE, SCHEMA, WAREHOUSE
+from config import DATABASE, SCHEMA, WAREHOUSE, SOURCE_DATABASE, SOURCE_SCHEMA
 from snowpark_session import create_snowpark_session
 
 from snowflake.ml.feature_store import FeatureStore, FeatureView, Entity, CreationMode
@@ -19,8 +19,8 @@ import snowflake.snowpark.functions as F
 
 def create_customer_features_df(session: Session):
     """Build Snowpark DataFrame for customer-level risk features."""
-    txn = session.table(f"{DATABASE}.{SCHEMA}.RAW_TRANSACTIONS")
-    cust = session.table(f"{DATABASE}.{SCHEMA}.CUSTOMER_PROFILES")
+    txn = session.table(f"{SOURCE_DATABASE}.{SOURCE_SCHEMA}.RAW_TRANSACTIONS")
+    cust = session.table(f"{SOURCE_DATABASE}.{SOURCE_SCHEMA}.CUSTOMER_PROFILES")
 
     # Aggregate features per customer (latest snapshot)
     customer_agg = txn.group_by("CUSTOMER_ID").agg(
@@ -60,8 +60,8 @@ def create_customer_features_df(session: Session):
 
 def create_transaction_features_df(session: Session):
     """Build Snowpark DataFrame for transaction-level context features."""
-    txn = session.table(f"{DATABASE}.{SCHEMA}.RAW_TRANSACTIONS")
-    merch = session.table(f"{DATABASE}.{SCHEMA}.MERCHANT_DATA")
+    txn = session.table(f"{SOURCE_DATABASE}.{SOURCE_SCHEMA}.RAW_TRANSACTIONS")
+    merch = session.table(f"{SOURCE_DATABASE}.{SOURCE_SCHEMA}.MERCHANT_DATA")
     cust_avg = txn.group_by("CUSTOMER_ID").agg(F.avg("AMOUNT").alias("CUST_AVG_AMOUNT"))
 
     features = (

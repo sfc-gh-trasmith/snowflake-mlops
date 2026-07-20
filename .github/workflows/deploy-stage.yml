@@ -1,0 +1,34 @@
+name: Deploy to Stage
+
+on:
+  push:
+    branches: [stage]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  SNOWFLAKE_ACCOUNT: SFSENORTHAMERICA-TBSMITH-AWS1
+  SNOWFLAKE_DATABASE: SNOW_MLOPS_STAGE
+  SNOWFLAKE_SCHEMA: ML
+
+jobs:
+  deploy-stage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Snowflake CLI
+        uses: snowflakedb/snowflake-actions@v3
+        with:
+          use-oidc: true
+
+      - name: Test Snowflake Connection
+        run: snow connection test -x
+
+      # Future: Add STAGE deployment steps here
+      # - Feature Store refresh
+      # - Model training + evaluation
+      # - Integration tests against STAGE

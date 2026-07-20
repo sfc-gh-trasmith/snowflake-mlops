@@ -24,9 +24,6 @@ from config import (
     DATABASE,
     SCHEMA,
     WAREHOUSE,
-    CUSTOMER_PROFILES_TABLE,
-    MERCHANT_DATA_TABLE,
-    RAW_TRANSACTIONS_TABLE,
 )
 from snowpark_session import create_snowpark_session
 
@@ -211,8 +208,11 @@ def _daytime_probs():
     return [w / total for w in weights]
 
 
-def upload_to_snowflake(session, df: pd.DataFrame, table_name: str):
+def upload_to_snowflake(session, df: pd.DataFrame, table_name: str, database: str = None, schema: str = None):
     """Write pandas DataFrame to Snowflake table."""
+    db = database or DATABASE
+    sch = schema or SCHEMA
+
     session.sql(f"USE WAREHOUSE {WAREHOUSE}").collect()
 
     # Convert datetime columns to string for proper TIMESTAMP handling
@@ -221,19 +221,20 @@ def upload_to_snowflake(session, df: pd.DataFrame, table_name: str):
         df_copy[col] = df_copy[col].dt.strftime("%Y-%m-%d %H:%M:%S")
 
     tbl_short = table_name.split(".")[-1]
-    session.write_pandas(df_copy, tbl_short, database=DATABASE, schema=SCHEMA, auto_create_table=True, overwrite=True)
+    session.write_pandas(df_copy, tbl_short, database=db, schema=sch, auto_create_table=True, overwrite=True)
 
     # Fix TIMESTAMP columns (write_pandas stores datetime-as-string as VARCHAR)
+    fqn = f"{db}.{sch}.{tbl_short}"
     if "TIMESTAMP" in df.columns:
         session.sql(f"""
-            CREATE OR REPLACE TABLE {table_name} AS
+            CREATE OR REPLACE TABLE {fqn} AS
             SELECT * EXCLUDE (TIMESTAMP),
                    TO_TIMESTAMP_NTZ(TIMESTAMP) AS TIMESTAMP
-            FROM {table_name}
+            FROM {fqn}
         """).collect()
 
-    count = session.table(table_name).count()
-    print(f"  {table_name}: {count:,} rows")
+    count = session.table(fqn).count()
+    print(f"  {fqn}: {count:,} rows")
 
 
 def main():
@@ -251,15 +252,23 @@ def main():
 
     print("\nConnecting to Snowflake...")
     session = create_snowpark_session()
-    session.sql(f"USE DATABASE {DATABASE}").collect()
-    session.sql(f"USE SCHEMA {SCHEMA}").collect()
 
-    print("Uploading tables...")
-    upload_to_snowflake(session, customers, CUSTOMER_PROFILES_TABLE)
-    upload_to_snowflake(session, merchants, MERCHANT_DATA_TABLE)
-    upload_to_snowflake(session, transactions, RAW_TRANSACTIONS_TABLE)
+    # Upload to both DEV and PROD environments
+    environments = [
+        ("SNOW_MLOPS_DEV", "ML"),
+        ("SNOW_MLOPS_PROD", "ML"),
+    ]
 
-    print("\nDataset generation complete!")
+    for db, schema in environments:
+        print(f"\nUploading to {db}.{schema}...")
+        session.sql(f"USE DATABASE {db}").collect()
+        session.sql(f"USE SCHEMA {schema}").collect()
+
+        upload_to_snowflake(session, customers, f"{db}.{schema}.CUSTOMER_PROFILES", database=db, schema=schema)
+        upload_to_snowflake(session, merchants, f"{db}.{schema}.MERCHANT_DATA", database=db, schema=schema)
+        upload_to_snowflake(session, transactions, f"{db}.{schema}.RAW_TRANSACTIONS", database=db, schema=schema)
+
+    print("\nDataset generation complete (DEV + PROD)!")
     session.close()
 
 

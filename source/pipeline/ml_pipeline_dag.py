@@ -47,17 +47,17 @@ def prepare_data(session: Session) -> str:
     ctx = TaskContext(session)
     cfg = ctx.get_task_graph_config()
 
-    db = cfg["database"]
-    schema = cfg["schema"]
+    src_db = cfg["source_database"]
+    src_schema = cfg["source_schema"]
 
-    # Check tables exist and have data
+    # Check source tables exist and have data (read from PROD)
     tables = ["RAW_TRANSACTIONS", "CUSTOMER_PROFILES", "MERCHANT_DATA"]
     summary = {}
     for table in tables:
-        count = session.sql(f"SELECT COUNT(*) FROM {db}.{schema}.{table}").collect()[0][0]
+        count = session.sql(f"SELECT COUNT(*) FROM {src_db}.{src_schema}.{table}").collect()[0][0]
         summary[table] = count
         if count == 0:
-            raise ValueError(f"Table {db}.{schema}.{table} is empty!")
+            raise ValueError(f"Table {src_db}.{src_schema}.{table} is empty!")
 
     ctx.set_return_value(json.dumps({"status": "ready", "table_counts": summary}))
     return json.dumps(summary)

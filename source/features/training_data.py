@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from config import DATABASE, SCHEMA, WAREHOUSE
+from config import DATABASE, SCHEMA, WAREHOUSE, SOURCE_DATABASE, SOURCE_SCHEMA
 from snowpark_session import create_snowpark_session
 
 from snowflake.ml.feature_store import FeatureStore, CreationMode
@@ -34,10 +34,8 @@ def generate_training_data(session=None):
     # Get feature views
     cust_fv = fs.get_feature_view("CUSTOMER_RISK_FEATURES", "V1")
 
-    # Build spine: TXN_ID + CUSTOMER_ID (entity keys) + timestamp + label
-    # We use two separate generate_dataset calls to avoid ambiguity,
-    # or we can build a single spine with both entity keys.
-    spine = session.table(f"{DATABASE}.{SCHEMA}.RAW_TRANSACTIONS").select(
+    # Build spine from source tables (PROD) -- labels + entity keys
+    spine = session.table(f"{SOURCE_DATABASE}.{SOURCE_SCHEMA}.RAW_TRANSACTIONS").select(
         F.col("TXN_ID"),
         F.col("CUSTOMER_ID"),
         F.col("TIMESTAMP"),
