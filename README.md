@@ -1,12 +1,16 @@
-# Snowflake MLOps: Fraud Detection
+# Snowflake MLOps Framework
 
-End-to-end MLOps pipeline for real-time fraud detection on Snowflake. Demonstrates Feature Store, ML Jobs, Model Registry, SPCS inference with Gateway, and CI/CD via GitHub Actions.
+A reference template for building production-grade MLOps pipelines on Snowflake. This framework demonstrates how to take any ML use case from experimentation to production using Snowflake-native services -- no external ML infrastructure required.
+
+The included demo uses a fraud detection classifier (XGBoost), but the pattern applies to any ML use case: churn prediction, demand forecasting, recommendation systems, etc. Swap the data and model code; the infrastructure, CI/CD, and deployment patterns remain the same.
 
 ## Architecture
 
 ```
 DEV (experiment) → STAGE (automated CI) → PROD (serving via Gateway)
 ```
+
+**Environment separation is at the database level within a single Snowflake account.** Each environment (DEV, STAGE, PROD) is its own database with isolated resources (warehouses, compute pools, models, services). This keeps things simple while providing clear RBAC boundaries.
 
 | Component | Snowflake Service |
 |-----------|------------------|
@@ -147,6 +151,24 @@ SNOWFLAKE_CONNECTION_NAME=$YOUR_CONNECTION uv run python scripts/deploy_prod_ser
 # Run endpoint integration tests
 SNOWFLAKE_CONNECTION_NAME=$YOUR_CONNECTION uv run pytest tests/test_endpoint.py -v
 ```
+
+## Environment Strategy
+
+| Environment | Database | Purpose | Training | Serving |
+|-------------|----------|---------|----------|--------|
+| DEV | `SNOW_MLOPS_DEV` | Developer experimentation | Yes | Optional |
+| STAGE | `SNOW_MLOPS_STAGE` | Automated CI validation | Yes | Never |
+| PROD | `SNOW_MLOPS_PROD` | Production serving | Never | Always (Gateway) |
+
+All environments live in a **single Snowflake account** with database-level isolation. Source data always resides in PROD; DEV and STAGE read from it for training but write artifacts to their own databases.
+
+## Future Work
+
+- Multi-account MLOps (separate accounts per environment)
+- Cross-region model replication
+- A/B testing via Gateway traffic splitting (canary deployments)
+- Online Feature Store with Snowflake Postgres
+- Model monitoring and drift detection
 
 ## Documentation
 
