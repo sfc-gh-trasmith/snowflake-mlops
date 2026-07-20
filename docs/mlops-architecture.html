@@ -136,78 +136,28 @@ flowchart LR
     <h3>Environment Promotion Pipeline</h3>
     <p>How code and models flow through environments with approval gates:</p>
     <pre class="mermaid">
-flowchart LR
-    subgraph developer [Developer Workflow]
-        CODE[Write Code] --> BRANCH[Feature Branch]
-        BRANCH --> PROPEN[Open PR]
-    end
-
-    subgraph checks [Automated Checks]
-        LINT[Ruff Lint]
-        FMT[Ruff Format]
-        TEST[Pytest]
-        PROPEN --> LINT --> FMT --> TEST
-    end
-
-    subgraph stage_env [STAGE Environment]
-        MERGE[Merge to main]
-        S_TRAIN[Train on STAGE_POOL]
-        S_REG[Register Model]
-        S_COPY["Replicate to PROD"]
-        TEST -->|"approved"| MERGE
-        MERGE -->|"auto-trigger"| S_TRAIN
-        S_TRAIN --> S_REG --> S_COPY
-    end
-
-    subgraph prod_env [PROD Environment]
-        APPROVE[Manual Approval]
-        P_DEPLOY[Deploy Service]
-        P_READY[Service READY]
-        S_COPY -->|"model in PROD"| APPROVE
-        APPROVE --> P_DEPLOY --> P_READY
-    end
-    </pre>
-
-    <h3>Multi-Environment Data Flow</h3>
-    <pre class="mermaid">
 flowchart TD
-    subgraph source [Source Data - SNOW_MLOPS_PROD.ML]
-        RAW[RAW_TRANSACTIONS]
-        CUST[CUSTOMER_PROFILES]
-        MERCH[MERCHANT_DATA]
-    end
+    CODE[Write Code] --> BRANCH[Feature Branch]
+    BRANCH --> PROPEN[Open PR]
 
-    subgraph dev [DEV - SNOW_MLOPS_DEV]
-        DEV_FS[Feature Store]
-        DEV_EXP[Experiments]
-        DEV_REG[Model Registry]
-        DEV_SVC[Inference Service]
-    end
+    PROPEN --> LINT[Ruff Lint]
+    LINT --> FMT[Ruff Format]
+    FMT --> TEST[Pytest]
 
-    subgraph stage [STAGE - SNOW_MLOPS_STAGE]
-        STG_FS[Feature Store]
-        STG_REG[Model Registry]
-    end
+    TEST -->|"approved + merged"| MERGE[Merge to main]
 
-    subgraph prod [PROD - SNOW_MLOPS_PROD]
-        PROD_MODEL["Model (replica)"]
-        PROD_SVC[Inference Service]
-        PROD_GW[REST Gateway]
-    end
+    MERGE -->|"auto-trigger"| S_TRAIN[Train on STAGE_POOL]
+    S_TRAIN --> S_REG[Register Model in STAGE]
+    S_REG --> S_COPY[Replicate Model to PROD]
 
-    RAW -->|read| DEV_FS
-    CUST -->|read| DEV_FS
-    RAW -->|read| STG_FS
-    CUST -->|read| STG_FS
-
-    DEV_FS --> DEV_REG
-    DEV_REG --> DEV_SVC
-
-    STG_FS --> STG_REG
-    STG_REG -->|"CREATE MODEL...FROM MODEL"| PROD_MODEL
-    PROD_MODEL --> PROD_SVC
-    PROD_SVC --> PROD_GW
+    S_COPY -->|"manual approval"| P_DEPLOY[Deploy PROD Service]
+    P_DEPLOY --> P_SVC[SPCS Inference Service]
+    P_SVC --> P_GW[REST Gateway Live]
     </pre>
+
+    <div class="highlight">
+      <strong>Promotion gates:</strong> PR checks must pass before merge. STAGE deploys automatically on merge. PROD requires a manual <code>workflow_dispatch</code> trigger with reviewer approval.
+    </div>
 
     <h3>CI/CD Deployment Flow</h3>
     <pre class="mermaid">
