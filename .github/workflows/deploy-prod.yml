@@ -17,6 +17,8 @@ jobs:
     env:
       SNOWFLAKE_DATABASE: ${{ vars.SNOWFLAKE_DATABASE_PROD }}
       SNOWFLAKE_SCHEMA: ${{ vars.SNOWFLAKE_SCHEMA }}
+      SNOWFLAKE_USER: ${{ vars.SNOWFLAKE_USER_PROD }}
+      SNOWFLAKE_ROLE: ACCOUNTADMIN
       TOPOLOGY: ${{ vars.TOPOLOGY || 'single-account' }}
     steps:
       - uses: actions/checkout@v4

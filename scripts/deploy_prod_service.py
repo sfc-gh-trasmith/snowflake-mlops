@@ -34,21 +34,46 @@ READY_POLL_INTERVAL = 15
 
 
 def get_current_gateway_target(session):
-    """Get the current service target from the gateway spec."""
-    rows = session.sql(f"DESC GATEWAY {PROD_DATABASE}.{PROD_SCHEMA}.{GATEWAY_NAME}").collect()
+    """Get the current service target from the gateway spec. Returns None if gateway doesn't exist."""
+    try:
+        rows = session.sql(f"DESC GATEWAY {PROD_DATABASE}.{PROD_SCHEMA}.{GATEWAY_NAME}").collect()
+    except Exception:
+        return None
     if not rows:
         return None
     spec = rows[0]["spec"]
-    # Parse the target service name from the YAML spec
     for line in spec.split("\n"):
         line = line.strip()
         if line.startswith("value:"):
-            # value: SNOW_MLOPS_PROD.ML.MLOPS_FRAUD_DETECTOR_SERVICE_V2!inference
             full_value = line.split("value:")[1].strip()
             service_fqn = full_value.split("!")[0].strip()
-            # Return just the service name (last part)
             return service_fqn.split(".")[-1]
     return None
+
+
+def ensure_gateway_exists(session, service_name):
+    """Create the gateway if it doesn't exist, pointing to the given service."""
+    try:
+        session.sql(f"DESC GATEWAY {PROD_DATABASE}.{PROD_SCHEMA}.{GATEWAY_NAME}").collect()
+        return  # Already exists
+    except Exception:
+        pass
+
+    print(f"  Creating gateway: {GATEWAY_NAME}")
+    fqn = f"{PROD_DATABASE}.{PROD_SCHEMA}.{service_name}!inference"
+    session.sql(f"""
+        CREATE GATEWAY {PROD_DATABASE}.{PROD_SCHEMA}.{GATEWAY_NAME}
+        FROM SPECIFICATION $$
+          spec:
+            type: traffic_split
+            split_type: custom
+            targets:
+              - type: endpoint
+                value: {fqn}
+                weight: 100
+        $$
+    """).collect()
+    print(f"  Gateway created.")
 
 
 def wait_for_service_ready(session, service_name, timeout=READY_TIMEOUT_SECONDS):
@@ -200,6 +225,7 @@ def main():
 
     # Step 6: Shift gateway traffic + cleanup
     print(f"\n[6/6] Shifting gateway traffic to {new_service_name}...")
+    ensure_gateway_exists(session, new_service_name)
     shift_gateway_traffic(session, new_service_name)
     print("  Gateway updated! 100% traffic now routes to new service.")
 
