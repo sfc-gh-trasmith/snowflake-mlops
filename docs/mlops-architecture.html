@@ -504,7 +504,7 @@ sequenceDiagram
 <pre><code>-- STAGE service user
 CREATE USER SVC_GITHUB_ACTIONS_STAGE
   TYPE = SERVICE
-  DEFAULT_ROLE = ACCOUNTADMIN
+  DEFAULT_ROLE = MLOPS_DEPLOY_ROLE
   WORKLOAD_IDENTITY = (
     TYPE = OIDC
     ISSUER = 'https://token.actions.githubusercontent.com'
@@ -514,7 +514,7 @@ CREATE USER SVC_GITHUB_ACTIONS_STAGE
 -- PROD service user
 CREATE USER SVC_GITHUB_ACTIONS
   TYPE = SERVICE
-  DEFAULT_ROLE = ACCOUNTADMIN
+  DEFAULT_ROLE = MLOPS_DEPLOY_ROLE
   WORKLOAD_IDENTITY = (
     TYPE = OIDC
     ISSUER = 'https://token.actions.githubusercontent.com'

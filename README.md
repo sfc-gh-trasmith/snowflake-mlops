@@ -26,7 +26,7 @@ DEV (experiment) → STAGE (automated CI) → PROD (serving via Gateway)
 
 ### Prerequisites
 
-- Snowflake account with `ACCOUNTADMIN` role
+- Snowflake account with `ACCOUNTADMIN` role (for initial setup only; CI uses `MLOPS_DEPLOY_ROLE`)
 - Python 3.12+ with [uv](https://docs.astral.sh/uv/) installed
 - GitHub CLI (`gh`) installed
 - Snowflake CLI (`snow`) installed and configured
