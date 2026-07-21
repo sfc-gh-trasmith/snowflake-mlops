@@ -188,56 +188,27 @@ def train_and_register_stage() -> str:
 
 
 def replicate_model_to_prod(session, version: str):
-    """Copy the registered model version from STAGE to PROD."""
-    print(f"\nReplicating model: {STAGE_DATABASE}.{STAGE_SCHEMA}.{MODEL_NAME}/{version}")
-    print(f"  -> {PROD_DATABASE}.{PROD_SCHEMA}.{MODEL_NAME}/{version}")
+    """Copy the registered model version from STAGE to PROD using the active promotion strategy."""
+    import importlib
+    import os
 
-    # Check if model exists in PROD already
-    existing = session.sql(f"SHOW MODELS LIKE '{MODEL_NAME}' IN {PROD_DATABASE}.{PROD_SCHEMA}").collect()
+    topology = os.getenv("TOPOLOGY", "single-account")
+    strategy_map = {
+        "single-account": "deploy.strategies.single_account",
+        "multi-account": "deploy.strategies.multi_account",
+        "cross-region": "deploy.strategies.cross_region",
+    }
 
-    if existing:
-        # Add version to existing model
-        try:
-            session.sql(f"""
-                ALTER MODEL {PROD_DATABASE}.{PROD_SCHEMA}.{MODEL_NAME}
-                  ADD VERSION {version}
-                  FROM MODEL {STAGE_DATABASE}.{STAGE_SCHEMA}.{MODEL_NAME}
-                  VERSION {version}
-            """).collect()
-        except Exception as e:
-            if "already exists" in str(e).lower():
-                print(f"  Version {version} already exists in PROD, dropping and re-adding...")
-                session.sql(f"ALTER MODEL {PROD_DATABASE}.{PROD_SCHEMA}.{MODEL_NAME} DROP VERSION {version}").collect()
-                session.sql(f"""
-                    ALTER MODEL {PROD_DATABASE}.{PROD_SCHEMA}.{MODEL_NAME}
-                      ADD VERSION {version}
-                      FROM MODEL {STAGE_DATABASE}.{STAGE_SCHEMA}.{MODEL_NAME}
-                      VERSION {version}
-                """).collect()
-            else:
-                raise
-    else:
-        # Create model with first version
-        session.sql(f"""
-            CREATE MODEL {PROD_DATABASE}.{PROD_SCHEMA}.{MODEL_NAME}
-              WITH VERSION {version}
-              FROM MODEL {STAGE_DATABASE}.{STAGE_SCHEMA}.{MODEL_NAME}
-              VERSION {version}
-        """).collect()
+    module_path = strategy_map.get(topology, strategy_map["single-account"])
+    print(f"\nPromotion strategy: {topology}")
 
-    # Set as default version in PROD
-    session.sql(f"""
-        ALTER MODEL {PROD_DATABASE}.{PROD_SCHEMA}.{MODEL_NAME}
-          SET DEFAULT_VERSION = {version}
-    """).collect()
+    # Add project root to path for deploy module import
+    project_root = str(Path(__file__).resolve().parent.parent)
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
 
-    # Verify
-    result = session.sql(f"SHOW MODELS LIKE '{MODEL_NAME}' IN {PROD_DATABASE}.{PROD_SCHEMA}").collect()
-    if result:
-        print(f"  Model replicated successfully! Default version: {version}")
-        print(f"  All versions in PROD: {result[0]['versions']}")
-    else:
-        raise RuntimeError("Model replication failed - model not found in PROD")
+    module = importlib.import_module(module_path)
+    module.promote(version=version, session=session)
 
 
 def main():
