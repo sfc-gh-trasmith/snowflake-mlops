@@ -4,198 +4,160 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="snowflake-source" content="cortex-agent-authored" />
-  <title>MLOps on Snowflake - Level 300 Guide</title>
+  <title>MLOps on Snowflake | Snowflake MLOps Framework</title>
   <script type="application/json" id="snowflake-report-metadata">
   {
-    "generated": "2026-07-20",
-    "intent": "Level 300 educational guide explaining MLOps on Snowflake through a real fraud detection implementation",
+    "generated": "2026-07-21",
+    "intent": "MLOps framework documentation for Snowflake - covering Feature Store, ML Jobs, Model Registry, SPCS inference, Gateway deployment, and CI/CD",
     "sections": [
-      { "id": "what-is-mlops", "title": "What is MLOps on Snowflake?", "producerNotes": "Conceptual framing for intermediate audience" },
-      { "id": "feature-store", "title": "Feature Store", "producerNotes": "Dynamic Tables as managed feature pipelines" },
-      { "id": "training", "title": "Model Training", "producerNotes": "ML Jobs with @remote decorator" },
-      { "id": "registry", "title": "Model Registry", "producerNotes": "Versioning, metadata, lineage" },
-      { "id": "serving", "title": "Real-Time Serving", "producerNotes": "SPCS inference + Gateway" },
-      { "id": "promotion", "title": "Multi-Environment Promotion", "producerNotes": "DEV/STAGE/PROD pattern" },
-      { "id": "cicd", "title": "CI/CD Automation", "producerNotes": "GitHub Actions + OIDC" }
+      { "id": "overview", "title": "Overview", "producerNotes": "High-level framework description" },
+      { "id": "feature-store", "title": "Feature Store", "producerNotes": "Dynamic Tables, feature promotion, offline vs online" },
+      { "id": "model-training", "title": "Model Training", "producerNotes": "ML Jobs with @remote decorator on Compute Pools" },
+      { "id": "model-registry", "title": "Model Registry", "producerNotes": "Versioning, auto-increment, cross-DB replication" },
+      { "id": "inference", "title": "Real-Time Inference", "producerNotes": "SPCS service deployment and Gateway" },
+      { "id": "promotion", "title": "Environment Promotion", "producerNotes": "DEV/STAGE/PROD flow with CI/CD" },
+      { "id": "cicd", "title": "CI/CD Infrastructure", "producerNotes": "GitHub Actions, OIDC, network policy" }
     ]
   }
   </script>
   <style>
     :root { color-scheme: light dark; }
     body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      max-width: 1000px; margin: 0 auto; padding: 32px 24px;
-      color: light-dark(#1f2937, #e5e7eb);
-      background: light-dark(#ffffff, #111827);
-      line-height: 1.75;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      max-width: 820px; margin: 0 auto; padding: 40px 24px;
+      color: light-dark(#333, #e0e0e0);
+      background: light-dark(#fff, #1a1a2e);
+      line-height: 1.7;
+      font-size: 15px;
     }
-    h1 { font-size: 2.2rem; margin-bottom: 8px; color: light-dark(#0f172a, #f1f5f9); border-bottom: 3px solid light-dark(#2563eb, #3b82f6); padding-bottom: 12px; }
-    h2 { font-size: 1.6rem; color: light-dark(#1e40af, #93c5fd); margin-top: 56px; border-bottom: 1px solid light-dark(#e2e8f0, #334155); padding-bottom: 8px; }
-    h3 { font-size: 1.2rem; color: light-dark(#374151, #d1d5db); margin-top: 28px; }
-    h4 { font-size: 1rem; color: light-dark(#4b5563, #9ca3af); margin-top: 20px; margin-bottom: 8px; font-weight: 600; }
+    h1 {
+      font-size: 1.8rem; font-weight: 600; margin: 0 0 8px;
+      color: light-dark(#1a1a1a, #f0f0f0);
+    }
+    h2 {
+      font-size: 1.4rem; font-weight: 600; margin: 48px 0 16px;
+      color: light-dark(#1a1a1a, #f0f0f0);
+      border-bottom: 1px solid light-dark(#e5e5e5, #333);
+      padding-bottom: 8px;
+    }
+    h3 {
+      font-size: 1.1rem; font-weight: 600; margin: 32px 0 12px;
+      color: light-dark(#1a1a1a, #e0e0e0);
+    }
+    h4 {
+      font-size: 0.95rem; font-weight: 600; margin: 24px 0 8px;
+      color: light-dark(#444, #ccc);
+    }
     p { margin: 12px 0; }
-    a { color: light-dark(#2563eb, #60a5fa); }
+    a { color: light-dark(#0066cc, #6cb4ee); text-decoration: none; }
+    a:hover { text-decoration: underline; }
     code {
-      background: light-dark(#f3f4f6, #1f2937);
-      padding: 2px 6px; border-radius: 4px;
-      font-size: 0.88em;
+      font-family: 'SF Mono', SFMono-Regular, Consolas, 'Liberation Mono', Menlo, monospace;
+      background: light-dark(#f4f4f4, #2a2a3e);
+      padding: 1px 5px; border-radius: 3px;
+      font-size: 0.87em;
     }
     pre {
-      background: light-dark(#f8fafc, #0f172a);
-      border: 1px solid light-dark(#e2e8f0, #334155);
-      border-radius: 8px; padding: 16px;
-      overflow-x: auto; font-size: 0.84em; line-height: 1.5;
+      background: light-dark(#f6f8fa, #1e1e30);
+      border: 1px solid light-dark(#e1e4e8, #333);
+      padding: 14px 16px;
+      overflow-x: auto; font-size: 0.84em; line-height: 1.55;
+      border-radius: 4px;
     }
+    pre code { background: none; padding: 0; }
     table { border-collapse: collapse; width: 100%; margin: 16px 0; font-size: 0.9em; }
-    th, td { border: 1px solid light-dark(#d1d5db, #374151); padding: 8px 12px; text-align: left; }
-    th { background: light-dark(#f1f5f9, #1e293b); font-weight: 600; }
-    tr:nth-child(even) { background: light-dark(#f8fafc, #0f172a); }
-    .badge {
-      display: inline-block; padding: 3px 10px; border-radius: 4px;
-      font-size: 0.75em; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;
+    th, td { border: 1px solid light-dark(#ddd, #444); padding: 8px 12px; text-align: left; vertical-align: top; }
+    th { background: light-dark(#f6f8fa, #252540); font-weight: 600; }
+    .note {
+      border-left: 3px solid light-dark(#0066cc, #6cb4ee);
+      padding: 10px 16px; margin: 16px 0;
+      background: light-dark(#f0f7ff, #1a2540);
     }
-    .badge-dev { background: light-dark(#dbeafe, #1e3a5f); color: light-dark(#1d4ed8, #93c5fd); }
-    .badge-stage { background: light-dark(#fef3c7, #422006); color: light-dark(#92400e, #fbbf24); }
-    .badge-prod { background: light-dark(#dcfce7, #052e16); color: light-dark(#166534, #4ade80); }
-    .card {
-      background: light-dark(#f8fafc, #1e293b);
-      border: 1px solid light-dark(#e2e8f0, #334155);
-      border-radius: 12px; padding: 20px; margin: 16px 0;
+    .note strong { display: block; margin-bottom: 4px; }
+    .important {
+      border-left: 3px solid light-dark(#d97706, #fbbf24);
+      padding: 10px 16px; margin: 16px 0;
+      background: light-dark(#fffbeb, #2a2010);
     }
-    .concept {
-      background: light-dark(#faf5ff, #1a0533);
-      border: 1px solid light-dark(#d8b4fe, #6b21a8);
-      border-radius: 10px; padding: 16px 20px; margin: 16px 0;
-    }
-    .concept::before {
-      content: "KEY CONCEPT";
-      display: block; font-size: 0.7em; font-weight: 700; letter-spacing: 1px;
-      color: light-dark(#7c3aed, #a78bfa); margin-bottom: 8px;
-    }
-    .why {
-      background: light-dark(#ecfdf5, #022c22);
-      border: 1px solid light-dark(#6ee7b7, #065f46);
-      border-radius: 10px; padding: 16px 20px; margin: 16px 0;
-    }
-    .why::before {
-      content: "WHY THIS MATTERS";
-      display: block; font-size: 0.7em; font-weight: 700; letter-spacing: 1px;
-      color: light-dark(#059669, #34d399); margin-bottom: 8px;
-    }
-    .pitfall {
-      background: light-dark(#fff7ed, #1c1008);
-      border: 1px solid light-dark(#fdba74, #9a3412);
-      border-radius: 10px; padding: 16px 20px; margin: 16px 0;
-    }
-    .pitfall::before {
-      content: "COMMON PITFALL";
-      display: block; font-size: 0.7em; font-weight: 700; letter-spacing: 1px;
-      color: light-dark(#ea580c, #fb923c); margin-bottom: 8px;
-    }
-    .mermaid { margin: 24px 0; }
-    .subtitle { color: light-dark(#6b7280, #9ca3af); font-size: 1.1rem; margin-top: 4px; }
-    .highlight { background: light-dark(#eff6ff, #172554); border-left: 4px solid light-dark(#2563eb, #3b82f6); padding: 12px 16px; margin: 16px 0; border-radius: 0 8px 8px 0; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; margin: 16px 0; }
-    .toc { background: light-dark(#f8fafc, #1e293b); border-radius: 10px; padding: 20px 24px; margin: 24px 0; }
-    .toc a { text-decoration: none; }
-    .toc a:hover { text-decoration: underline; }
-    .toc ul { list-style: none; padding-left: 16px; margin: 8px 0; }
-    .toc > ul { padding-left: 0; }
-    .compare { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 16px 0; }
-    .compare > div { padding: 16px; border-radius: 8px; }
-    .compare .old { background: light-dark(#fef2f2, #1c0808); border: 1px solid light-dark(#fca5a5, #991b1b); }
-    .compare .new { background: light-dark(#ecfdf5, #022c22); border: 1px solid light-dark(#6ee7b7, #065f46); }
-    @media (max-width: 640px) { .compare { grid-template-columns: 1fr; } }
+    .important strong { display: block; margin-bottom: 4px; }
+    .toc { margin: 24px 0; padding: 0; }
+    .toc li { margin: 6px 0; }
+    .toc a { color: light-dark(#0066cc, #6cb4ee); }
+    .subtitle { color: light-dark(#666, #999); font-size: 0.95rem; margin: 0 0 24px; }
+    .mermaid { margin: 20px 0; }
+    ul, ol { padding-left: 24px; }
+    li { margin: 4px 0; }
+    hr { border: none; border-top: 1px solid light-dark(#e5e5e5, #333); margin: 40px 0; }
   </style>
 </head>
 <body>
 
-  <h1>MLOps on Snowflake</h1>
-  <p class="subtitle">A Level 300 Guide Through a Real Fraud Detection Implementation</p>
+<h1>MLOps on Snowflake</h1>
+<p class="subtitle">Framework documentation for building production ML pipelines using Snowflake-native services.</p>
 
-  <nav class="toc">
-    <strong>Contents</strong>
-    <ul>
-      <li><a href="#what-is-mlops">1. What is MLOps on Snowflake?</a></li>
-      <li><a href="#feature-store">2. Feature Store (Dynamic Tables)</a></li>
-      <li><a href="#training">3. Model Training (ML Jobs)</a></li>
-      <li><a href="#registry">4. Model Registry</a></li>
-      <li><a href="#serving">5. Real-Time Serving (SPCS + Gateway)</a></li>
-      <li><a href="#promotion">6. Multi-Environment Promotion</a></li>
-      <li><a href="#cicd">7. CI/CD Automation (GitHub Actions)</a></li>
-    </ul>
-  </nav>
+<p>This document describes how to build an end-to-end MLOps pipeline on Snowflake using Feature Store (Dynamic Tables), ML Jobs (Compute Pools), Model Registry, SPCS inference services, and Snowflake Gateway for zero-downtime deployments. The framework is demonstrated with a fraud detection use case but applies to any ML problem.</p>
 
-  <!-- ═══════════════════════════════════════════════════════════════ -->
-  <section id="what-is-mlops">
-    <h2>1. What is MLOps on Snowflake?</h2>
+<h4>On this page</h4>
+<ul class="toc">
+  <li><a href="#overview">Overview</a></li>
+  <li><a href="#feature-store">Feature Store</a></li>
+  <li><a href="#model-training">Model Training</a></li>
+  <li><a href="#model-registry">Model Registry</a></li>
+  <li><a href="#inference">Real-Time Inference</a></li>
+  <li><a href="#promotion">Environment Promotion</a></li>
+  <li><a href="#cicd">CI/CD Infrastructure</a></li>
+  <li><a href="#see-also">See also</a></li>
+</ul>
 
-    <p>MLOps is the practice of <strong>operationalizing machine learning</strong> -- making models repeatable, auditable, and automatically deployable. Snowflake provides native services for every step of the ML lifecycle, eliminating the need for external tools like MLflow, SageMaker, or Kubernetes.</p>
+<hr />
 
-    <div class="concept">
-      <strong>The Snowflake ML platform is not a single product</strong> -- it's a set of integrated capabilities that work together: Feature Store (Dynamic Tables), ML Jobs (Compute Pools), Model Registry, SPCS (container services), and Gateways. Each solves one part of the problem. This guide shows how they compose into a complete MLOps pipeline.
-    </div>
+<!-- ================================================================ -->
+<h2 id="overview">Overview</h2>
 
-    <h3>The Use Case: Fraud Detection</h3>
-    <p>We'll trace through a real implementation that scores customer transactions for fraud probability in real-time. The system:</p>
-    <ul>
-      <li>Computes 12 customer-level risk features from transaction history</li>
-      <li>Trains an XGBoost classifier handling 3% class imbalance</li>
-      <li>Serves predictions via REST API with sub-second latency</li>
-      <li>Auto-deploys new model versions with zero downtime</li>
-    </ul>
+<p>The pipeline moves ML models from experimentation to production through three environments. Environment separation is at the database level within a single Snowflake account.</p>
 
-    <h3>End-to-End Architecture</h3>
-    <pre class="mermaid">
+<pre class="mermaid">
 flowchart LR
-    subgraph data["Data Layer"]
-        RAW[(Raw Transactions)]
-        PROFILES[(Customer Profiles)]
+    subgraph dev["DEV"]
+        D1[Feature Store] --> D2[Train]
+        D2 --> D3[Register]
     end
-    subgraph features["Feature Engineering"]
-        DT[Dynamic Tables]
+    subgraph stage["STAGE"]
+        S1[Train] --> S2[Register]
+        S2 --> S3[Replicate to PROD]
     end
-    subgraph training["Training"]
-        POOL[Compute Pool]
+    subgraph prod["PROD"]
+        P1[Deploy Service] --> P2[Gateway]
     end
-    subgraph registry["Registry"]
-        MODEL[Versioned Model]
-    end
-    subgraph serving["Serving"]
-        SVC[SPCS Container]
-        GW[Gateway]
-    end
-    RAW --> DT
-    PROFILES --> DT
-    DT --> POOL
-    POOL --> MODEL
-    MODEL --> SVC
-    SVC --> GW
-    GW --> CLIENT[API Clients]
-    </pre>
+    dev -->|"merge to main"| stage
+    stage -->|"manual approval"| prod
+</pre>
 
-    <div class="why">
-      <strong>Everything stays inside Snowflake.</strong> Data never leaves the platform -- features are computed in-place via SQL, training reads directly from feature tables, and the model is served from Snowflake containers. This eliminates data movement, simplifies security, and gives you a single governance boundary.
-    </div>
-  </section>
+<table>
+  <thead><tr><th>Component</th><th>Snowflake Service</th><th>Purpose</th></tr></thead>
+  <tbody>
+    <tr><td>Feature Engineering</td><td>Dynamic Tables (Feature Store)</td><td>Compute and serve ML features</td></tr>
+    <tr><td>Model Training</td><td>ML Jobs (<code>@remote</code> on Compute Pools)</td><td>Train models at scale inside Snowflake</td></tr>
+    <tr><td>Model Versioning</td><td>Model Registry</td><td>Store, version, and track model artifacts</td></tr>
+    <tr><td>Model Promotion</td><td>Cross-database replication</td><td>Move models from STAGE to PROD atomically</td></tr>
+    <tr><td>Real-Time Serving</td><td>SPCS + Snowflake Gateway</td><td>REST inference with stable URLs</td></tr>
+    <tr><td>Zero-Downtime Deploy</td><td>Gateway traffic splitting</td><td>Blue/green model upgrades</td></tr>
+    <tr><td>CI/CD</td><td>GitHub Actions + OIDC</td><td>Automated pipeline with zero stored secrets</td></tr>
+  </tbody>
+</table>
 
-  <!-- ═══════════════════════════════════════════════════════════════ -->
-  <section id="feature-store">
-    <h2>2. Feature Store (Dynamic Tables)</h2>
+<hr />
 
-    <h3>What It Is</h3>
-    <p>Snowflake's Feature Store is built on <strong>Dynamic Tables</strong> -- SQL-defined transformations that Snowflake keeps fresh automatically. You declare the transformation once; Snowflake handles scheduling, incremental refresh, and serving.</p>
+<!-- ================================================================ -->
+<h2 id="feature-store">Feature Store</h2>
 
-    <div class="concept">
-      <strong>A Feature View is not a batch job you schedule</strong> -- it's a <em>declaration</em> of what features should look like. Snowflake observes the upstream data (via change tracking) and refreshes the Dynamic Table when data changes, up to the target lag you specify. Think of it like a materialized view that's always within N minutes of current.
-    </div>
+<p>Features are defined as Snowflake <strong>Feature Views</strong> backed by Dynamic Tables. You declare the transformation SQL once; Snowflake handles scheduling, refresh, and serving.</p>
 
-    <h3>How It Works in This Project</h3>
-    <pre><code>-- This is a Feature View backed by a Dynamic Table
--- Target lag: 60 minutes (refreshes when source data is >60 min stale)
--- Reads from: RAW_TRANSACTIONS + CUSTOMER_PROFILES
--- Outputs: 12 customer-level risk features
+<h3>How it works</h3>
 
+<p>A Feature View is a Dynamic Table that computes features from source data. It refreshes automatically based on a target lag (e.g., 60 minutes). The Feature Store API registers entities, feature views, and versions.</p>
+
+<pre><code>-- Example: customer-level risk features (Dynamic Table)
 CREATE OR REPLACE DYNAMIC TABLE CUSTOMER_RISK_FEATURES
   TARGET_LAG = '60 minutes'
   WAREHOUSE = SNOW_MLOPS_DEV_WH
@@ -210,723 +172,394 @@ SELECT
     SUM(CASE WHEN t.IS_FRAUD=1 THEN 1 ELSE 0 END) AS HISTORICAL_FRAUD_COUNT,
     AVG(t.IS_FRAUD)                   AS HISTORICAL_FRAUD_RATE,
     COUNT(DISTINCT DATE(t.TXN_TIME))  AS ACTIVE_DAYS,
-    AVG(CASE WHEN HOUR(t.TXN_TIME) BETWEEN 0 AND 5 THEN 1.0 ELSE 0.0 END)
-                                      AS LATE_NIGHT_TXN_RATIO,
     c.CREDIT_SCORE,
-    DATEDIFF('day', c.ACCOUNT_OPEN_DATE, CURRENT_DATE()) AS ACCOUNT_AGE_DAYS,
     c.ANNUAL_INCOME
 FROM RAW_TRANSACTIONS t
 JOIN CUSTOMER_PROFILES c ON t.CUSTOMER_ID = c.CUSTOMER_ID
-GROUP BY t.CUSTOMER_ID, c.CREDIT_SCORE, c.ACCOUNT_OPEN_DATE, c.ANNUAL_INCOME;</code></pre>
+GROUP BY ALL;</code></pre>
 
-    <h3>Feature Design Decisions</h3>
-    <table>
-      <thead><tr><th>Feature</th><th>Signal Type</th><th>Why It Matters for Fraud</th></tr></thead>
-      <tbody>
-        <tr><td><code>TOTAL_TXN_COUNT</code></td><td>Velocity</td><td>Fraudsters often make many small test charges</td></tr>
-        <tr><td><code>AVG/MAX/STDDEV_TXN_AMOUNT</code></td><td>Spending</td><td>Unusual amounts deviate from normal patterns</td></tr>
-        <tr><td><code>UNIQUE_MERCHANTS</code></td><td>Behavior</td><td>Spread across many merchants = card testing</td></tr>
-        <tr><td><code>HISTORICAL_FRAUD_COUNT/RATE</code></td><td>Risk</td><td>Past fraud is the strongest predictor of future fraud</td></tr>
-        <tr><td><code>LATE_NIGHT_TXN_RATIO</code></td><td>Temporal</td><td>Fraud disproportionately occurs at unusual hours</td></tr>
-        <tr><td><code>CREDIT_SCORE</code></td><td>Profile</td><td>Lower scores correlate with higher fraud risk</td></tr>
-        <tr><td><code>ACCOUNT_AGE_DAYS</code></td><td>Profile</td><td>New accounts are higher risk (less history)</td></tr>
-      </tbody>
-    </table>
+<h3>Feature versioning</h3>
 
-    <div class="pitfall">
-      <strong>Feature-serving skew.</strong> A classic ML failure mode is computing features differently at training time vs serving time. Because we use the <em>same Dynamic Table</em> for both training reads and (potentially) online serving, the computation is guaranteed identical. This is a major advantage of Snowflake's approach over custom feature pipelines.
-    </div>
+<p>Feature View versions are tracked in <code>config.py</code>:</p>
 
-    <div class="why">
-      <strong>Why Dynamic Tables instead of a scheduled dbt job?</strong> Dynamic Tables are <em>declarative</em> -- you don't manage scheduling, retries, or orchestration. Snowflake tracks upstream dependencies and refreshes automatically. They also support incremental refresh (only processing changed data), which scales better than full table rebuilds.
-    </div>
+<pre><code>FEATURE_VIEW_NAME = "CUSTOMER_RISK_FEATURES"
+FEATURE_VIEW_VERSION = "V1"  # Bump when feature SQL changes</code></pre>
 
-    <h3>Feature Promotion Across Environments</h3>
+<p>When you bump the version, the next pipeline run creates a new Dynamic Table (<code>CUSTOMER_RISK_FEATURES$V2</code>) and trains against it. The model comment records which feature version it was trained on.</p>
 
-    <p>Unlike models (which are replicated via SQL), Feature Views <strong>cannot be replicated</strong>. A Dynamic Table is a live computation, not a static artifact. Promotion means re-running the registration code against the target database.</p>
+<h3>Feature promotion across environments</h3>
 
-    <div class="concept">
-      <strong>Feature promotion = re-applying the same code to a different database.</strong> The Feature View definition lives in git (<code>source/features/feature_views.py</code>). When the CI pipeline calls <code>register_feature_views(session, database=TARGET)</code>, it creates or replaces the Dynamic Table in the target environment. Same SQL, same source data, same output -- just a different Snowflake database.
-    </div>
+<p>Feature Views cannot be replicated like models. A Dynamic Table is a live computation, not a static artifact. Promotion means re-running the same registration code against the target database.</p>
 
-    <h4>Offline Feature Serving (Current Implementation)</h4>
+<table>
+  <thead><tr><th>Environment</th><th>Feature View</th><th>Refresh Strategy</th><th>Purpose</th></tr></thead>
+  <tbody>
+    <tr><td>DEV</td><td>Yes</td><td>On-demand</td><td>Training iteration</td></tr>
+    <tr><td>STAGE</td><td>Yes</td><td>Once per pipeline run</td><td>CI training validation</td></tr>
+    <tr><td>PROD</td><td>No (offline) / Yes (online)</td><td>Continuous (if online)</td><td>Feature lookup at inference</td></tr>
+  </tbody>
+</table>
 
-    <p>The client sends all features in the inference request. No feature lookup at serving time.</p>
+<h4>Offline serving (current)</h4>
 
-    <table>
-      <thead><tr><th>Environment</th><th>Feature View?</th><th>Refresh</th><th>Purpose</th></tr></thead>
-      <tbody>
-        <tr><td><span class="badge badge-dev">DEV</span></td><td>Yes</td><td>On-demand (DOWNSTREAM)</td><td>Training iteration</td></tr>
-        <tr><td><span class="badge badge-stage">STAGE</span></td><td>Yes</td><td>Once per pipeline run, then suspend</td><td>CI training validation</td></tr>
-        <tr><td><span class="badge badge-prod">PROD</span></td><td>No</td><td>-</td><td>Not needed (client supplies features)</td></tr>
-      </tbody>
-    </table>
+<p>The client sends all features in the inference request. No Feature View needed in PROD.</p>
 
-    <pre><code># CI/CD flow for feature changes (offline):
-#
-# 1. Developer modifies feature SQL in source/features/feature_views.py
-# 2. Opens PR, merges to main
-# 3. deploy.yml → register_feature_views(STAGE) → creates/updates DT
-# 4. Train model on updated features → new model version
-# 5. Replicate model to PROD
-# 6. PROD serves model; client sends pre-computed features in request
-#
-# No feature objects needed in PROD.</code></pre>
+<pre><code># CI/CD flow (offline):
+# 1. Developer modifies feature SQL → merges to main
+# 2. deploy.yml → register_feature_views(STAGE) → creates/updates DT
+# 3. Train model on updated features → new model version
+# 4. Replicate model to PROD
+# 5. Client sends pre-computed features in request</code></pre>
 
-    <h4>Online Feature Serving (Future Enhancement)</h4>
+<h4>Online serving (future)</h4>
 
-    <p>The client sends only an entity key (e.g., <code>CUSTOMER_ID</code>). The inference service looks up pre-computed features automatically before scoring.</p>
+<p>The client sends only an entity key. The inference service fetches features from an online Feature Store (Snowflake Postgres) before scoring.</p>
 
-    <table>
-      <thead><tr><th>Environment</th><th>Feature View?</th><th>Refresh</th><th>Purpose</th></tr></thead>
-      <tbody>
-        <tr><td><span class="badge badge-dev">DEV</span></td><td>Yes</td><td>On-demand</td><td>Training iteration</td></tr>
-        <tr><td><span class="badge badge-stage">STAGE</span></td><td>Yes</td><td>Once per run, then suspend</td><td>CI training validation</td></tr>
-        <tr><td><span class="badge badge-prod">PROD</span></td><td>Yes</td><td>Continuous (1 hour target_lag)</td><td>Feature lookup at inference time</td></tr>
-      </tbody>
-    </table>
+<pre><code># CI/CD flow (online):
+# 1. Developer modifies feature SQL → merges to main
+# 2. deploy.yml → register_feature_views(STAGE) → train → replicate
+# 3. deploy.yml → register_feature_views(PROD) with OnlineConfig
+# 4. deploy-prod.yml → create_service(..., feature_sources_per_function={...})
+# 5. Client sends {CUSTOMER_ID: "C123"} → service fetches → scores</code></pre>
 
-    <pre><code># CI/CD flow for feature changes (online):
-#
-# 1. Developer modifies feature SQL in source/features/feature_views.py
-# 2. Opens PR, merges to main
-# 3. deploy.yml → register_feature_views(STAGE) → train → replicate model
-# 4. deploy.yml → register_feature_views(PROD)  ← registers DT in PROD too
-# 5. PROD DT refreshes continuously from PROD source data
-# 6. deploy-prod.yml → create_service(..., feature_sources_per_function={...})
-# 7. Client sends {CUSTOMER_ID: "C123"} → service fetches features → scores
-#
-# Requires: Snowflake Postgres online store (OnlineStoreType.POSTGRES)
-# for low-latency feature lookups at the inference endpoint.</code></pre>
+<div class="note">
+  <strong>Note</strong>
+  Online serving requires a Snowflake Postgres instance for low-latency feature lookups. The Dynamic Table syncs to Postgres with ~10s target lag.
+</div>
 
-    <pre><code># Online serving: service creation with feature lookup
+<hr />
+
+<!-- ================================================================ -->
+<h2 id="model-training">Model Training</h2>
+
+<p>Training runs on Snowflake <strong>Compute Pools</strong> using the <code>@remote</code> decorator from <code>snowflake.ml.jobs</code>. The decorator serializes your Python function and executes it inside a managed container.</p>
+
+<h3>How it works</h3>
+
+<pre><code>from snowflake.ml.jobs import remote
+
+@remote(
+    "SNOW_MLOPS_DEV_POOL",
+    stage_name="@SNOW_MLOPS_DEV.ML.JOB_STAGE",
+    pip_requirements=["xgboost", "scikit-learn", "snowflake-ml-python"],
+)
+def train_and_register() -> str:
+    session = Session.builder.getOrCreate()
+
+    # Read directly from Feature Store Dynamic Tables (no data movement)
+    df = session.sql("SELECT ... FROM CUSTOMER_RISK_FEATURES$V1 ...").to_pandas()
+
+    model = xgb.XGBClassifier(scale_pos_weight=33, ...)
+    model.fit(X_train, y_train)
+
+    reg = Registry(session=session)
+    reg.log_model(model=model, model_name="MLOPS_FRAUD_DETECTOR", ...)
+
+    return json.dumps({"status": "success", "metrics": {...}})</code></pre>
+
+<h3>Key parameters</h3>
+
+<table>
+  <thead><tr><th>Parameter</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td><code>COMPUTE_POOL</code></td><td>Pool of machines to run on (e.g., <code>CPU_X64_M</code> = 16 vCPU, 64GB RAM)</td></tr>
+    <tr><td><code>stage_name</code></td><td>Internal stage where the serialized function is stored</td></tr>
+    <tr><td><code>pip_requirements</code></td><td>Packages installed in the container at runtime</td></tr>
+  </tbody>
+</table>
+
+<div class="important">
+  <strong>Important</strong>
+  Use <code>pip_requirements=[]</code>, not <code>packages=[]</code>. The <code>packages</code> parameter is silently ignored by <code>@remote</code>. The function takes no arguments -- call <code>Session.builder.getOrCreate()</code> inside the container to get an authenticated session.
+</div>
+
+<h3>Job submission</h3>
+
+<p>The <code>@remote</code> decorator serializes the function body using <code>cloudpickle</code>, uploads it to the specified stage, and submits it to the compute pool. The caller (your laptop or CI runner) waits for the return value. The function executes inside Snowflake's network boundary with full SQL access.</p>
+
+<hr />
+
+<!-- ================================================================ -->
+<h2 id="model-registry">Model Registry</h2>
+
+<p>The Snowflake Model Registry stores trained models as versioned database objects. Each model has versions (V1, V2, ...), a default version, aliases, and SQL-level access control.</p>
+
+<h3>Auto-versioning</h3>
+
+<pre><code># Inside the training function:
+versions = session.sql("SHOW VERSIONS IN MODEL MLOPS_FRAUD_DETECTOR").collect()
+max_v = max(int(v["name"].replace("V","")) for v in versions)
+next_version = f"V{max_v + 1}"</code></pre>
+
+<h3>Registration</h3>
+
+<pre><code>reg.log_model(
+    model=model,
+    model_name="MLOPS_FRAUD_DETECTOR",
+    version_name="V3",
+    conda_dependencies=["xgboost", "scikit-learn"],
+    sample_input_data=X_test.head(10),
+    comment="features:CUSTOMER_RISK_FEATURES$V1 | AUC=0.96 | git:a3f8b2c",
+)</code></pre>
+
+<p>The model comment records feature version, metrics, and git SHA for traceability.</p>
+
+<h3>Cross-database replication</h3>
+
+<p>Models are promoted from STAGE to PROD using SQL replication:</p>
+
+<pre><code>ALTER MODEL SNOW_MLOPS_PROD.ML.MLOPS_FRAUD_DETECTOR
+  ADD VERSION V3
+  FROM MODEL SNOW_MLOPS_STAGE.ML.MLOPS_FRAUD_DETECTOR VERSION V3;
+
+ALTER MODEL SNOW_MLOPS_PROD.ML.MLOPS_FRAUD_DETECTOR
+  SET DEFAULT_VERSION = V3;</code></pre>
+
+<div class="note">
+  <strong>Note</strong>
+  Model replication is an atomic operation that preserves all metadata, signatures, and dependencies. It is not a file copy.
+</div>
+
+<hr />
+
+<!-- ================================================================ -->
+<h2 id="inference">Real-Time Inference</h2>
+
+<p>Registered models are deployed as containerized REST services on Snowpark Container Services (SPCS). Snowflake Gateway provides a stable URL for zero-downtime upgrades.</p>
+
+<h3>Deploying a service</h3>
+
+<pre><code>mv = reg.get_model("MLOPS_FRAUD_DETECTOR").version("V3")
+
 mv.create_service(
     service_name="MLOPS_FRAUD_DETECTOR_SERVICE_V3",
     service_compute_pool="SNOW_MLOPS_PROD_POOL",
     ingress_enabled=True,
-    feature_sources_per_function={
-        "predict_proba": [registered_feature_view],
-        "predict": [registered_feature_view],
-    },
-)
-
-# Client request (online): just the entity key
-# POST /predict-proba
-# {"dataframe_split": {"columns": ["CUSTOMER_ID"], "data": [["C123"]]}}</code></pre>
-
-    <div class="why">
-      <strong>Why not always use online serving?</strong> Online requires a Snowflake Postgres instance (additional infra + cost) and introduces a dependency between the service and the Feature Store. Offline is simpler: the model is stateless, the client owns the feature pipeline. Choose online when the client <em>cannot</em> compute features (e.g., mobile app, third-party system) or when feature freshness at scoring time is critical.
-    </div>
-
-    <div class="concept">
-      <strong>Key difference: PROD Dynamic Table refresh cost.</strong> In the online pattern, the PROD Feature View refreshes continuously (hourly) to keep the online store fresh. In the offline pattern, no PROD DT exists -- zero refresh cost. For STAGE, both patterns use a single forced refresh at pipeline time, then suspend the DT to avoid ongoing compute charges.
-    </div>
-  </section>
-
-  <!-- ═══════════════════════════════════════════════════════════════ -->
-  <section id="training">
-    <h2>3. Model Training (ML Jobs)</h2>
-
-    <h3>What It Is</h3>
-    <p>Snowflake <strong>ML Jobs</strong> let you run arbitrary Python (training, inference, batch processing) on dedicated <strong>Compute Pools</strong> -- containerized GPU/CPU instances managed by Snowflake. The <code>@remote</code> decorator makes it feel like calling a local function, but it executes inside Snowflake.</p>
-
-    <div class="concept">
-      <strong>The <code>@remote</code> decorator does something unusual:</strong> it serializes your function, ships it to a Snowflake-managed container on the compute pool, installs dependencies, executes the function with full Snowpark access, and returns the result. The function runs <em>inside Snowflake's network boundary</em> -- it can access tables directly without data egress. The caller (your laptop or CI runner) just gets back the return value.
-    </div>
-
-    <h3>How Training Works</h3>
-    <pre><code>from snowflake.ml.jobs import remote
-
-@remote(
-    "SNOW_MLOPS_DEV_POOL",                    # Which compute pool to run on
-    stage_name="@SNOW_MLOPS_DEV.ML.JOB_STAGE", # Where to store job artifacts
-    pip_requirements=[                         # Installed in the container
-        "xgboost",
-        "scikit-learn",
-        "snowflake-ml-python",
-    ],
-)
-def train_and_register() -> str:
-    """Runs INSIDE the compute pool container."""
-
-    # Get a session (already authenticated inside Snowflake)
-    session = Session.builder.getOrCreate()
-
-    # Read training data directly via SQL (no data movement!)
-    df = session.sql("""
-        SELECT features.*, labels.IS_FRAUD
-        FROM CUSTOMER_RISK_FEATURES features
-        JOIN RAW_TRANSACTIONS labels ON ...
-    """).to_pandas()
-
-    # Standard scikit-learn/xgboost workflow
-    X_train, X_test, y_train, y_test = train_test_split(...)
-    model = xgb.XGBClassifier(scale_pos_weight=33, ...)
-    model.fit(X_train, y_train)
-
-    # Register to Snowflake Model Registry
-    reg = Registry(session=session)
-    reg.log_model(model=model, model_name="MLOPS_FRAUD_DETECTOR", ...)
-
-    return json.dumps({"status": "success", "auc": 0.96})</code></pre>
-
-    <h3>Key Parameters Explained</h3>
-    <table>
-      <thead><tr><th>Parameter</th><th>Purpose</th></tr></thead>
-      <tbody>
-        <tr><td><code>COMPUTE_POOL</code></td><td>The pool of machines to run on (e.g., <code>CPU_X64_M</code> = 16 vCPU, 64GB RAM)</td></tr>
-        <tr><td><code>stage_name</code></td><td>Internal stage where Snowflake stores the serialized function + deps</td></tr>
-        <tr><td><code>pip_requirements</code></td><td>Python packages installed in the container (NOT <code>packages=</code>)</td></tr>
-      </tbody>
-    </table>
-
-    <div class="pitfall">
-      <strong>Do not use <code>packages=</code></strong> -- this parameter doesn't work with <code>@remote</code> and silently does nothing. Always use <code>pip_requirements=[]</code>. This is a common source of "module not found" errors.
-    </div>
-
-    <div class="pitfall">
-      <strong>The function takes no arguments.</strong> You cannot pass <code>session=session</code> to a <code>@remote</code> function. Inside the container, call <code>Session.builder.getOrCreate()</code> to get an authenticated session. The container inherits the caller's role and context.
-    </div>
-
-    <h3>Why <code>scale_pos_weight=33</code>?</h3>
-    <p>With ~3% fraud rate, the dataset is heavily imbalanced (97% legitimate, 3% fraud). Without correction, the model would learn to always predict "legitimate" and achieve 97% accuracy while catching zero fraud. <code>scale_pos_weight</code> tells XGBoost to weight fraud samples 33x higher (approximately 97/3), forcing the model to learn fraud patterns.</p>
-
-    <div class="why">
-      <strong>Why not train on the CI runner?</strong> CI runners (GitHub Actions) are small VMs with limited RAM and no direct access to Snowflake data. By using <code>@remote</code>, training happens on a beefy compute pool node with direct SQL access to terabytes of data -- no data extraction step, no CSV exports, no S3 intermediaries. The CI runner just submits the job and waits.
-    </div>
-  </section>
-
-  <!-- ═══════════════════════════════════════════════════════════════ -->
-  <section id="registry">
-    <h2>4. Model Registry</h2>
-
-    <h3>What It Is</h3>
-    <p>The Snowflake Model Registry is a <strong>versioned object store for trained models</strong> -- think Git for ML artifacts. Each registered model is a first-class Snowflake object with versions, metadata, input/output signatures, and deployment capabilities.</p>
-
-    <div class="concept">
-      <strong>A registered model is a database object, not a file.</strong> You refer to it as <code>DATABASE.SCHEMA.MODEL_NAME</code>. It has versions (V1, V2, V3...), a default version, aliases, and SQL-level access control. You can <code>GRANT</code> access, <code>DESCRIBE</code> it, and <code>DROP</code> it like any table. This is fundamentally different from MLflow's file-based approach.
-    </div>
-
-    <h3>Registration Code</h3>
-    <pre><code>from snowflake.ml.registry import Registry
-
-reg = Registry(session=session, database_name="SNOW_MLOPS_DEV", schema_name="ML")
-
-reg.log_model(
-    model=model,                              # The trained XGBoost object
-    model_name="MLOPS_FRAUD_DETECTOR",        # Name in the registry
-    version_name="V3",                        # Auto-incremented
-    conda_dependencies=["xgboost", "scikit-learn"],  # For container rebuild
-    sample_input_data=X_test.head(10),        # Infers input schema
-    comment="AUC=0.96, F1=0.72 | git:a3f8b2c",
+    max_instances=2,
 )</code></pre>
 
-    <h3>Auto-Versioning Pattern</h3>
-    <p>Rather than hardcoding version names, each pipeline run queries existing versions and increments:</p>
-    <pre><code># Inside the training function:
-versions = session.sql("SHOW VERSIONS IN MODEL MLOPS_FRAUD_DETECTOR").collect()
-max_v = max(int(v["name"].replace("V","")) for v in versions)
-next_version = f"V{max_v + 1}"  # V1 -> V2 -> V3 -> ...</code></pre>
+<p>This builds a container image (~10 min first time), deploys it to the compute pool, and creates a public HTTPS endpoint.</p>
 
-    <div class="why">
-      <strong>Why auto-increment instead of git SHA?</strong> Version names like "V1", "V2" are human-readable and orderable. The git SHA goes in the <code>comment</code> field for traceability. This makes it easy to say "deploy V3" or "rollback to V2" without looking up hashes.
-    </div>
+<h3>Calling the endpoint</h3>
 
-    <h3>What Gets Stored</h3>
-    <table>
-      <thead><tr><th>Metadata</th><th>Purpose</th></tr></thead>
-      <tbody>
-        <tr><td>Model artifact</td><td>Serialized XGBoost model (pickle-compatible)</td></tr>
-        <tr><td>Input signature</td><td>Column names + types (inferred from <code>sample_input_data</code>)</td></tr>
-        <tr><td>Output signature</td><td>What <code>predict</code> and <code>predict_proba</code> return</td></tr>
-        <tr><td>Conda dependencies</td><td>Exact packages needed to load the model</td></tr>
-        <tr><td>Comment</td><td>Metrics, git SHA, timestamp -- your audit trail</td></tr>
-        <tr><td>Default version</td><td>Which version is "current" (used by deployment)</td></tr>
-      </tbody>
-    </table>
+<pre><code>POST https://&lt;gateway-url&gt;/predict-proba
+Authorization: Snowflake Token="&lt;PAT&gt;"
+Content-Type: application/json
 
-    <h3>Cross-Database Replication</h3>
-    <p>Models can be copied between databases atomically:</p>
-    <pre><code>-- Copy V3 from STAGE to PROD (same account, different databases)
-ALTER MODEL SNOW_MLOPS_PROD.ML.MLOPS_FRAUD_DETECTOR
-  ADD VERSION V3
-  FROM MODEL SNOW_MLOPS_STAGE.ML.MLOPS_FRAUD_DETECTOR VERSION V3;
-
--- Make V3 the version PROD will serve
-ALTER MODEL SNOW_MLOPS_PROD.ML.MLOPS_FRAUD_DETECTOR
-  SET DEFAULT_VERSION = V3;</code></pre>
-
-    <div class="concept">
-      <strong>Model replication is not a file copy.</strong> It's an atomic Snowflake operation that preserves all metadata, signatures, and dependencies. The model in PROD is a full first-class object with its own version history. If STAGE has V1-V5 but you only replicate V3 and V5, PROD only has those two versions.
-    </div>
-  </section>
-
-  <!-- ═══════════════════════════════════════════════════════════════ -->
-  <section id="serving">
-    <h2>5. Real-Time Serving (SPCS + Gateway)</h2>
-
-    <h3>What It Is</h3>
-    <p>Snowflake can deploy any registered model as a <strong>containerized REST API</strong> running on Snowpark Container Services (SPCS). You get a public HTTPS endpoint that accepts JSON payloads and returns predictions.</p>
-
-    <div class="concept">
-      <strong><code>create_service()</code> does three things:</strong> (1) builds a Docker container image from your model + dependencies, (2) deploys it to a compute pool with HTTP ingress, and (3) registers the endpoint. You never write a Dockerfile, manage a container registry, or configure a load balancer. Snowflake handles all of this from the model artifact alone.
-    </div>
-
-    <h3>Deploying a Service</h3>
-    <pre><code>mv = reg.get_model("MLOPS_FRAUD_DETECTOR").version("V3")
-
-mv.create_service(
-    service_name="MLOPS_FRAUD_DETECTOR_SERVICE_V3",
-    service_compute_pool="SNOW_MLOPS_PROD_POOL",  # Where containers run
-    ingress_enabled=True,                          # Public HTTPS endpoint
-    max_instances=2,                               # Horizontal auto-scaling
-)
-# Duration: 10-30 min (image build on first deploy, ~2 min on subsequent)</code></pre>
-
-    <h3>Calling the Endpoint</h3>
-    <pre><code># POST https://&lt;endpoint&gt;/predict-proba
-# Authorization: Snowflake Token="&lt;PAT_TOKEN&gt;"
 {
   "dataframe_split": {
     "index": [0],
-    "columns": ["TOTAL_TXN_COUNT", "AVG_TXN_AMOUNT", "MAX_TXN_AMOUNT",
-                "STDDEV_TXN_AMOUNT", "UNIQUE_MERCHANTS", "HISTORICAL_FRAUD_COUNT",
-                "HISTORICAL_FRAUD_RATE", "ACTIVE_DAYS", "LATE_NIGHT_TXN_RATIO",
-                "CREDIT_SCORE", "ACCOUNT_AGE_DAYS", "ANNUAL_INCOME"],
-    "data": [[20, 150.50, 500.00, 100.0, 10, 0, 0.0, 30, 0.05, 700, 365, 80000]]
+    "columns": ["TOTAL_TXN_COUNT", "AVG_TXN_AMOUNT", ...],
+    "data": [[20, 150.5, 500.0, ...]]
   }
-}
+}</code></pre>
 
-# Response:
-[{"output_feature_0": 0.9998, "output_feature_1": 0.0002}]
-# output_feature_0 = P(legitimate)
-# output_feature_1 = P(fraud)</code></pre>
+<div class="note">
+  <strong>Note</strong>
+  Method names map to URL paths with hyphens: Python method <code>predict_proba</code> becomes endpoint path <code>/predict-proba</code>.
+</div>
 
-    <div class="pitfall">
-      <strong>Method names become URL paths with hyphens.</strong> Python method <code>predict_proba</code> becomes URL path <code>/predict-proba</code>. Underscores are replaced with hyphens in the endpoint URL. This catches people who try <code>/predict_proba</code> and get a 404.
-    </div>
+<h3>Snowflake Gateway</h3>
 
-    <h3>The Gateway: Stable URLs + Zero-Downtime Deploys</h3>
+<p>The Gateway provides a permanent hostname that routes to underlying services. When services are recreated (model upgrades), the Gateway URL does not change.</p>
 
-    <p>A bare SPCS service has a problem: <strong>its URL is tied to the service object</strong>. When you drop and recreate a service (e.g., for a new model version), the URL changes. Clients break.</p>
-
-    <p>The <strong>Snowflake Gateway</strong> solves this by providing a permanent URL that routes to underlying services:</p>
-
-    <pre class="mermaid">
+<pre class="mermaid">
 flowchart LR
     CLIENT[API Clients] --> GW["Gateway (stable URL)"]
     GW -->|"100%"| V3[SERVICE_V3]
-    GW -.->|"0% (old)"| V2[SERVICE_V2]
-    </pre>
+</pre>
 
-    <div class="concept">
-      <strong>The Gateway is the production-facing URL. Services are implementation details.</strong> Clients always hit the gateway URL (which never changes). Behind it, you can swap services, split traffic (90/10 for canary testing), or fail over to healthy endpoints -- all without changing a single client configuration.
-    </div>
+<h4>Blue/green deployment</h4>
 
-    <h3>Blue/Green Deployment Pattern</h3>
-    <pre><code># 1. Deploy new service (coexists with old one)
-mv.create_service(service_name="SERVICE_V3", ...)
+<ol>
+  <li>Create new versioned service (<code>SERVICE_V3</code>) alongside the old one</li>
+  <li>Wait for READY state</li>
+  <li>Health check the new service directly</li>
+  <li><code>ALTER GATEWAY</code> to shift 100% traffic to the new service</li>
+  <li>Drop the old service</li>
+</ol>
 
-# 2. Wait for READY + health check against SERVICE_V3 directly
-
-# 3. Shift 100% traffic to new service
-ALTER GATEWAY FRAUD_DETECTOR_GATEWAY
+<pre><code>ALTER GATEWAY SNOW_MLOPS_PROD.ML.FRAUD_DETECTOR_GATEWAY
 FROM SPECIFICATION $$
   spec:
     type: traffic_split
     split_type: custom
     targets:
       - type: endpoint
-        value: SNOW_MLOPS_PROD.ML.SERVICE_V3!inference
+        value: SNOW_MLOPS_PROD.ML.MLOPS_FRAUD_DETECTOR_SERVICE_V3!inference
         weight: 100
-$$;
+$$;</code></pre>
 
-# 4. Drop old service (frees resources)
-DROP SERVICE SERVICE_V2;</code></pre>
+<hr />
 
-    <div class="why">
-      <strong>Why blue/green instead of in-place upgrade?</strong> In-place upgrades have a gap: the old service is down while the new one starts. With blue/green, the new service is fully operational and health-checked <em>before</em> any traffic moves. If the health check fails, the old service keeps serving. Zero risk, zero downtime.
-    </div>
-  </section>
+<!-- ================================================================ -->
+<h2 id="promotion">Environment Promotion</h2>
 
-  <!-- ═══════════════════════════════════════════════════════════════ -->
-  <section id="promotion">
-    <h2>6. Multi-Environment Promotion</h2>
+<p>Code and models flow through three environments with automated validation and approval gates.</p>
 
-    <h3>The Three-Environment Pattern</h3>
+<h3>Environment configuration</h3>
 
-    <div class="grid">
-      <div class="card">
-        <h4><span class="badge badge-dev">DEV</span></h4>
-        <p><strong>Purpose:</strong> Experimentation</p>
-        <p><strong>Who:</strong> Developers (local)</p>
-        <p><strong>Training:</strong> Yes</p>
-        <p><strong>Service:</strong> Optional (testing)</p>
-        <p><strong>Trigger:</strong> Manual</p>
-      </div>
-      <div class="card">
-        <h4><span class="badge badge-stage">STAGE</span></h4>
-        <p><strong>Purpose:</strong> CI validation</p>
-        <p><strong>Who:</strong> GitHub Actions</p>
-        <p><strong>Training:</strong> Yes</p>
-        <p><strong>Service:</strong> Never</p>
-        <p><strong>Trigger:</strong> Auto (merge to main)</p>
-      </div>
-      <div class="card">
-        <h4><span class="badge badge-prod">PROD</span></h4>
-        <p><strong>Purpose:</strong> Production serving</p>
-        <p><strong>Who:</strong> GitHub Actions</p>
-        <p><strong>Training:</strong> Never</p>
-        <p><strong>Service:</strong> Always</p>
-        <p><strong>Trigger:</strong> Manual + approval</p>
-      </div>
-    </div>
+<table>
+  <thead><tr><th>Environment</th><th>Database</th><th>Training</th><th>Serving</th><th>Trigger</th></tr></thead>
+  <tbody>
+    <tr><td>DEV</td><td><code>SNOW_MLOPS_DEV</code></td><td>Yes</td><td>Optional</td><td>Manual</td></tr>
+    <tr><td>STAGE</td><td><code>SNOW_MLOPS_STAGE</code></td><td>Yes</td><td>Never</td><td>Auto (merge to main)</td></tr>
+    <tr><td>PROD</td><td><code>SNOW_MLOPS_PROD</code></td><td>Never</td><td>Always</td><td>Manual + approval</td></tr>
+  </tbody>
+</table>
 
-    <h3>Data Flow Principle</h3>
-    <div class="highlight">
-      <strong>Source data always lives in PROD.</strong> DEV and STAGE <em>read</em> from PROD for training but write all artifacts (features, models, experiments) to their own databases. PROD never trains -- it only receives model replicas from STAGE.
-    </div>
+<p>Source data always lives in PROD. DEV and STAGE read from PROD for training but write artifacts to their own databases.</p>
 
-    <div class="why">
-      <strong>Why read from PROD in all environments?</strong> Training on different data in each environment is a recipe for "works in dev, fails in prod" scenarios. By always reading from the same source data, you guarantee that the model trained in STAGE will behave identically to what a PROD-trained model would produce.
-    </div>
+<h3>Promotion flow</h3>
 
-    <h3>Complete Promotion Flow</h3>
-
-    <p>Here is exactly how a model goes from a developer's experiment to live production, step by step:</p>
-
-    <!-- ─── PHASE 1: PR ─── -->
-    <h3>Phase 1: Pull Request (<code>pr-checks.yml</code>)</h3>
-
-    <p>A developer finishes iterating in DEV and is ready to promote their changes. They create a feature branch and open a Pull Request to <code>main</code>.</p>
-
-    <pre class="mermaid">
-flowchart LR
-    subgraph trigger["Trigger: PR opened to main"]
-        T1[Developer pushes branch]
-    end
-    subgraph workflow["pr-checks.yml"]
-        A[Checkout code] --> B[Install deps via uv]
-        B --> C["ruff check source/ scripts/"]
-        C --> D["ruff format --check"]
-        D --> E["pytest tests/ -v"]
-    end
-    subgraph gate["Branch Protection Gate"]
-        E --> F{All pass?}
-        F -->|yes| G[PR mergeable]
-        F -->|no| H[Merge blocked]
-    end
-    trigger --> workflow
-    </pre>
-
-    <div class="card">
-      <h4>What <code>pr-checks.yml</code> does:</h4>
-      <table>
-        <thead><tr><th>Step</th><th>Command</th><th>Purpose</th></tr></thead>
-        <tbody>
-          <tr><td>Lint</td><td><code>ruff check source/ scripts/</code></td><td>Catch code quality issues, unused imports, bugs</td></tr>
-          <tr><td>Format</td><td><code>ruff format --check source/ scripts/</code></td><td>Enforce consistent code style (fails if unformatted)</td></tr>
-          <tr><td>Test</td><td><code>pytest tests/ -v</code></td><td>Run unit tests (config validation, etc.)</td></tr>
-        </tbody>
-      </table>
-      <p><strong>No Snowflake connection needed.</strong> These are pure code quality checks running on the GitHub runner.</p>
-      <p><strong>Branch protection requires this job to pass</strong> before the merge button becomes available. Combined with a required reviewer approval, this ensures no untested code reaches <code>main</code>.</p>
-    </div>
-
-    <!-- ─── PHASE 2: STAGE ─── -->
-    <h3>Phase 2: Merge to Main triggers STAGE (<code>deploy.yml</code>)</h3>
-
-    <p>The moment a PR is merged to <code>main</code>, the STAGE workflow fires automatically. It first <strong>deploys the Snowflake Task DAG</strong> (ensuring it reflects the latest code/config), then runs the ML pipeline.</p>
-
-    <pre class="mermaid">
+<pre class="mermaid">
 flowchart TD
-    subgraph trigger2["Trigger: push to main"]
-        M[PR merged]
-    end
-    subgraph auth["Authentication"]
-        M --> OIDC["OIDC: mint JWT for STAGE env"]
-        OIDC --> CONN[Snowflake session established]
-    end
-    subgraph deploy_task["Deploy Task DAG"]
-        CONN --> TASK["CREATE OR REPLACE TASK ML_TRAINING_PIPELINE"]
-    end
-    subgraph pipeline["ML Pipeline (run_stage_pipeline.py)"]
-        TASK --> SUBMIT["Submit @remote job to STAGE_POOL"]
-        SUBMIT --> TRAIN[Train XGBoost model]
-        TRAIN --> EVAL[Evaluate metrics]
-        EVAL --> GATE{Quality Gate}
-        GATE -->|pass| REG["Register model V{n} in STAGE"]
-    end
-    subgraph replicate["Model Promotion"]
-        REG --> COPY["ALTER MODEL PROD ADD VERSION V{n}"]
-        COPY --> DEFAULT["SET DEFAULT_VERSION = V{n}"]
-    end
-    GATE -->|fail| BLOCK[Pipeline blocked - no promotion]
-    </pre>
+    CODE[Developer writes code] --> PR[Open Pull Request]
+    PR --> CHECKS["PR Checks (lint, test)"]
+    CHECKS --> MERGE[Merge to main]
+    MERGE --> FS[Register Feature Store in STAGE]
+    FS --> TRAIN[Train on STAGE_POOL]
+    TRAIN --> GATE{Quality Gate}
+    GATE -->|pass| REG[Register model]
+    REG --> COPY[Replicate to PROD]
+    COPY --> DISPATCH["Manual dispatch + approval"]
+    DISPATCH --> DEPLOY[Blue/green deploy]
+    DEPLOY --> LIVE[Live via Gateway]
+    GATE -->|fail| BLOCK[Pipeline blocked]
+</pre>
 
-    <div class="card">
-      <h4>What <code>deploy.yml</code> does step by step:</h4>
-      <table>
-        <thead><tr><th>#</th><th>Step</th><th>Details</th></tr></thead>
-        <tbody>
-          <tr><td>1</td><td>OIDC Authentication</td><td>Uses <code>snowflakedb/snowflake-actions@v3</code> with <code>use-oidc: true</code>. Authenticates as <code>SVC_GITHUB_ACTIONS_STAGE</code>.</td></tr>
-          <tr><td>2</td><td>Test connection</td><td><code>snow connection test -x</code> -- verifies the session works before running expensive pipeline.</td></tr>
-          <tr><td>3</td><td>Install Python + deps</td><td><code>uv python install 3.12</code> + <code>uv sync</code> -- fast dependency resolution.</td></tr>
-          <tr><td>4</td><td>Deploy Task DAG</td><td><code>python source/pipeline/ml_pipeline_dag.py --deploy --env stage</code> -- CREATE OR REPLACE the Snowflake Task, ensuring it always matches the code in git.</td></tr>
-          <tr><td>5</td><td>Run STAGE pipeline</td><td><code>python scripts/run_stage_pipeline.py</code> -- trains, evaluates, quality gates, and promotes.</td></tr>
-        </tbody>
-      </table>
+<h3>Quality gate</h3>
 
-      <h4>Inside <code>run_stage_pipeline.py</code>:</h4>
-      <table>
-        <thead><tr><th>Sub-step</th><th>What happens</th><th>Where it runs</th></tr></thead>
-        <tbody>
-          <tr><td>Submit <code>@remote</code> job</td><td>Serializes the training function and ships to compute pool</td><td>CI runner (submitter)</td></tr>
-          <tr><td>Install pip deps</td><td><code>xgboost</code>, <code>scikit-learn</code>, <code>snowflake-ml-python</code> installed in container</td><td>SNOW_MLOPS_STAGE_POOL</td></tr>
-          <tr><td>Load training data</td><td>SQL join of Feature View DT + PROD labels (<code>RAW_TRANSACTIONS.IS_FRAUD</code>)</td><td>SNOW_MLOPS_STAGE_POOL</td></tr>
-          <tr><td>Train XGBoost</td><td>5-fold CV + final model fit with <code>scale_pos_weight=33</code></td><td>SNOW_MLOPS_STAGE_POOL</td></tr>
-          <tr><td>Evaluate</td><td>AUC-ROC, PR-AUC, Precision, Recall, F1 on holdout set</td><td>SNOW_MLOPS_STAGE_POOL</td></tr>
-          <tr><td>Quality gate</td><td>Check AUC >= 0.85, Precision >= 0.70, Recall >= 0.60</td><td>SNOW_MLOPS_STAGE_POOL</td></tr>
-          <tr><td>Auto-version</td><td><code>SHOW VERSIONS</code> -> parse max -> register as V{max+1}</td><td>SNOW_MLOPS_STAGE_POOL</td></tr>
-          <tr><td>Register model</td><td><code>reg.log_model()</code> with conda deps, sample data, git SHA in comment</td><td>SNOW_MLOPS_STAGE_POOL</td></tr>
-          <tr><td>Replicate to PROD</td><td><code>ALTER MODEL PROD ADD VERSION V{n} FROM MODEL STAGE VERSION V{n}</code></td><td>CI runner (SQL)</td></tr>
-          <tr><td>Set default</td><td><code>ALTER MODEL PROD SET DEFAULT_VERSION = V{n}</code></td><td>CI runner (SQL)</td></tr>
-        </tbody>
-      </table>
-      <p><strong>Duration:</strong> ~10-12 minutes total (5 min compute pool cold-start + 3 min training + 2 min replication)</p>
-    </div>
+<p>The STAGE pipeline enforces metric thresholds before promoting to PROD:</p>
 
-    <div class="concept">
-      <strong>The Task DAG is deployed from git on every merge.</strong> This means if you change pipeline config (hyperparameters, thresholds, feature versions) in a PR, the Task is automatically updated when merged. No manual re-deployment needed. The Task definition always matches the code on <code>main</code>.
-    </div>
+<table>
+  <thead><tr><th>Metric</th><th>Threshold</th><th>Effect if failed</th></tr></thead>
+  <tbody>
+    <tr><td>AUC-ROC</td><td>&gt;= 0.85</td><td>Replication blocked</td></tr>
+    <tr><td>Precision</td><td>&gt;= 0.70</td><td>Replication blocked</td></tr>
+    <tr><td>Recall</td><td>&gt;= 0.60</td><td>Replication blocked</td></tr>
+  </tbody>
+</table>
 
-    <div class="why">
-      <strong>Why deploy a Task if CI runs the pipeline directly?</strong> The Task serves dual purposes: (1) it's the target for CI-triggered runs, and (2) it can be scheduled for recurring retraining (e.g., nightly) without CI involvement. The Task exists in Snowflake as observable infrastructure -- you can check its history, see return values, and monitor it via <code>TASK_HISTORY()</code>.
-    </div>
+<p>Metrics are written to the GitHub Actions Job Summary and posted as a comment on the merged PR.</p>
 
-    <div class="concept">
-      <strong>After STAGE completes, the model is sitting in PROD registry ready to be deployed -- but no service has been created yet.</strong> The model is just an artifact at this point. Deploying it as a live service requires the separate PROD workflow with human approval.
-    </div>
+<h3>Task DAG</h3>
 
-    <!-- ─── PHASE 3: PROD ─── -->
-    <h3>Phase 3: Manual PROD Deploy (<code>deploy-prod.yml</code>)</h3>
+<p>The ML pipeline is defined as a Snowflake Task (<code>ML_TRAINING_PIPELINE</code>) deployed from git on every merge. This ensures the Task definition always matches the code on <code>main</code>.</p>
 
-    <p>When the team is ready to put the new model into production, someone manually triggers the PROD deployment. This requires a reviewer to approve (configured in GitHub Environment settings for <code>PROD</code>).</p>
+<pre><code># Deploy Task DAG for an environment:
+python source/pipeline/ml_pipeline_dag.py --deploy --env stage
 
-    <pre class="mermaid">
-flowchart TD
-    subgraph trigger3["Trigger: manual workflow_dispatch"]
-        HUMAN[Team member clicks Run Workflow]
-        HUMAN --> REVIEW[Reviewer approves in GitHub UI]
-    end
-    subgraph auth3["Authentication"]
-        REVIEW --> OIDC3["OIDC: mint JWT for PROD env"]
-        OIDC3 --> CONN3[Snowflake session as SVC_GITHUB_ACTIONS]
-    end
-    subgraph deploy["Blue/Green Deploy (deploy_prod_service.py)"]
-        CONN3 --> VER["Read default version from registry (V3)"]
-        VER --> NAME["Name service: SERVICE_V3"]
-        NAME --> DUP{Same as current gateway target?}
-        DUP -->|yes| SKIP[Skip - already deployed]
-        DUP -->|no| CREATE["create_service(SERVICE_V3)"]
-        CREATE --> BUILD[Image build ~10min]
-        BUILD --> READY[Poll until READY]
-        READY --> HEALTH["Health check: predict_proba"]
-        HEALTH -->|pass| SHIFT["ALTER GATEWAY 100% to V3"]
-        SHIFT --> DROP[DROP old SERVICE_V2]
-        DROP --> DONE[Deployment complete]
-        HEALTH -->|fail| ABORT[Abort - V2 keeps serving]
-    end
-    </pre>
+# Trigger execution:
+python source/pipeline/ml_pipeline_dag.py --run --env stage</code></pre>
 
-    <div class="card">
-      <h4>What <code>deploy-prod.yml</code> does step by step:</h4>
-      <table>
-        <thead><tr><th>#</th><th>Step</th><th>Details</th></tr></thead>
-        <tbody>
-          <tr><td>1</td><td>Approval gate</td><td>Workflow pauses until a designated reviewer approves in the GitHub UI</td></tr>
-          <tr><td>2</td><td>OIDC Authentication</td><td>Authenticates as <code>SVC_GITHUB_ACTIONS</code> (PROD-scoped user)</td></tr>
-          <tr><td>3</td><td>Verify model exists</td><td><code>SHOW MODELS LIKE 'MLOPS_FRAUD_DETECTOR' IN SNOW_MLOPS_PROD.ML</code></td></tr>
-          <tr><td>4</td><td>Run deploy script</td><td><code>python scripts/deploy_prod_service.py</code> -- the blue/green logic:</td></tr>
-        </tbody>
-      </table>
+<h3>Pluggable promotion topology</h3>
 
-      <h4>Inside <code>deploy_prod_service.py</code>:</h4>
-      <table>
-        <thead><tr><th>Sub-step</th><th>What happens</th><th>Why</th></tr></thead>
-        <tbody>
-          <tr><td>Get default version</td><td>Reads <code>default_version_name</code> from model metadata</td><td>Knows which version to deploy (set by STAGE)</td></tr>
-          <tr><td>Check gateway target</td><td>Parses <code>DESC GATEWAY</code> spec to find current service</td><td>Detects if already deployed (idempotent)</td></tr>
-          <tr><td><code>create_service()</code></td><td>Builds container image + starts SPCS service</td><td>New service coexists with old one</td></tr>
-          <tr><td>Wait for READY</td><td>Polls <code>SYSTEM$GET_SERVICE_STATUS</code> every 15s</td><td>Ensures container is healthy before routing traffic</td></tr>
-          <tr><td>Health check</td><td>Sends test prediction via <code>mv.run()</code></td><td>Validates the model actually works end-to-end</td></tr>
-          <tr><td><code>ALTER GATEWAY</code></td><td>Shifts 100% traffic to new service</td><td>Atomic cutover -- clients see no interruption</td></tr>
-          <tr><td><code>DROP SERVICE</code></td><td>Removes old service</td><td>Frees compute pool resources</td></tr>
-        </tbody>
-      </table>
-      <p><strong>Duration:</strong> ~15-20 minutes (dominated by container image build; subsequent deploys of same deps are faster)</p>
-    </div>
+<p>The model promotion step is implemented as a pluggable strategy controlled by the <code>TOPOLOGY</code> environment variable:</p>
 
-    <div class="why">
-      <strong>Why is PROD a separate workflow instead of continuing from STAGE?</strong> Decoupling gives you control. The STAGE pipeline runs on every merge (potentially multiple times a day). You don't want every merge to automatically push to production. The manual gate lets you batch multiple model improvements, coordinate with stakeholders, or delay until a maintenance window.
-    </div>
+<table>
+  <thead><tr><th>Topology</th><th>Mechanism</th><th>When to use</th></tr></thead>
+  <tbody>
+    <tr><td><code>single-account</code> (default)</td><td><code>ALTER MODEL ... ADD VERSION FROM MODEL</code></td><td>All envs in one account</td></tr>
+    <tr><td><code>multi-account</code></td><td>Cross-account model sharing</td><td>Separate accounts per env</td></tr>
+    <tr><td><code>cross-region</code></td><td>Replication group</td><td>Accounts in different regions</td></tr>
+  </tbody>
+</table>
 
-    <!-- ─── SUMMARY ─── -->
-    <h3>Complete End-to-End Timeline</h3>
-    <pre class="mermaid">
-flowchart LR
-    subgraph phase1["Phase 1: Code Quality"]
-        PR[Open PR] --> LINT[Lint + Test]
-        LINT --> APPROVE_PR[Reviewer approves PR]
-    end
-    subgraph phase2["Phase 2: ML Validation"]
-        APPROVE_PR --> MERGE[Merge to main]
-        MERGE --> TRAIN[Train on STAGE_POOL]
-        TRAIN --> REG[Register + Replicate]
-    end
-    subgraph phase3["Phase 3: Production Deploy"]
-        REG --> DISPATCH[Manual trigger]
-        DISPATCH --> APPROVE_PROD[Reviewer approves PROD]
-        APPROVE_PROD --> DEPLOY[Blue/green deploy]
-        DEPLOY --> LIVE[Live via Gateway]
-    end
-    </pre>
+<hr />
 
-    <div class="card">
-      <table>
-        <thead><tr><th>Phase</th><th>Trigger</th><th>Automated?</th><th>Snowflake Env</th><th>Duration</th></tr></thead>
-        <tbody>
-          <tr><td>PR Checks</td><td>PR opened</td><td>Fully automatic</td><td>None</td><td>~2 min</td></tr>
-          <tr><td>STAGE Pipeline</td><td>Merge to main</td><td>Fully automatic</td><td>SNOW_MLOPS_STAGE</td><td>~10 min</td></tr>
-          <tr><td>PROD Deploy</td><td>Manual dispatch</td><td>After human approval</td><td>SNOW_MLOPS_PROD</td><td>~15-20 min</td></tr>
-        </tbody>
-      </table>
-    </div>
+<!-- ================================================================ -->
+<h2 id="cicd">CI/CD Infrastructure</h2>
 
-    <h3>What Each Database Contains</h3>
-    <table>
-      <thead><tr><th>Object</th><th><span class="badge badge-dev">DEV</span></th><th><span class="badge badge-stage">STAGE</span></th><th><span class="badge badge-prod">PROD</span></th></tr></thead>
-      <tbody>
-        <tr><td>Source data (tables)</td><td>-</td><td>-</td><td>RAW_TRANSACTIONS, CUSTOMER_PROFILES, MERCHANT_DATA</td></tr>
-        <tr><td>Feature Views (DTs)</td><td>CUSTOMER_RISK_FEATURES</td><td>CUSTOMER_RISK_FEATURES</td><td>-</td></tr>
-        <tr><td>Model (registry)</td><td>MLOPS_FRAUD_DETECTOR (all dev versions)</td><td>MLOPS_FRAUD_DETECTOR (CI versions)</td><td>MLOPS_FRAUD_DETECTOR (promoted versions only)</td></tr>
-        <tr><td>Service</td><td>Optional test service</td><td>Never</td><td>MLOPS_FRAUD_DETECTOR_SERVICE_V{n}</td></tr>
-        <tr><td>Gateway</td><td>-</td><td>-</td><td>FRAUD_DETECTOR_GATEWAY</td></tr>
-      </tbody>
-    </table>
+<p>Three GitHub Actions workflows orchestrate the pipeline. Authentication uses OIDC (zero stored secrets).</p>
 
-    <div class="concept">
-      <strong>Environment isolation by database, not by account.</strong> All three environments live in the same Snowflake account but in separate databases (<code>SNOW_MLOPS_DEV</code>, <code>SNOW_MLOPS_STAGE</code>, <code>SNOW_MLOPS_PROD</code>). This simplifies model replication (same-account cross-DB copy is atomic) while still providing clear RBAC boundaries.
-    </div>
+<h3>Workflows</h3>
 
-    <h3>Pluggable Promotion Topology</h3>
+<table>
+  <thead><tr><th>File</th><th>Trigger</th><th>Actions</th></tr></thead>
+  <tbody>
+    <tr><td><code>pr-checks.yml</code></td><td>PR to <code>main</code></td><td>Lint (ruff), format check, pytest</td></tr>
+    <tr><td><code>deploy.yml</code></td><td>Push to <code>main</code></td><td>Register features, train, quality gate, replicate</td></tr>
+    <tr><td><code>deploy-prod.yml</code></td><td>Manual dispatch</td><td>Blue/green deploy, health check, gateway shift</td></tr>
+  </tbody>
+</table>
 
-    <p>The model promotion step (how a model moves from STAGE to PROD) is implemented as a <strong>pluggable strategy</strong> controlled by a single environment variable: <code>TOPOLOGY</code>.</p>
+<h3>OIDC authentication</h3>
 
-    <div class="card">
-      <table>
-        <thead><tr><th>Topology</th><th>Mechanism</th><th>When to Use</th></tr></thead>
-        <tbody>
-          <tr><td><code>single-account</code> (default)</td><td><code>ALTER MODEL PROD ADD VERSION FROM STAGE</code></td><td>All envs in one Snowflake account</td></tr>
-          <tr><td><code>multi-account</code></td><td>Cross-account model sharing / listing</td><td>Separate accounts per env (same region)</td></tr>
-          <tr><td><code>cross-region</code></td><td>Replication group or cross-region listing</td><td>Accounts in different cloud regions</td></tr>
-        </tbody>
-      </table>
-    </div>
+<p>GitHub Actions authenticates to Snowflake using OIDC. GitHub mints a short-lived JWT; Snowflake validates the issuer and subject claim. No secrets are stored.</p>
 
-    <pre><code># Project structure:
-deploy/
-├── promote.py                  # CLI dispatcher (reads $TOPOLOGY)
-└── strategies/
-    ├── single_account.py       # Active: cross-DB replication
-    ├── multi_account.py        # Future: cross-account
-    └── cross_region.py         # Future: cross-region
-
-# To switch topology, set one GitHub repo variable:
-#   TOPOLOGY = "multi-account"
-# All workflows automatically use the new promotion strategy.</code></pre>
-
-    <div class="why">
-      <strong>Why make this pluggable?</strong> Different organizations have different isolation requirements. Some use one account with database separation (simplest). Others mandate separate accounts per environment for compliance. Others operate globally across regions. The ML training code, feature logic, and serving infrastructure are identical regardless -- only the model promotion mechanism changes.
-    </div>
-  </section>
-
-  <!-- ═══════════════════════════════════════════════════════════════ -->
-  <section id="cicd">
-    <h2>7. CI/CD Infrastructure</h2>
-
-    <p>The workflows above rely on two key pieces of infrastructure: OIDC authentication (zero secrets) and network access for CI runners.</p>
-
-    <h3>OIDC Authentication (Zero Secrets)</h3>
-
-    <div class="concept">
-      <strong>No passwords, no API keys, no stored secrets.</strong> GitHub Actions authenticates to Snowflake using OIDC (OpenID Connect) -- a protocol where GitHub mints a short-lived JWT token that Snowflake validates directly. The token is generated fresh for each workflow run and expires in minutes. Nothing is stored in GitHub Secrets.
-    </div>
-
-    <pre class="mermaid">
+<pre class="mermaid">
 sequenceDiagram
     participant GH as GitHub Actions
-    participant IDP as GitHub OIDC Provider
     participant SF as Snowflake
-    GH->>IDP: "I'm running in environment STAGE"
-    IDP-->>GH: JWT signed by GitHub
-    Note over GH: Token contains subject claim
-    GH->>SF: "Here's my JWT, authenticate me"
-    SF->>SF: Verify signature + check subject matches user
-    SF-->>GH: Session granted (short-lived)
-    GH->>SF: Run ML pipeline via session
-    </pre>
+    GH->>GH: Mint OIDC JWT
+    GH->>SF: Present JWT with subject claim
+    SF->>SF: Validate issuer + subject
+    SF-->>GH: Session token
+    GH->>SF: Execute pipeline
+</pre>
 
-    <h4>Environment-Scoped Service Users</h4>
-    <p>Each Snowflake service user is locked to a specific GitHub environment via the OIDC subject claim:</p>
-    <pre><code>-- STAGE user: can only be authenticated from the STAGE environment
-CREATE USER SVC_GITHUB_ACTIONS_STAGE TYPE = SERVICE;
--- Subject: repo:org/repo:environment:STAGE
+<p>Service users are scoped to specific GitHub environments:</p>
 
--- PROD user: can only be authenticated from the PROD environment
-CREATE USER SVC_GITHUB_ACTIONS TYPE = SERVICE;
--- Subject: repo:org/repo:environment:PROD</code></pre>
+<pre><code>-- STAGE service user
+CREATE USER SVC_GITHUB_ACTIONS_STAGE
+  TYPE = SERVICE
+  DEFAULT_ROLE = ACCOUNTADMIN
+  WORKLOAD_IDENTITY = (
+    TYPE = OIDC
+    ISSUER = 'https://token.actions.githubusercontent.com'
+    SUBJECT = 'repo:owner/repo:environment:STAGE'
+  );
 
-    <div class="why">
-      <strong>Why OIDC over stored credentials?</strong> Stored secrets can leak (commit history, logs, shared access). OIDC tokens are generated at runtime, scoped to a specific workflow run, and expire immediately. Even if somehow intercepted, they can't be replayed. The environment scoping adds a second layer -- a STAGE token literally cannot authenticate as PROD.
-    </div>
+-- PROD service user
+CREATE USER SVC_GITHUB_ACTIONS
+  TYPE = SERVICE
+  DEFAULT_ROLE = ACCOUNTADMIN
+  WORKLOAD_IDENTITY = (
+    TYPE = OIDC
+    ISSUER = 'https://token.actions.githubusercontent.com'
+    SUBJECT = 'repo:owner/repo:environment:PROD'
+  );</code></pre>
 
-    <h3>Network Access for CI Runners</h3>
-    <p>GitHub Actions runners have dynamic IPs that change every run. Snowflake provides a <strong>managed network rule</strong> that stays current automatically:</p>
-    <pre><code>-- Snowflake maintains this rule (IPs updated automatically)
-CREATE NETWORK POLICY GITHUB_ACTIONS_POLICY
+<h3>Network access</h3>
+
+<p>GitHub Actions runners use dynamic IPs. Snowflake provides a managed network rule:</p>
+
+<pre><code>CREATE NETWORK POLICY GITHUB_ACTIONS_POLICY
   ALLOWED_NETWORK_RULE_LIST = ('SNOWFLAKE.NETWORK_SECURITY.GITHUBACTIONS_GLOBAL');
 
--- Assign to both service users
-ALTER USER SVC_GITHUB_ACTIONS SET NETWORK_POLICY = 'GITHUB_ACTIONS_POLICY';
-ALTER USER SVC_GITHUB_ACTIONS_STAGE SET NETWORK_POLICY = 'GITHUB_ACTIONS_POLICY';</code></pre>
+ALTER USER SVC_GITHUB_ACTIONS_STAGE SET NETWORK_POLICY = 'GITHUB_ACTIONS_POLICY';
+ALTER USER SVC_GITHUB_ACTIONS SET NETWORK_POLICY = 'GITHUB_ACTIONS_POLICY';</code></pre>
 
-    <div class="pitfall">
-      <strong>Without a network policy, CI will fail.</strong> If your Snowflake account has a default network policy that restricts IPs, GitHub Actions runners will be blocked. The managed rule <code>GITHUBACTIONS_GLOBAL</code> automatically includes all GitHub runner IPs and is maintained by Snowflake -- you never update it manually.
-    </div>
+<h3>Branch protection</h3>
 
-    <h3>GitHub Repository Configuration</h3>
-    <table>
-      <thead><tr><th>Setting</th><th>Value</th><th>Purpose</th></tr></thead>
-      <tbody>
-        <tr><td>Variable: <code>SNOWFLAKE_ACCOUNT</code></td><td>Your account identifier</td><td>Used by all workflows</td></tr>
-        <tr><td>Variable: <code>SNOWFLAKE_DATABASE_STAGE</code></td><td><code>SNOW_MLOPS_STAGE</code></td><td>STAGE workflow target</td></tr>
-        <tr><td>Variable: <code>SNOWFLAKE_DATABASE_PROD</code></td><td><code>SNOW_MLOPS_PROD</code></td><td>PROD workflow target</td></tr>
-        <tr><td>Variable: <code>SNOWFLAKE_SCHEMA</code></td><td><code>ML</code></td><td>Schema in all envs</td></tr>
-        <tr><td>Environment: <code>STAGE</code></td><td>No protection rules</td><td>Auto-deploys on merge</td></tr>
-        <tr><td>Environment: <code>PROD</code></td><td>Required reviewers</td><td>Human approval gate</td></tr>
-        <tr><td>Branch protection: <code>main</code></td><td>Require PR + status checks + review</td><td>No untested code on main</td></tr>
-      </tbody>
-    </table>
+<table>
+  <thead><tr><th>Rule</th><th>Effect</th></tr></thead>
+  <tbody>
+    <tr><td>Require pull requests</td><td>No direct commits to main</td></tr>
+    <tr><td>Require <code>lint-and-test</code> status</td><td>Code must pass checks before merge</td></tr>
+    <tr><td>1 approving review</td><td>Peer review enforced</td></tr>
+    <tr><td>PROD environment gate</td><td>Manual deploy requires reviewer approval</td></tr>
+  </tbody>
+</table>
 
-    <div class="concept">
-      <strong>The full governance chain:</strong> Code review (PR approval) + automated tests (pr-checks) + ML validation (STAGE training succeeds) + human approval (PROD environment gate). Four layers of validation before any model reaches production users.
-    </div>
-  </section>
+<hr />
 
-  <script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.6/dist/mermaid.min.js"></script>
-  <script>
-    mermaid.initialize({ startOnLoad: true, theme: 'default' });
-  </script>
+<!-- ================================================================ -->
+<h2 id="see-also">See also</h2>
+
+<ul>
+  <li><a href="https://docs.snowflake.com/en/developer-guide/snowflake-ml/feature-store/overview">Snowflake Feature Store</a></li>
+  <li><a href="https://docs.snowflake.com/en/developer-guide/snowflake-ml/ml-jobs/overview">Snowflake ML Jobs</a></li>
+  <li><a href="https://docs.snowflake.com/en/developer-guide/snowflake-ml/model-registry/overview">Snowflake Model Registry</a></li>
+  <li><a href="https://docs.snowflake.com/en/developer-guide/snowflake-ml/inference/real-time-inference-rest-api">Real-Time Inference (REST API)</a></li>
+  <li><a href="https://docs.snowflake.com/en/developer-guide/snowflake-ml/inference/stable-endpoints-api-reference">Snowflake Gateway</a></li>
+  <li><a href="https://docs.snowflake.com/en/developer-guide/snowflake-cli/cicd/github-action">Snowflake CLI GitHub Action</a></li>
+</ul>
+
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.6/dist/mermaid.min.js"></script>
+<script>
+  mermaid.initialize({ startOnLoad: true, theme: 'default' });
+</script>
 </body>
 </html>
