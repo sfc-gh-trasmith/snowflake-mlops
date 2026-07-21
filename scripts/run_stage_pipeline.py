@@ -26,6 +26,11 @@ STAGE_WAREHOUSE = "SNOW_MLOPS_STAGE_WH"
 STAGE_COMPUTE_POOL = "SNOW_MLOPS_STAGE_POOL"
 STAGE_JOB_STAGE = f"@{STAGE_DATABASE}.{STAGE_SCHEMA}.JOB_STAGE"
 
+# Feature Store version (must match config.py)
+FEATURE_VIEW_NAME = "CUSTOMER_RISK_FEATURES"
+FEATURE_VIEW_VERSION = "V1"
+_FV_TABLE = f'"{FEATURE_VIEW_NAME}${FEATURE_VIEW_VERSION}"'
+
 # Where data lives (always PROD)
 SOURCE_DATABASE = "SNOW_MLOPS_PROD"
 SOURCE_SCHEMA = "ML"
@@ -87,8 +92,7 @@ def train_and_register_stage() -> str:
         git_sha = "unknown"
 
     # Read training data from PROD source + STAGE feature views
-    # (Feature views in STAGE also read from PROD source data)
-    print("Loading training data from PROD source tables...")
+    print(f"Loading training data from {_FV_TABLE}...")
     df = session.sql(f"""
         SELECT
             c.CUSTOMER_ID,
@@ -105,7 +109,7 @@ def train_and_register_stage() -> str:
             c.ACCOUNT_AGE_DAYS,
             c.ANNUAL_INCOME,
             t.IS_FRAUD
-        FROM {db}.{schema}."CUSTOMER_RISK_FEATURES$V1" c
+        FROM {db}.{schema}.{_FV_TABLE} c
         JOIN {source_db}.{source_schema}.RAW_TRANSACTIONS t
             ON c.CUSTOMER_ID = t.CUSTOMER_ID
     """).to_pandas()
@@ -180,7 +184,7 @@ def train_and_register_stage() -> str:
         version_name=version_name,
         conda_dependencies=["xgboost", "scikit-learn"],
         sample_input_data=X_test.head(10),
-        comment=f"STAGE pipeline: AUC={metrics['auc_roc']:.4f}, F1={metrics['f1']:.4f} | git:{git_sha}",
+        comment=f"STAGE pipeline: features:{_FV_TABLE} | AUC={metrics['auc_roc']:.4f}, F1={metrics['f1']:.4f} | git:{git_sha}",
     )
     print("  Model registered in STAGE!")
 

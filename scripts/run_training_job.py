@@ -9,9 +9,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "source"))
 from snowpark_session import create_snowpark_session
-from config import DATABASE, SCHEMA, WAREHOUSE, COMPUTE_POOL, JOB_STAGE
+from config import DATABASE, SCHEMA, WAREHOUSE, COMPUTE_POOL, JOB_STAGE, FEATURE_VIEW_NAME, FEATURE_VIEW_VERSION
 
 from snowflake.ml.jobs import remote
+
+# These get captured by the @remote closure when the function is serialized
+_FV_TABLE = f'"{FEATURE_VIEW_NAME}${FEATURE_VIEW_VERSION}"'
+_DB = DATABASE
+_SCHEMA = SCHEMA
 
 
 @remote(
@@ -45,8 +50,9 @@ def train_and_register() -> str:
 
     session = Session.builder.getOrCreate()
 
-    db = "SNOW_MLOPS_DEV"
-    schema = "ML"
+    db = _DB
+    schema = _SCHEMA
+    feature_table = _FV_TABLE
     model_name = "MLOPS_FRAUD_DETECTOR"
 
     # Auto-increment version
@@ -59,7 +65,7 @@ def train_and_register() -> str:
         version_name = "V1"
 
     # Read training data by joining Feature View DT with source labels
-    print("Loading training data from Feature View + source tables...")
+    print(f"Loading training data from {feature_table}...")
     df = session.sql(f"""
         SELECT
             c.CUSTOMER_ID,
@@ -76,7 +82,7 @@ def train_and_register() -> str:
             c.ACCOUNT_AGE_DAYS,
             c.ANNUAL_INCOME,
             t.IS_FRAUD
-        FROM {db}.{schema}."CUSTOMER_RISK_FEATURES$V1" c
+        FROM {db}.{schema}.{feature_table} c
         JOIN {db}.{schema}.RAW_TRANSACTIONS t
             ON c.CUSTOMER_ID = t.CUSTOMER_ID
     """).to_pandas()
@@ -157,7 +163,7 @@ def train_and_register() -> str:
         version_name=version_name,
         conda_dependencies=["xgboost", "scikit-learn"],
         sample_input_data=X_test.head(10),
-        comment=f"XGBoost fraud detector - AUC={metrics['auc_roc']:.4f}, F1={metrics['f1']:.4f}",
+        comment=f"XGBoost fraud detector - features:{_FV_TABLE} | AUC={metrics['auc_roc']:.4f}, F1={metrics['f1']:.4f}",
     )
     print("  Model registered!")
 
