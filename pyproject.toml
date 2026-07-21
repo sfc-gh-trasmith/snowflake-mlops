@@ -14,6 +14,10 @@ dev = [
     "ruff>=0.11.0",
     "pytest>=8.0",
 ]
+snow = [
+    "snowflake-snowpark-python>=1.53.1",
+    "snowflake-ml-python>=1.47.0",
+]
 
 [tool.ruff]
 target-version = "py312"
