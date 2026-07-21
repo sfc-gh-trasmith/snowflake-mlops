@@ -121,7 +121,7 @@ snowflake-mlops/
 │   ├── snowpark_session.py        # Session helper (local + OIDC)
 │   ├── features/                  # Feature Store definitions
 │   ├── training/                  # Training utilities
-│   └── pipeline/                  # ML Task DAG
+│   └── pipeline/                  # Snowflake Task DAG (deployed by CI)
 ├── tests/
 │   ├── test_config.py             # Unit tests
 │   └── test_endpoint.py           # Integration tests (gateway + predictions)

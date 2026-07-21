@@ -555,7 +555,7 @@ flowchart LR
     <!-- ─── PHASE 2: STAGE ─── -->
     <h3>Phase 2: Merge to Main triggers STAGE (<code>deploy.yml</code>)</h3>
 
-    <p>The moment a PR is merged to <code>main</code>, the STAGE workflow fires automatically. This is the automated ML pipeline -- it proves the model can train successfully with production data and produces a deployable artifact.</p>
+    <p>The moment a PR is merged to <code>main</code>, the STAGE workflow fires automatically. It first <strong>deploys the Snowflake Task DAG</strong> (ensuring it reflects the latest code/config), then runs the ML pipeline.</p>
 
     <pre class="mermaid">
 flowchart TD
@@ -566,16 +566,21 @@ flowchart TD
         M --> OIDC["OIDC: mint JWT for STAGE env"]
         OIDC --> CONN[Snowflake session established]
     end
+    subgraph deploy_task["Deploy Task DAG"]
+        CONN --> TASK["CREATE OR REPLACE TASK ML_TRAINING_PIPELINE"]
+    end
     subgraph pipeline["ML Pipeline (run_stage_pipeline.py)"]
-        CONN --> SUBMIT["Submit @remote job to STAGE_POOL"]
+        TASK --> SUBMIT["Submit @remote job to STAGE_POOL"]
         SUBMIT --> TRAIN[Train XGBoost model]
         TRAIN --> EVAL[Evaluate metrics]
-        EVAL --> REG["Register model V{n} in STAGE"]
+        EVAL --> GATE{Quality Gate}
+        GATE -->|pass| REG["Register model V{n} in STAGE"]
     end
     subgraph replicate["Model Promotion"]
         REG --> COPY["ALTER MODEL PROD ADD VERSION V{n}"]
         COPY --> DEFAULT["SET DEFAULT_VERSION = V{n}"]
     end
+    GATE -->|fail| BLOCK[Pipeline blocked - no promotion]
     </pre>
 
     <div class="card">
@@ -586,7 +591,8 @@ flowchart TD
           <tr><td>1</td><td>OIDC Authentication</td><td>Uses <code>snowflakedb/snowflake-actions@v3</code> with <code>use-oidc: true</code>. Authenticates as <code>SVC_GITHUB_ACTIONS_STAGE</code>.</td></tr>
           <tr><td>2</td><td>Test connection</td><td><code>snow connection test -x</code> -- verifies the session works before running expensive pipeline.</td></tr>
           <tr><td>3</td><td>Install Python + deps</td><td><code>uv python install 3.12</code> + <code>uv sync</code> -- fast dependency resolution.</td></tr>
-          <tr><td>4</td><td>Run STAGE pipeline</td><td><code>python scripts/run_stage_pipeline.py</code> -- this is where the ML happens:</td></tr>
+          <tr><td>4</td><td>Deploy Task DAG</td><td><code>python source/pipeline/ml_pipeline_dag.py --deploy --env stage</code> -- CREATE OR REPLACE the Snowflake Task, ensuring it always matches the code in git.</td></tr>
+          <tr><td>5</td><td>Run STAGE pipeline</td><td><code>python scripts/run_stage_pipeline.py</code> -- trains, evaluates, quality gates, and promotes.</td></tr>
         </tbody>
       </table>
 
@@ -599,6 +605,7 @@ flowchart TD
           <tr><td>Load training data</td><td>SQL join of Feature View DT + PROD labels (<code>RAW_TRANSACTIONS.IS_FRAUD</code>)</td><td>SNOW_MLOPS_STAGE_POOL</td></tr>
           <tr><td>Train XGBoost</td><td>5-fold CV + final model fit with <code>scale_pos_weight=33</code></td><td>SNOW_MLOPS_STAGE_POOL</td></tr>
           <tr><td>Evaluate</td><td>AUC-ROC, PR-AUC, Precision, Recall, F1 on holdout set</td><td>SNOW_MLOPS_STAGE_POOL</td></tr>
+          <tr><td>Quality gate</td><td>Check AUC >= 0.85, Precision >= 0.70, Recall >= 0.60</td><td>SNOW_MLOPS_STAGE_POOL</td></tr>
           <tr><td>Auto-version</td><td><code>SHOW VERSIONS</code> -> parse max -> register as V{max+1}</td><td>SNOW_MLOPS_STAGE_POOL</td></tr>
           <tr><td>Register model</td><td><code>reg.log_model()</code> with conda deps, sample data, git SHA in comment</td><td>SNOW_MLOPS_STAGE_POOL</td></tr>
           <tr><td>Replicate to PROD</td><td><code>ALTER MODEL PROD ADD VERSION V{n} FROM MODEL STAGE VERSION V{n}</code></td><td>CI runner (SQL)</td></tr>
@@ -606,6 +613,14 @@ flowchart TD
         </tbody>
       </table>
       <p><strong>Duration:</strong> ~10-12 minutes total (5 min compute pool cold-start + 3 min training + 2 min replication)</p>
+    </div>
+
+    <div class="concept">
+      <strong>The Task DAG is deployed from git on every merge.</strong> This means if you change pipeline config (hyperparameters, thresholds, feature versions) in a PR, the Task is automatically updated when merged. No manual re-deployment needed. The Task definition always matches the code on <code>main</code>.
+    </div>
+
+    <div class="why">
+      <strong>Why deploy a Task if CI runs the pipeline directly?</strong> The Task serves dual purposes: (1) it's the target for CI-triggered runs, and (2) it can be scheduled for recurring retraining (e.g., nightly) without CI involvement. The Task exists in Snowflake as observable infrastructure -- you can check its history, see return values, and monitor it via <code>TASK_HISTORY()</code>.
     </div>
 
     <div class="concept">
