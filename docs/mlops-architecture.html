@@ -240,6 +240,87 @@ GROUP BY t.CUSTOMER_ID, c.CREDIT_SCORE, c.ACCOUNT_OPEN_DATE, c.ANNUAL_INCOME;</c
     <div class="why">
       <strong>Why Dynamic Tables instead of a scheduled dbt job?</strong> Dynamic Tables are <em>declarative</em> -- you don't manage scheduling, retries, or orchestration. Snowflake tracks upstream dependencies and refreshes automatically. They also support incremental refresh (only processing changed data), which scales better than full table rebuilds.
     </div>
+
+    <h3>Feature Promotion Across Environments</h3>
+
+    <p>Unlike models (which are replicated via SQL), Feature Views <strong>cannot be replicated</strong>. A Dynamic Table is a live computation, not a static artifact. Promotion means re-running the registration code against the target database.</p>
+
+    <div class="concept">
+      <strong>Feature promotion = re-applying the same code to a different database.</strong> The Feature View definition lives in git (<code>source/features/feature_views.py</code>). When the CI pipeline calls <code>register_feature_views(session, database=TARGET)</code>, it creates or replaces the Dynamic Table in the target environment. Same SQL, same source data, same output -- just a different Snowflake database.
+    </div>
+
+    <h4>Offline Feature Serving (Current Implementation)</h4>
+
+    <p>The client sends all features in the inference request. No feature lookup at serving time.</p>
+
+    <table>
+      <thead><tr><th>Environment</th><th>Feature View?</th><th>Refresh</th><th>Purpose</th></tr></thead>
+      <tbody>
+        <tr><td><span class="badge badge-dev">DEV</span></td><td>Yes</td><td>On-demand (DOWNSTREAM)</td><td>Training iteration</td></tr>
+        <tr><td><span class="badge badge-stage">STAGE</span></td><td>Yes</td><td>Once per pipeline run, then suspend</td><td>CI training validation</td></tr>
+        <tr><td><span class="badge badge-prod">PROD</span></td><td>No</td><td>-</td><td>Not needed (client supplies features)</td></tr>
+      </tbody>
+    </table>
+
+    <pre><code># CI/CD flow for feature changes (offline):
+#
+# 1. Developer modifies feature SQL in source/features/feature_views.py
+# 2. Opens PR, merges to main
+# 3. deploy.yml → register_feature_views(STAGE) → creates/updates DT
+# 4. Train model on updated features → new model version
+# 5. Replicate model to PROD
+# 6. PROD serves model; client sends pre-computed features in request
+#
+# No feature objects needed in PROD.</code></pre>
+
+    <h4>Online Feature Serving (Future Enhancement)</h4>
+
+    <p>The client sends only an entity key (e.g., <code>CUSTOMER_ID</code>). The inference service looks up pre-computed features automatically before scoring.</p>
+
+    <table>
+      <thead><tr><th>Environment</th><th>Feature View?</th><th>Refresh</th><th>Purpose</th></tr></thead>
+      <tbody>
+        <tr><td><span class="badge badge-dev">DEV</span></td><td>Yes</td><td>On-demand</td><td>Training iteration</td></tr>
+        <tr><td><span class="badge badge-stage">STAGE</span></td><td>Yes</td><td>Once per run, then suspend</td><td>CI training validation</td></tr>
+        <tr><td><span class="badge badge-prod">PROD</span></td><td>Yes</td><td>Continuous (1 hour target_lag)</td><td>Feature lookup at inference time</td></tr>
+      </tbody>
+    </table>
+
+    <pre><code># CI/CD flow for feature changes (online):
+#
+# 1. Developer modifies feature SQL in source/features/feature_views.py
+# 2. Opens PR, merges to main
+# 3. deploy.yml → register_feature_views(STAGE) → train → replicate model
+# 4. deploy.yml → register_feature_views(PROD)  ← registers DT in PROD too
+# 5. PROD DT refreshes continuously from PROD source data
+# 6. deploy-prod.yml → create_service(..., feature_sources_per_function={...})
+# 7. Client sends {CUSTOMER_ID: "C123"} → service fetches features → scores
+#
+# Requires: Snowflake Postgres online store (OnlineStoreType.POSTGRES)
+# for low-latency feature lookups at the inference endpoint.</code></pre>
+
+    <pre><code># Online serving: service creation with feature lookup
+mv.create_service(
+    service_name="MLOPS_FRAUD_DETECTOR_SERVICE_V3",
+    service_compute_pool="SNOW_MLOPS_PROD_POOL",
+    ingress_enabled=True,
+    feature_sources_per_function={
+        "predict_proba": [registered_feature_view],
+        "predict": [registered_feature_view],
+    },
+)
+
+# Client request (online): just the entity key
+# POST /predict-proba
+# {"dataframe_split": {"columns": ["CUSTOMER_ID"], "data": [["C123"]]}}</code></pre>
+
+    <div class="why">
+      <strong>Why not always use online serving?</strong> Online requires a Snowflake Postgres instance (additional infra + cost) and introduces a dependency between the service and the Feature Store. Offline is simpler: the model is stateless, the client owns the feature pipeline. Choose online when the client <em>cannot</em> compute features (e.g., mobile app, third-party system) or when feature freshness at scoring time is critical.
+    </div>
+
+    <div class="concept">
+      <strong>Key difference: PROD Dynamic Table refresh cost.</strong> In the online pattern, the PROD Feature View refreshes continuously (hourly) to keep the online store fresh. In the offline pattern, no PROD DT exists -- zero refresh cost. For STAGE, both patterns use a single forced refresh at pipeline time, then suspend the DT to avoid ongoing compute charges.
+    </div>
   </section>
 
   <!-- ═══════════════════════════════════════════════════════════════ -->
