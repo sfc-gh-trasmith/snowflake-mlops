@@ -310,8 +310,14 @@ def main():
     session.sql(f"USE DATABASE {STAGE_DATABASE}").collect()
     session.sql(f"USE SCHEMA {STAGE_SCHEMA}").collect()
 
-    # Step 1: Train and register model on STAGE compute pool
-    print("\n[1/3] Training model on STAGE compute pool...")
+    # Step 1: Feature Engineering (create/update Feature Store in STAGE)
+    print("\n[1/4] Feature Engineering (register/update Feature Store)...")
+    from features.feature_views import register_feature_views
+
+    register_feature_views(session, database=STAGE_DATABASE, schema=STAGE_SCHEMA)
+
+    # Step 2: Train and register model on STAGE compute pool
+    print("\n[2/4] Training model on STAGE compute pool...")
     job = train_and_register_stage()
     print("  Job submitted. Waiting for completion...")
     result = job.result()
@@ -322,8 +328,8 @@ def main():
     version = result_data.get("version", "V1")
     metrics = result_data.get("metrics", {})
 
-    # Step 2: Quality gate check
-    print("\n[2/3] Quality gate check...")
+    # Step 3: Quality gate check
+    print("\n[3/4] Quality gate check...")
     passed, failures = check_quality_gate(metrics)
 
     if passed:
@@ -346,8 +352,8 @@ def main():
         session.close()
         sys.exit(1)
 
-    # Step 3: Replicate model from STAGE to PROD (only if quality gate passed)
-    print(f"\n[3/3] Replicating model {version} to PROD...")
+    # Step 4: Replicate model from STAGE to PROD (only if quality gate passed)
+    print(f"\n[4/4] Replicating model {version} to PROD...")
     replicate_model_to_prod(session, version)
 
     print("\n" + "=" * 60)

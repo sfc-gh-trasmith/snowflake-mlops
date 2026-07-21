@@ -87,25 +87,32 @@ def create_transaction_features_df(session: Session):
     return features
 
 
-def register_feature_views(session=None):
-    """Register all feature views in the Feature Store."""
+def register_feature_views(session=None, database=None, schema=None):
+    """Register all feature views in the Feature Store. Idempotent (creates or updates)."""
     close_session = False
     if session is None:
         session = create_snowpark_session()
         close_session = True
 
+    db = database or DATABASE
+    sch = schema or SCHEMA
+
     session.sql(f"USE WAREHOUSE {WAREHOUSE}").collect()
 
     fs = FeatureStore(
         session=session,
-        database=DATABASE,
-        name=SCHEMA,
+        database=db,
+        name=sch,
         default_warehouse=WAREHOUSE,
         creation_mode=CreationMode.CREATE_IF_NOT_EXIST,
     )
 
     customer_entity = Entity(name="CUSTOMER", join_keys=["CUSTOMER_ID"])
     transaction_entity = Entity(name="TRANSACTION", join_keys=["TXN_ID"])
+
+    # Register entities first
+    fs.register_entity(customer_entity)
+    fs.register_entity(transaction_entity)
 
     # Customer risk features
     print("Creating CUSTOMER_RISK_FEATURES feature view...")

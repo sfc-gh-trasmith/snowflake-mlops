@@ -171,17 +171,28 @@ def train_and_register() -> str:
 
 
 if __name__ == "__main__":
-    print("Submitting training job to SNOW_MLOPS_DEV_POOL...")
+    print("=" * 60)
+    print("DEV ML PIPELINE")
+    print("=" * 60)
+
     session = create_snowpark_session()
     session.sql(f"USE WAREHOUSE {WAREHOUSE}").collect()
     session.sql(f"USE DATABASE {DATABASE}").collect()
     session.sql(f"USE SCHEMA {SCHEMA}").collect()
 
+    # Step 1: Feature Engineering (create/update Feature Store)
+    print("\n[1/2] Feature Engineering (register/update Feature Store)...")
+    from features.feature_views import register_feature_views
+
+    register_feature_views(session)
+
+    # Step 2: Train and register model
+    print("\n[2/2] Submitting training job to compute pool...")
     job = train_and_register()
-    print("Job submitted. Waiting for completion...")
-    print("(Compute pool cold-start + pip install + training takes ~5 min)")
+    print("  Job submitted. Waiting for completion...")
+    print("  (Compute pool cold-start + pip install + training takes ~5 min)")
     result = job.result()
-    print(f"\n{'=' * 50}")
-    print("JOB COMPLETED SUCCESSFULLY")
-    print(f"{'=' * 50}")
+    print(f"\n{'=' * 60}")
+    print("DEV ML PIPELINE COMPLETE")
+    print(f"{'=' * 60}")
     print(result)
