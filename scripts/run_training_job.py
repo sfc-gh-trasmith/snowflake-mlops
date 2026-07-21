@@ -163,6 +163,7 @@ def train_and_register() -> str:
         version_name=version_name,
         conda_dependencies=["xgboost", "scikit-learn"],
         sample_input_data=X_test.head(10),
+        target_platforms=["WAREHOUSE", "SNOWPARK_CONTAINER_SERVICES"],
         comment=f"XGBoost fraud detector - features:{_FV_TABLE} | AUC={metrics['auc_roc']:.4f}, F1={metrics['f1']:.4f}",
     )
     print("  Model registered!")

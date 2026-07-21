@@ -48,6 +48,10 @@ jobs:
         run: uv run python scripts/deploy_prod_service.py
         timeout-minutes: 20
 
+      - name: Run batch inference
+        run: uv run python scripts/run_batch_inference.py
+        timeout-minutes: 10
+
       - name: Verify gateway endpoint
         run: |
           snow sql -q "DESC GATEWAY SNOW_MLOPS_PROD.ML.FRAUD_DETECTOR_GATEWAY" -x

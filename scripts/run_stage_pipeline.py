@@ -184,6 +184,7 @@ def train_and_register_stage() -> str:
         version_name=version_name,
         conda_dependencies=["xgboost", "scikit-learn"],
         sample_input_data=X_test.head(10),
+        target_platforms=["WAREHOUSE", "SNOWPARK_CONTAINER_SERVICES"],
         comment=f"STAGE pipeline: features:{_FV_TABLE} | AUC={metrics['auc_roc']:.4f}, F1={metrics['f1']:.4f} | git:{git_sha}",
     )
     print("  Model registered in STAGE!")
