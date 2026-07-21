@@ -46,9 +46,6 @@ jobs:
       - name: Install dependencies
         run: uv sync
 
-      - name: Deploy Task DAG to STAGE
-        run: uv run python source/pipeline/ml_pipeline_dag.py --deploy --env stage
-
       - name: Run STAGE ML Pipeline (train + register + replicate)
         run: uv run python scripts/run_stage_pipeline.py
         timeout-minutes: 20
