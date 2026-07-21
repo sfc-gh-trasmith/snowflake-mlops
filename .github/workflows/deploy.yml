@@ -24,7 +24,7 @@ jobs:
       SNOWFLAKE_DATABASE: ${{ vars.SNOWFLAKE_DATABASE_STAGE }}
       SNOWFLAKE_SCHEMA: ${{ vars.SNOWFLAKE_SCHEMA }}
       SNOWFLAKE_USER: ${{ vars.SNOWFLAKE_USER_STAGE }}
-      SNOWFLAKE_ROLE: ACCOUNTADMIN
+      SNOWFLAKE_ROLE: MLOPS_DEPLOY_ROLE
       TOPOLOGY: ${{ vars.TOPOLOGY || 'single-account' }}
     steps:
       - uses: actions/checkout@v4
