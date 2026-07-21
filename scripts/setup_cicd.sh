@@ -25,18 +25,22 @@ GITHUB_REPO="snowflake-mlops"
 GITHUB_REPO_ID="1306141664"
 
 SUBJECT="repo:${GITHUB_OWNER}@${GITHUB_OWNER_ID}/${GITHUB_REPO}@${GITHUB_REPO_ID}:ref:refs/heads/main"
-SERVICE_USER="SVC_GITHUB_ACTIONS"
+STAGE_SUBJECT="repo:${GITHUB_OWNER}@${GITHUB_OWNER_ID}/${GITHUB_REPO}@${GITHUB_REPO_ID}:environment:STAGE"
+PROD_SUBJECT="repo:${GITHUB_OWNER}@${GITHUB_OWNER_ID}/${GITHUB_REPO}@${GITHUB_REPO_ID}:environment:PROD"
+SERVICE_USER_STAGE="SVC_GITHUB_ACTIONS_STAGE"
+SERVICE_USER_PROD="SVC_GITHUB_ACTIONS"
 
 echo "=== Setting up GitHub Actions CI/CD access ==="
-echo "  Service user: ${SERVICE_USER}"
-echo "  OIDC subject: ${SUBJECT}"
+echo "  STAGE user: ${SERVICE_USER_STAGE}"
+echo "  STAGE subject: ${STAGE_SUBJECT}"
+echo "  PROD user: ${SERVICE_USER_PROD}"
+echo "  PROD subject: ${PROD_SUBJECT}"
 echo ""
 
 snow sql -q "
 -- =============================================================================
 -- Step 1: Network Policy for GitHub Actions
 -- Uses Snowflake's managed network rule that auto-tracks GitHub runner IPs.
--- This avoids hardcoding CIDR ranges that change frequently.
 -- =============================================================================
 CREATE NETWORK RULE IF NOT EXISTS GITHUB_ACTIONS_NETWORK_RULE
     MODE = INGRESS
@@ -48,29 +52,36 @@ CREATE NETWORK POLICY IF NOT EXISTS GITHUB_ACTIONS_POLICY
     COMMENT = 'Allow GitHub Actions runners via managed network rule';
 
 -- =============================================================================
--- Step 2: Service User with OIDC Workload Identity
--- GitHub mints short-lived OIDC tokens; Snowflake validates issuer + subject.
--- No secrets stored in GitHub -- zero credential management.
+-- Step 2: STAGE Service User (runs on every merge to main)
 -- =============================================================================
-CREATE USER IF NOT EXISTS ${SERVICE_USER}
+CREATE USER IF NOT EXISTS ${SERVICE_USER_STAGE}
     TYPE = SERVICE
-    DEFAULT_ROLE = PUBLIC
-    COMMENT = 'GitHub Actions CI/CD service user (OIDC)'
+    DEFAULT_ROLE = ACCOUNTADMIN
+    COMMENT = 'GitHub Actions CI/CD service user for STAGE (OIDC)'
     WORKLOAD_IDENTITY = (
         TYPE = OIDC
         ISSUER = 'https://token.actions.githubusercontent.com'
-        SUBJECT = '${SUBJECT}'
+        SUBJECT = '${STAGE_SUBJECT}'
     );
 
--- Grant deployment role
-GRANT ROLE ACCOUNTADMIN TO USER ${SERVICE_USER};
+GRANT ROLE ACCOUNTADMIN TO USER ${SERVICE_USER_STAGE};
+ALTER USER ${SERVICE_USER_STAGE} SET NETWORK_POLICY = 'GITHUB_ACTIONS_POLICY';
 
 -- =============================================================================
--- Step 3: Assign Network Policy to Service User
--- This overrides the account-level network policy for this user only,
--- allowing GitHub Actions runners through while keeping other restrictions.
+-- Step 3: PROD Service User (manual dispatch with approval gate)
 -- =============================================================================
-ALTER USER ${SERVICE_USER} SET NETWORK_POLICY = 'GITHUB_ACTIONS_POLICY';
+CREATE USER IF NOT EXISTS ${SERVICE_USER_PROD}
+    TYPE = SERVICE
+    DEFAULT_ROLE = ACCOUNTADMIN
+    COMMENT = 'GitHub Actions CI/CD service user for PROD (OIDC)'
+    WORKLOAD_IDENTITY = (
+        TYPE = OIDC
+        ISSUER = 'https://token.actions.githubusercontent.com'
+        SUBJECT = '${PROD_SUBJECT}'
+    );
+
+GRANT ROLE ACCOUNTADMIN TO USER ${SERVICE_USER_PROD};
+ALTER USER ${SERVICE_USER_PROD} SET NETWORK_POLICY = 'GITHUB_ACTIONS_POLICY';
 "
 
 echo ""
