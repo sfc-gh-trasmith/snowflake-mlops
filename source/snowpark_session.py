@@ -218,27 +218,24 @@ def create_snowpark_session(connection_name: Optional[str] = None) -> Session:
         A connected Snowpark Session.
     """
     # CI/OIDC detection: if SNOWFLAKE_TOKEN and SNOWFLAKE_ACCOUNT are set,
-    # use the Snowpark connection_name="default" which reads SNOWFLAKE_CONNECTIONS_DEFAULT_* env vars.
-    # The snowflakedb/snowflake-actions@v3 sets these when use-oidc: true.
+    # we're running in GitHub Actions with snowflake-actions@v3 OIDC auth.
     if os.getenv("SNOWFLAKE_TOKEN") and os.getenv("SNOWFLAKE_ACCOUNT"):
-        # The snowflake-actions sets SNOWFLAKE_TOKEN but the Python SDK needs it
-        # via the SNOWFLAKE_CONNECTIONS_DEFAULT_* pattern for OIDC token exchange.
-        # Set the connection env vars the SDK expects:
-        os.environ.setdefault("SNOWFLAKE_CONNECTIONS_DEFAULT_ACCOUNT", os.environ["SNOWFLAKE_ACCOUNT"])
-        os.environ.setdefault("SNOWFLAKE_CONNECTIONS_DEFAULT_AUTHENTICATOR", "OAUTH")
-        os.environ.setdefault("SNOWFLAKE_CONNECTIONS_DEFAULT_TOKEN", os.environ["SNOWFLAKE_TOKEN"])
+        config = {
+            "account": os.environ["SNOWFLAKE_ACCOUNT"],
+            "token": os.environ["SNOWFLAKE_TOKEN"],
+            "authenticator": os.getenv("SNOWFLAKE_AUTHENTICATOR", "oauth"),
+        }
         if os.getenv("SNOWFLAKE_USER"):
-            os.environ.setdefault("SNOWFLAKE_CONNECTIONS_DEFAULT_USER", os.environ["SNOWFLAKE_USER"])
+            config["user"] = os.environ["SNOWFLAKE_USER"]
         if os.getenv("SNOWFLAKE_DATABASE"):
-            os.environ.setdefault("SNOWFLAKE_CONNECTIONS_DEFAULT_DATABASE", os.environ["SNOWFLAKE_DATABASE"])
+            config["database"] = os.environ["SNOWFLAKE_DATABASE"]
         if os.getenv("SNOWFLAKE_SCHEMA"):
-            os.environ.setdefault("SNOWFLAKE_CONNECTIONS_DEFAULT_SCHEMA", os.environ["SNOWFLAKE_SCHEMA"])
+            config["schema"] = os.environ["SNOWFLAKE_SCHEMA"]
         if os.getenv("SNOWFLAKE_WAREHOUSE"):
-            os.environ.setdefault("SNOWFLAKE_CONNECTIONS_DEFAULT_WAREHOUSE", os.environ["SNOWFLAKE_WAREHOUSE"])
+            config["warehouse"] = os.environ["SNOWFLAKE_WAREHOUSE"]
         if os.getenv("SNOWFLAKE_ROLE"):
-            os.environ.setdefault("SNOWFLAKE_CONNECTIONS_DEFAULT_ROLE", os.environ["SNOWFLAKE_ROLE"])
-
-        return Session.builder.configs({"connection_name": "default"}).create()
+            config["role"] = os.environ["SNOWFLAKE_ROLE"]
+        return Session.builder.configs(config).create()
 
     snowflake_home = Path(os.environ.get("SNOWFLAKE_HOME", "~/.snowflake")).expanduser()
 
