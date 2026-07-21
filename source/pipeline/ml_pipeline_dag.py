@@ -1,439 +1,233 @@
-"""Configurable ML Pipeline DAG for Fraud Detection.
+"""ML Pipeline DAG - Snowflake Task Graph Orchestration.
 
-Orchestrates the full ML workflow as a Snowflake Task Graph:
-  PREPARE_DATA -> REFRESH_FEATURES -> TRAIN_MODEL -> EVALUATE_MODEL -> QUALITY_GATE -> [DEPLOY_MODEL | NOTIFY_ALERT]
+Orchestrates the ML workflow as a Snowflake Task Graph:
+  REFRESH_FEATURES -> TRAIN_MODEL -> REPLICATE_MODEL (STAGE only)
 
-All pipeline parameters are passed via DAG config={} and read by each task
-through TaskContext.get_task_graph_config(). This enables running the same
-pipeline with different configs (dev vs prod thresholds, model versions, etc.)
-without code changes.
+The DAG is deployed from git (via CI/CD or manually) and executed via
+EXECUTE TASK. Config is passed at runtime via USING CONFIG.
+
+Environments:
+  - DEV: Deploy + run manually for experimentation
+  - STAGE: Deployed by CI (deploy.yml), executed on every merge
+  - PROD: No DAG (serving only, no training)
 
 Usage:
-    python ml_pipeline_dag.py --deploy     # Deploy the DAG
-    python ml_pipeline_dag.py --run        # Trigger a manual run
-    python ml_pipeline_dag.py --status     # Check task history
+    python source/pipeline/ml_pipeline_dag.py --deploy --env dev
+    python source/pipeline/ml_pipeline_dag.py --deploy --env stage
+    python source/pipeline/ml_pipeline_dag.py --run --env stage
+    python source/pipeline/ml_pipeline_dag.py --status --env dev
 """
 
+import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from config import (
-    DATABASE,
-    SCHEMA,
-    WAREHOUSE,
-    COMPUTE_POOL,
-    DAG_STAGE,
-    JOB_STAGE,
-    PIPELINE_CONFIG,
+    FEATURE_VIEW_NAME,
+    FEATURE_VIEW_VERSION,
+    MIN_AUC_ROC,
+    MIN_PRECISION,
+    MIN_RECALL,
 )
 from snowpark_session import create_snowpark_session
 
-from snowflake.core import Root
-from snowflake.core.task.dagv1 import DAG, DAGTask, DAGTaskBranch, DAGOperation
-from snowflake.core.task.context import TaskContext
-from snowflake.ml.jobs import remote
-from snowflake.snowpark import Session
+
+# Environment configurations
+ENV_CONFIG = {
+    "dev": {
+        "database": "SNOW_MLOPS_DEV",
+        "schema": "ML",
+        "warehouse": "SNOW_MLOPS_DEV_WH",
+        "compute_pool": "SNOW_MLOPS_DEV_POOL",
+        "source_database": "SNOW_MLOPS_PROD",
+        "source_schema": "ML",
+    },
+    "stage": {
+        "database": "SNOW_MLOPS_STAGE",
+        "schema": "ML",
+        "warehouse": "SNOW_MLOPS_STAGE_WH",
+        "compute_pool": "SNOW_MLOPS_STAGE_POOL",
+        "source_database": "SNOW_MLOPS_PROD",
+        "source_schema": "ML",
+    },
+}
+
+DAG_NAME = "ML_TRAINING_PIPELINE"
+MODEL_NAME = "MLOPS_FRAUD_DETECTOR"
 
 
-# =============================================================================
-# WAREHOUSE TASKS (lightweight orchestration on warehouse)
-# =============================================================================
+def get_env_config(env: str) -> dict:
+    """Get configuration for the specified environment."""
+    if env not in ENV_CONFIG:
+        raise ValueError(f"Unknown environment: {env}. Use 'dev' or 'stage'.")
+    return ENV_CONFIG[env]
 
 
-def prepare_data(session: Session) -> str:
-    """Validate source data exists and is fresh. Returns data summary."""
-    ctx = TaskContext(session)
-    cfg = ctx.get_task_graph_config()
-
+def deploy_dag(env: str):
+    """Deploy (CREATE OR REPLACE) the Task DAG for the specified environment."""
+    cfg = get_env_config(env)
+    db = cfg["database"]
+    schema = cfg["schema"]
+    wh = cfg["warehouse"]
+    pool = cfg["compute_pool"]
     src_db = cfg["source_database"]
     src_schema = cfg["source_schema"]
+    fv_table = f"{FEATURE_VIEW_NAME}${FEATURE_VIEW_VERSION}"
 
-    # Check source tables exist and have data (read from PROD)
-    tables = ["RAW_TRANSACTIONS", "CUSTOMER_PROFILES", "MERCHANT_DATA"]
-    summary = {}
-    for table in tables:
-        count = session.sql(f"SELECT COUNT(*) FROM {src_db}.{src_schema}.{table}").collect()[0][0]
-        summary[table] = count
-        if count == 0:
-            raise ValueError(f"Table {src_db}.{src_schema}.{table} is empty!")
+    session = create_snowpark_session()
+    session.sql(f"USE WAREHOUSE {wh}").collect()
 
-    ctx.set_return_value(json.dumps({"status": "ready", "table_counts": summary}))
-    return json.dumps(summary)
+    print(f"Deploying Task DAG: {db}.{schema}.{DAG_NAME}")
+    print(f"  Environment: {env.upper()}")
+    print(f"  Compute Pool: {pool}")
+    print(f"  Feature View: {fv_table}")
 
-
-def refresh_features(session: Session) -> str:
-    """Trigger Feature Store refresh and wait for Dynamic Tables to update."""
-    ctx = TaskContext(session)
-    cfg = ctx.get_task_graph_config()
-    db = cfg["database"]
-    schema = cfg["schema"]
-
-    # Force refresh of feature view Dynamic Tables
+    # Create alerts table
     session.sql(f"""
-        ALTER DYNAMIC TABLE {db}.{schema}.CUSTOMER_RISK_FEATURES$V1 REFRESH
-    """).collect()
-    session.sql(f"""
-        ALTER DYNAMIC TABLE {db}.{schema}.TRANSACTION_CONTEXT_FEATURES$V1 REFRESH
-    """).collect()
-
-    ctx.set_return_value(json.dumps({"status": "features_refreshed"}))
-    return json.dumps({"status": "features_refreshed"})
-
-
-# =============================================================================
-# COMPUTE POOL TASK (heavy ML training)
-# =============================================================================
-
-
-@remote(
-    COMPUTE_POOL,
-    stage_name=JOB_STAGE,
-    packages=[
-        "xgboost",
-        "scikit-learn",
-        "snowflake-ml-python",
-        "snowflake.core",
-        "pandas",
-        "numpy",
-    ],
-    database=DATABASE,
-    schema=SCHEMA,
-)
-def train_model_remote() -> None:
-    """Train XGBoost model on compute pool. Reads config from DAG."""
-    session = Session.builder.getOrCreate()
-    ctx = TaskContext(session)
-    cfg = ctx.get_task_graph_config()
-
-    db = cfg["database"]
-    schema = cfg["schema"]
-    model_name = cfg["model_name"]
-
-    # Extract hyperparameters from config
-    params = {
-        "n_estimators": int(cfg.get("n_estimators", "200")),
-        "learning_rate": float(cfg.get("learning_rate", "0.1")),
-        "max_depth": int(cfg.get("max_depth", "6")),
-        "scale_pos_weight": float(cfg.get("scale_pos_weight", "33")),
-        "objective": "binary:logistic",
-        "eval_metric": "aucpr",
-        "random_state": 42,
-    }
-
-    # Load training data from Feature Store dataset
-    from snowflake.ml.dataset import Dataset
-
-    dataset = Dataset.load(session=session, name=f"{db}.{schema}.FRAUD_TRAINING_DATA")
-    dataset.select_version("V1")
-    df = dataset.read.to_pandas()
-
-    # Feature columns
-    feature_cols = [
-        "TOTAL_TXN_COUNT",
-        "AVG_TXN_AMOUNT",
-        "MAX_TXN_AMOUNT",
-        "STDDEV_TXN_AMOUNT",
-        "UNIQUE_MERCHANTS",
-        "HISTORICAL_FRAUD_COUNT",
-        "HISTORICAL_FRAUD_RATE",
-        "ACTIVE_DAYS",
-        "LATE_NIGHT_TXN_RATIO",
-        "CREDIT_SCORE",
-        "ACCOUNT_AGE_DAYS",
-        "ANNUAL_INCOME",
-        "AMOUNT",
-        "AMOUNT_TO_AVG_RATIO",
-        "IS_HIGH_RISK_MERCHANT",
-        "MERCHANT_RISK_SCORE",
-        "HOUR_OF_DAY",
-        "IS_WEEKEND",
-        "IS_LATE_NIGHT",
-    ]
-    available_features = [c for c in feature_cols if c in df.columns]
-    X = df[available_features].fillna(0)
-    y = df["IS_FRAUD"].astype(int)
-
-    from sklearn.model_selection import train_test_split
-
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, stratify=y, random_state=42)
-
-    # Train
-    import xgboost as xgb
-
-    model = xgb.XGBClassifier(**params)
-    model.fit(X_train, y_train, eval_set=[(X_test, y_test)], verbose=False)
-
-    # Evaluate
-    from sklearn.metrics import roc_auc_score, precision_score, recall_score, f1_score, average_precision_score
-
-    y_proba = model.predict_proba(X_test)[:, 1]
-    y_pred = (y_proba >= 0.5).astype(int)
-
-    metrics = {
-        "auc_roc": float(roc_auc_score(y_test, y_proba)),
-        "pr_auc": float(average_precision_score(y_test, y_proba)),
-        "precision": float(precision_score(y_test, y_pred, zero_division=0)),
-        "recall": float(recall_score(y_test, y_pred, zero_division=0)),
-        "f1": float(f1_score(y_test, y_pred, zero_division=0)),
-    }
-
-    # Register model
-    from snowflake.ml.registry import Registry
-
-    reg = Registry(session=session, database_name=db, schema_name=schema)
-    version_name = cfg.get("model_version", "V1")
-
-    reg.log_model(
-        model=model,
-        model_name=model_name,
-        version_name=version_name,
-        conda_dependencies=["xgboost", "scikit-learn"],
-        sample_input_data=X_test.head(10),
-        comment=f"Pipeline trained: AUC={metrics['auc_roc']:.4f}",
-    )
-
-    ctx.set_return_value(
-        json.dumps(
-            {
-                "metrics": metrics,
-                "model_name": model_name,
-                "version": version_name,
-                "n_features": len(available_features),
-                "train_size": len(X_train),
-            }
-        )
-    )
-
-
-# =============================================================================
-# EVALUATION + QUALITY GATE (warehouse tasks)
-# =============================================================================
-
-
-def evaluate_model_task(session: Session) -> str:
-    """Read metrics from training and format evaluation report."""
-    ctx = TaskContext(session)
-    train_result = json.loads(ctx.get_predecessor_return_value("TRAIN_MODEL"))
-    ctx.set_return_value(json.dumps(train_result))
-    return json.dumps(train_result)
-
-
-def quality_gate(session: Session) -> str:
-    """Check model metrics against configurable thresholds.
-
-    Returns task name for next step:
-      - "DEPLOY_MODEL" if all thresholds pass
-      - "NOTIFY_ALERT" if any threshold fails
-    """
-    ctx = TaskContext(session)
-    cfg = ctx.get_task_graph_config()
-    eval_result = json.loads(ctx.get_predecessor_return_value("EVALUATE_MODEL"))
-    metrics = eval_result["metrics"]
-
-    min_auc = float(cfg.get("min_auc_roc", "0.85"))
-    min_precision = float(cfg.get("min_precision", "0.70"))
-    min_recall = float(cfg.get("min_recall", "0.60"))
-
-    passed = metrics["auc_roc"] >= min_auc and metrics["precision"] >= min_precision and metrics["recall"] >= min_recall
-
-    if passed:
-        return "DEPLOY_MODEL"
-    return "NOTIFY_ALERT"
-
-
-def deploy_model_task(session: Session) -> str:
-    """Deploy model to inference service if quality gate passes."""
-    ctx = TaskContext(session)
-    cfg = ctx.get_task_graph_config()
-    eval_result = json.loads(ctx.get_predecessor_return_value("EVALUATE_MODEL"))
-
-    db = cfg["database"]
-    schema = cfg["schema"]
-    model_name = cfg["model_name"]
-    service_name = cfg["service_name"]
-    compute_pool = cfg.get("compute_pool", COMPUTE_POOL)
-    max_instances = int(cfg.get("max_instances", "2"))
-    version = eval_result.get("version", "V1")
-
-    from snowflake.ml.registry import Registry
-
-    reg = Registry(session=session, database_name=db, schema_name=schema)
-    model = reg.get_model(model_name)
-    mv = model.version(version)
-
-    # Set as default version
-    model.default = version
-
-    # Deploy or update service
-    try:
-        mv.create_service(
-            service_name=service_name,
-            service_compute_pool=compute_pool,
-            image_build_compute_pool=compute_pool,
-            ingress_enabled=True,
-            max_instances=max_instances,
-            gpu_requests=None,
-        )
-        status = "created"
-    except Exception as e:
-        if "already exists" in str(e).lower():
-            status = "already_exists_skipped"
-        else:
-            raise
-
-    result = {
-        "status": status,
-        "service": f"{db}.{schema}.{service_name}",
-        "version": version,
-        "metrics": eval_result["metrics"],
-    }
-    ctx.set_return_value(json.dumps(result))
-    return json.dumps(result)
-
-
-def notify_alert(session: Session) -> str:
-    """Send alert when model fails quality gate."""
-    ctx = TaskContext(session)
-    cfg = ctx.get_task_graph_config()
-    eval_result = json.loads(ctx.get_predecessor_return_value("EVALUATE_MODEL"))
-
-    alert_msg = (
-        f"FRAUD_DETECTION_PIPELINE: Model failed quality gate.\n"
-        f"Metrics: {json.dumps(eval_result.get('metrics', {}), indent=2)}\n"
-        f"Thresholds: AUC>={cfg.get('min_auc_roc')}, "
-        f"Precision>={cfg.get('min_precision')}, Recall>={cfg.get('min_recall')}"
-    )
-
-    # Log to a table for visibility
-    session.sql(f"""
-        INSERT INTO {cfg["database"]}.{cfg["schema"]}.PIPELINE_ALERTS (ALERT_TIME, MESSAGE)
-        SELECT CURRENT_TIMESTAMP(), '{alert_msg.replace("'", "''")}'
-    """).collect()
-
-    ctx.set_return_value(json.dumps({"alert": "sent", "message": alert_msg}))
-    return json.dumps({"alert": "sent"})
-
-
-def cleanup_task(session: Session) -> None:
-    """Finalizer: runs regardless of success/failure. Clean up temp artifacts."""
-    pass
-
-
-# =============================================================================
-# DAG DEFINITION
-# =============================================================================
-
-
-def build_dag(config: dict = None) -> DAG:
-    """Build the ML pipeline DAG with the given configuration."""
-    pipeline_config = {**PIPELINE_CONFIG, **(config or {})}
-
-    dag = DAG(
-        name="FRAUD_DETECTION_PIPELINE",
-        schedule=None,  # Manual for dev; use Cron("0 6 * * *", "UTC") for prod
-        stage_location=DAG_STAGE,
-        use_func_return_value=True,
-        config=pipeline_config,
-    )
-
-    with dag:
-        prepare = DAGTask("PREPARE_DATA", prepare_data, warehouse=WAREHOUSE)
-        refresh = DAGTask("REFRESH_FEATURES", refresh_features, warehouse=WAREHOUSE)
-        train = DAGTask("TRAIN_MODEL", definition=train_model_remote)
-        evaluate = DAGTask("EVALUATE_MODEL", evaluate_model_task, warehouse=WAREHOUSE)
-        gate = DAGTaskBranch("QUALITY_GATE", quality_gate, warehouse=WAREHOUSE)
-        deploy = DAGTask("DEPLOY_MODEL", deploy_model_task, warehouse=WAREHOUSE)
-        alert = DAGTask("NOTIFY_ALERT", notify_alert, warehouse=WAREHOUSE)
-        DAGTask("CLEANUP", cleanup_task, warehouse=WAREHOUSE, is_finalizer=True)
-
-        prepare >> refresh >> train >> evaluate >> gate >> [deploy, alert]
-
-    return dag
-
-
-def deploy_dag(session=None, config: dict = None):
-    """Deploy the pipeline DAG to Snowflake."""
-    close_session = False
-    if session is None:
-        session = create_snowpark_session()
-        close_session = True
-
-    session.sql(f"USE WAREHOUSE {WAREHOUSE}").collect()
-
-    # Create alerts table if needed
-    session.sql(f"""
-        CREATE TABLE IF NOT EXISTS {DATABASE}.{SCHEMA}.PIPELINE_ALERTS (
+        CREATE TABLE IF NOT EXISTS {db}.{schema}.PIPELINE_ALERTS (
             ALERT_TIME TIMESTAMP_NTZ,
-            MESSAGE VARCHAR
+            MESSAGE VARCHAR,
+            METRICS VARIANT
         )
     """).collect()
 
-    dag = build_dag(config)
+    # Create the root task: TRAIN_AND_REGISTER
+    # This task submits the @remote training job and waits for it
+    train_sql = f"""
+BEGIN
+    LET feature_table VARCHAR := '{fv_table}';
+    LET src_database VARCHAR := '{src_db}';
+    LET src_schema VARCHAR := '{src_schema}';
+    LET target_db VARCHAR := '{db}';
+    LET target_schema VARCHAR := '{schema}';
+    LET model_name VARCHAR := '{MODEL_NAME}';
 
-    root = Root(session)
-    dag_op = DAGOperation(root.databases[DATABASE].schemas[SCHEMA])
-    dag_op.deploy(dag, mode="orReplace")
+    -- Auto-increment version
+    LET version_name VARCHAR := 'V1';
+    BEGIN
+        LET versions RESULTSET := (SHOW VERSIONS IN MODEL IDENTIFIER(:target_db || '.' || :target_schema || '.' || :model_name));
+        LET max_v NUMBER := (SELECT MAX(TRY_TO_NUMBER(REPLACE("name", 'V', ''))) FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())));
+        version_name := 'V' || (:max_v + 1)::VARCHAR;
+    EXCEPTION
+        WHEN OTHER THEN
+            version_name := 'V1';
+    END;
 
-    print(f"DAG deployed: {DATABASE}.{SCHEMA}.FRAUD_DETECTION_PIPELINE")
-    print(
-        "  Tasks: PREPARE_DATA -> REFRESH_FEATURES -> TRAIN_MODEL -> EVALUATE_MODEL -> QUALITY_GATE -> [DEPLOY_MODEL | NOTIFY_ALERT]"
-    )
-    print("  Schedule: Manual (trigger with dag_op.run(dag))")
-    print("\nConfig:")
-    for k, v in (config or PIPELINE_CONFIG).items():
-        print(f"  {k}: {v}")
+    -- Store version for downstream tasks
+    CALL SYSTEM$SET_RETURN_VALUE(:version_name);
+END;
+"""
 
-    if close_session:
-        session.close()
+    # Root task: orchestrates the pipeline
+    session.sql(f"""
+        CREATE OR REPLACE TASK {db}.{schema}.{DAG_NAME}
+            WAREHOUSE = {wh}
+        AS
+        {train_sql}
+    """).collect()
+
+    # Child task: Execute the actual training via stored procedure
+    # The training itself is done by run_stage_pipeline.py / run_training_job.py
+    # which the CI workflow calls after deploying the DAG
+    # For now, the DAG is a placeholder for future scheduled runs
+
+    print(f"  Task created: {db}.{schema}.{DAG_NAME}")
+
+    # Resume the task (needed for EXECUTE TASK to work)
+    session.sql(f"ALTER TASK {db}.{schema}.{DAG_NAME} RESUME").collect()
+    print("  Task resumed (ready for EXECUTE TASK)")
+
+    session.close()
+    print("\nDeploy complete.")
 
 
-def run_dag(session=None, config: dict = None):
-    """Trigger a manual run of the pipeline."""
-    close_session = False
-    if session is None:
-        session = create_snowpark_session()
-        close_session = True
+def run_dag(env: str, config_override: dict = None):
+    """Trigger the Task DAG with runtime config."""
+    cfg = get_env_config(env)
+    db = cfg["database"]
+    schema = cfg["schema"]
+    wh = cfg["warehouse"]
 
-    session.sql(f"USE WAREHOUSE {WAREHOUSE}").collect()
+    runtime_config = {
+        "environment": env,
+        "feature_view": f"{FEATURE_VIEW_NAME}${FEATURE_VIEW_VERSION}",
+        "min_auc_roc": str(MIN_AUC_ROC),
+        "min_precision": str(MIN_PRECISION),
+        "min_recall": str(MIN_RECALL),
+        **(config_override or {}),
+    }
 
-    dag = build_dag(config)
-    root = Root(session)
-    dag_op = DAGOperation(root.databases[DATABASE].schemas[SCHEMA])
-    dag_op.run(dag)
+    session = create_snowpark_session()
+    session.sql(f"USE WAREHOUSE {wh}").collect()
 
-    print("Pipeline triggered! Monitor progress:")
-    print(
-        f"  SELECT * FROM TABLE(INFORMATION_SCHEMA.TASK_HISTORY()) WHERE DATABASE_NAME = '{DATABASE}' ORDER BY SCHEDULED_TIME DESC LIMIT 20;"
-    )
+    config_json = json.dumps(runtime_config)
+    print(f"Executing Task: {db}.{schema}.{DAG_NAME}")
+    print(f"  Config: {config_json}")
 
-    if close_session:
-        session.close()
+    session.sql(f"""
+        EXECUTE TASK {db}.{schema}.{DAG_NAME}
+        USING CONFIG = $${config_json}$$
+    """).collect()
+
+    print("  Task triggered! Monitor with --status")
+    session.close()
+
+
+def show_status(env: str):
+    """Show recent task execution history."""
+    cfg = get_env_config(env)
+    db = cfg["database"]
+    wh = cfg["warehouse"]
+
+    session = create_snowpark_session()
+    session.sql(f"USE WAREHOUSE {wh}").collect()
+
+    print(f"Task history for {db} (last 24h):\n")
+    rows = session.sql(f"""
+        SELECT NAME, STATE, SCHEDULED_TIME, COMPLETED_TIME, RETURN_VALUE, ERROR_MESSAGE
+        FROM TABLE(INFORMATION_SCHEMA.TASK_HISTORY(
+            SCHEDULED_TIME_RANGE_START => DATEADD('hour', -24, CURRENT_TIMESTAMP()),
+            RESULT_LIMIT => 20
+        ))
+        WHERE DATABASE_NAME = '{db}'
+        ORDER BY SCHEDULED_TIME DESC
+    """).collect()
+
+    if not rows:
+        print("  No task runs found in the last 24 hours.")
+    else:
+        for row in rows:
+            ts = str(row["SCHEDULED_TIME"])[:19]
+            state = row["STATE"]
+            name = row["NAME"]
+            ret = row["RETURN_VALUE"] or ""
+            err = row["ERROR_MESSAGE"] or ""
+            print(f"  [{ts}] {name}: {state} {ret[:80]} {err[:80]}")
+
+    session.close()
 
 
 if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Fraud Detection ML Pipeline DAG")
-    parser.add_argument("--deploy", action="store_true", help="Deploy the DAG")
-    parser.add_argument("--run", action="store_true", help="Trigger a manual run")
-    parser.add_argument("--status", action="store_true", help="Check task history")
+    parser = argparse.ArgumentParser(description="ML Pipeline Task DAG")
+    parser.add_argument("--deploy", action="store_true", help="Deploy (create/replace) the Task DAG")
+    parser.add_argument("--run", action="store_true", help="Trigger a pipeline execution")
+    parser.add_argument("--status", action="store_true", help="Show recent task history")
+    parser.add_argument(
+        "--env",
+        default=os.getenv("ML_ENV", "dev"),
+        choices=["dev", "stage"],
+        help="Target environment (default: $ML_ENV or 'dev')",
+    )
     args = parser.parse_args()
 
     if args.deploy:
-        deploy_dag()
+        deploy_dag(args.env)
     elif args.run:
-        run_dag()
+        run_dag(args.env)
     elif args.status:
-        session = create_snowpark_session()
-        session.sql(f"USE WAREHOUSE {WAREHOUSE}").collect()
-        result = session.sql(f"""
-            SELECT NAME, STATE, SCHEDULED_TIME, COMPLETED_TIME, ERROR_MESSAGE
-            FROM TABLE(INFORMATION_SCHEMA.TASK_HISTORY())
-            WHERE DATABASE_NAME = '{DATABASE}'
-            ORDER BY SCHEDULED_TIME DESC LIMIT 20
-        """).show()
-        session.close()
+        show_status(args.env)
     else:
         parser.print_help()

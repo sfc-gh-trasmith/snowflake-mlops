@@ -46,13 +46,8 @@ jobs:
       - name: Install dependencies
         run: uv sync
 
-      - name: Setup Feature Store in STAGE (if not exists)
-        run: |
-          snow sql -q "
-            USE WAREHOUSE SNOW_MLOPS_STAGE_WH;
-            -- Feature views will be created by the pipeline on first run
-            -- For now just ensure the schema objects exist
-          " -x
+      - name: Deploy Task DAG to STAGE
+        run: uv run python source/pipeline/ml_pipeline_dag.py --deploy --env stage
 
       - name: Run STAGE ML Pipeline (train + register + replicate)
         run: uv run python scripts/run_stage_pipeline.py
