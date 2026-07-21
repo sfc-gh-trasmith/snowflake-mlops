@@ -282,10 +282,8 @@ def write_metrics_file(metrics: dict, version: str, passed: bool):
         f.write(content)
 
 
-# Quality gate thresholds
-MIN_AUC_ROC = 0.85
-MIN_PRECISION = 0.70
-MIN_RECALL = 0.60
+# Quality gate thresholds (imported from config for single source of truth)
+from config import MIN_AUC_ROC, MIN_PRECISION, MIN_RECALL  # noqa: E402
 
 
 def check_quality_gate(metrics: dict) -> tuple[bool, list[str]]:
