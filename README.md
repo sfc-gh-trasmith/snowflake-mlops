@@ -93,7 +93,11 @@ Configure GitHub repo variables:
 - `SNOWFLAKE_DATABASE_STAGE` - `SNOW_MLOPS_STAGE`
 - `SNOWFLAKE_DATABASE_PROD` - `SNOW_MLOPS_PROD`
 - `SNOWFLAKE_SCHEMA` - `ML`
+- `SNOWFLAKE_USER_STAGE` - `SVC_GITHUB_ACTIONS_STAGE`
 - `TOPOLOGY` - `single-account` (default; also supports `multi-account`, `cross-region`)
+
+Configure GitHub repo settings:
+- Settings > Actions > General > Workflow permissions: **"Read and write permissions"** (required for posting commit comments with model metrics)
 
 ## Project Structure
 
