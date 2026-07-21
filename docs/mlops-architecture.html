@@ -722,6 +722,37 @@ flowchart LR
     <div class="concept">
       <strong>Environment isolation by database, not by account.</strong> All three environments live in the same Snowflake account but in separate databases (<code>SNOW_MLOPS_DEV</code>, <code>SNOW_MLOPS_STAGE</code>, <code>SNOW_MLOPS_PROD</code>). This simplifies model replication (same-account cross-DB copy is atomic) while still providing clear RBAC boundaries.
     </div>
+
+    <h3>Pluggable Promotion Topology</h3>
+
+    <p>The model promotion step (how a model moves from STAGE to PROD) is implemented as a <strong>pluggable strategy</strong> controlled by a single environment variable: <code>TOPOLOGY</code>.</p>
+
+    <div class="card">
+      <table>
+        <thead><tr><th>Topology</th><th>Mechanism</th><th>When to Use</th></tr></thead>
+        <tbody>
+          <tr><td><code>single-account</code> (default)</td><td><code>ALTER MODEL PROD ADD VERSION FROM STAGE</code></td><td>All envs in one Snowflake account</td></tr>
+          <tr><td><code>multi-account</code></td><td>Cross-account model sharing / listing</td><td>Separate accounts per env (same region)</td></tr>
+          <tr><td><code>cross-region</code></td><td>Replication group or cross-region listing</td><td>Accounts in different cloud regions</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <pre><code># Project structure:
+deploy/
+├── promote.py                  # CLI dispatcher (reads $TOPOLOGY)
+└── strategies/
+    ├── single_account.py       # Active: cross-DB replication
+    ├── multi_account.py        # Future: cross-account
+    └── cross_region.py         # Future: cross-region
+
+# To switch topology, set one GitHub repo variable:
+#   TOPOLOGY = "multi-account"
+# All workflows automatically use the new promotion strategy.</code></pre>
+
+    <div class="why">
+      <strong>Why make this pluggable?</strong> Different organizations have different isolation requirements. Some use one account with database separation (simplest). Others mandate separate accounts per environment for compliance. Others operate globally across regions. The ML training code, feature logic, and serving infrastructure are identical regardless -- only the model promotion mechanism changes.
+    </div>
   </section>
 
   <!-- ═══════════════════════════════════════════════════════════════ -->

@@ -93,6 +93,7 @@ Configure GitHub repo variables:
 - `SNOWFLAKE_DATABASE_STAGE` - `SNOW_MLOPS_STAGE`
 - `SNOWFLAKE_DATABASE_PROD` - `SNOW_MLOPS_PROD`
 - `SNOWFLAKE_SCHEMA` - `ML`
+- `TOPOLOGY` - `single-account` (default; also supports `multi-account`, `cross-region`)
 
 ## Project Structure
 
@@ -102,12 +103,18 @@ snowflake-mlops/
 │   ├── pr-checks.yml              # PR: lint + format + tests
 │   ├── deploy.yml                 # STAGE: train + register + replicate (auto on merge)
 │   └── deploy-prod.yml            # PROD: blue/green deploy (manual + approval)
+├── deploy/                        # Promotion strategies (topology-aware)
+│   ├── promote.py                 # CLI dispatcher (reads TOPOLOGY env var)
+│   └── strategies/
+│       ├── single_account.py      # Default: cross-DB replication in one account
+│       ├── multi_account.py       # Future: cross-account promotion
+│       └── cross_region.py        # Future: cross-region replication
 ├── scripts/
 │   ├── setup.sh                   # Create Snowflake infrastructure
 │   ├── setup_cicd.sh              # OIDC users + network policy
 │   ├── generate_dataset.py        # Synthetic fraud data
 │   ├── run_training_job.py        # DEV: train on compute pool
-│   ├── run_stage_pipeline.py      # STAGE: train + replicate to PROD
+│   ├── run_stage_pipeline.py      # STAGE: train + promote (uses TOPOLOGY)
 │   └── deploy_prod_service.py     # PROD: blue/green gateway deploy
 ├── source/
 │   ├── config.py                  # Centralized configuration
