@@ -11,6 +11,7 @@ on:
 permissions:
   id-token: write
   contents: read
+  pull-requests: write
 
 env:
   SNOWFLAKE_ACCOUNT: ${{ vars.SNOWFLAKE_ACCOUNT }}
@@ -25,6 +26,8 @@ jobs:
       TOPOLOGY: ${{ vars.TOPOLOGY || 'single-account' }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
 
       - name: Set up Snowflake CLI
         uses: snowflakedb/snowflake-actions@v3
@@ -54,3 +57,30 @@ jobs:
       - name: Run STAGE ML Pipeline (train + register + replicate)
         run: uv run python scripts/run_stage_pipeline.py
         timeout-minutes: 20
+        env:
+          METRICS_OUTPUT_PATH: ${{ runner.temp }}/model_metrics.md
+
+      - name: Post model metrics to merge commit
+        if: always()
+        run: |
+          METRICS_FILE="${{ runner.temp }}/model_metrics.md"
+          if [ -f "$METRICS_FILE" ]; then
+            # Find the PR that produced this merge commit
+            PR_NUMBER=$(gh pr list --state merged --limit 5 --json number,mergeCommit \
+              --jq ".[] | select(.mergeCommit.oid == \"$GITHUB_SHA\") | .number")
+
+            if [ -n "$PR_NUMBER" ]; then
+              echo "Posting metrics to PR #$PR_NUMBER"
+              BODY=$(cat "$METRICS_FILE")
+              gh pr comment "$PR_NUMBER" --body "$BODY"
+            else
+              echo "No matching PR found for commit $GITHUB_SHA -- posting as commit comment"
+              BODY=$(cat "$METRICS_FILE")
+              gh api repos/${{ github.repository }}/commits/${{ github.sha }}/comments \
+                -f body="$BODY"
+            fi
+          else
+            echo "No metrics file found -- pipeline may have failed before training completed"
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}

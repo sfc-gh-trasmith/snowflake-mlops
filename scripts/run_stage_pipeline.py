@@ -215,6 +215,91 @@ def replicate_model_to_prod(session, version: str):
     module.promote(version=version, session=session)
 
 
+def write_job_summary(metrics: dict, version: str, passed: bool):
+    """Write model metrics to GitHub Actions Job Summary (GITHUB_STEP_SUMMARY)."""
+    import os
+
+    summary_path = os.getenv("GITHUB_STEP_SUMMARY")
+    if not summary_path:
+        print("  (Not running in GitHub Actions -- skipping job summary)")
+        return
+
+    status_emoji = "PASSED" if passed else "FAILED"
+    status_badge = f"**Quality Gate: {status_emoji}**"
+
+    thresholds = f"MIN_AUC_ROC={MIN_AUC_ROC}, MIN_PRECISION={MIN_PRECISION}, MIN_RECALL={MIN_RECALL}"
+
+    summary = f"""## Model Training Results
+
+{status_badge}
+
+### Metrics
+
+| Metric | Value | Threshold | Status |
+|--------|-------|-----------|--------|
+| AUC-ROC | {metrics.get("auc_roc", 0):.4f} | >= {MIN_AUC_ROC} | {"PASS" if metrics.get("auc_roc", 0) >= MIN_AUC_ROC else "FAIL"} |
+| PR-AUC | {metrics.get("pr_auc", 0):.4f} | - | - |
+| Precision | {metrics.get("precision", 0):.4f} | >= {MIN_PRECISION} | {"PASS" if metrics.get("precision", 0) >= MIN_PRECISION else "FAIL"} |
+| Recall | {metrics.get("recall", 0):.4f} | >= {MIN_RECALL} | {"PASS" if metrics.get("recall", 0) >= MIN_RECALL else "FAIL"} |
+| F1 Score | {metrics.get("f1", 0):.4f} | - | - |
+| CV AUC Mean | {metrics.get("cv_auc_mean", 0):.4f} | - | - |
+
+### Model Details
+
+| Property | Value |
+|----------|-------|
+| Version | `{version}` |
+| Feature View | `{_FV_TABLE}` |
+| Thresholds | `{thresholds}` |
+| Registry | `{STAGE_DATABASE}.{STAGE_SCHEMA}.{MODEL_NAME}` |
+| Promoted to | `{PROD_DATABASE}.{PROD_SCHEMA}.{MODEL_NAME}` |
+"""
+
+    with open(summary_path, "a") as f:
+        f.write(summary)
+    print("  Job summary written to GITHUB_STEP_SUMMARY")
+
+
+def write_metrics_file(metrics: dict, version: str, passed: bool):
+    """Write metrics to a file for the workflow to post as a PR comment."""
+    import os
+
+    metrics_path = os.getenv("METRICS_OUTPUT_PATH", "/tmp/model_metrics.md")
+    status = "PASSED" if passed else "FAILED"
+
+    content = (
+        f"### Model `{MODEL_NAME}/{version}` - Quality Gate: **{status}**\\n\\n"
+        f"| Metric | Value | Threshold |\\n"
+        f"|--------|-------|-----------|\\n"
+        f"| AUC-ROC | {metrics.get('auc_roc', 0):.4f} | >= {MIN_AUC_ROC} |\\n"
+        f"| Precision | {metrics.get('precision', 0):.4f} | >= {MIN_PRECISION} |\\n"
+        f"| Recall | {metrics.get('recall', 0):.4f} | >= {MIN_RECALL} |\\n"
+        f"| F1 | {metrics.get('f1', 0):.4f} | - |\\n"
+        f"| Features | `{_FV_TABLE}` | - |\\n"
+    )
+
+    with open(metrics_path, "w") as f:
+        f.write(content)
+
+
+# Quality gate thresholds
+MIN_AUC_ROC = 0.85
+MIN_PRECISION = 0.70
+MIN_RECALL = 0.60
+
+
+def check_quality_gate(metrics: dict) -> tuple[bool, list[str]]:
+    """Check if model metrics meet minimum thresholds. Returns (passed, failures)."""
+    failures = []
+    if metrics.get("auc_roc", 0) < MIN_AUC_ROC:
+        failures.append(f"AUC-ROC {metrics['auc_roc']:.4f} < {MIN_AUC_ROC}")
+    if metrics.get("precision", 0) < MIN_PRECISION:
+        failures.append(f"Precision {metrics['precision']:.4f} < {MIN_PRECISION}")
+    if metrics.get("recall", 0) < MIN_RECALL:
+        failures.append(f"Recall {metrics['recall']:.4f} < {MIN_RECALL}")
+    return len(failures) == 0, failures
+
+
 def main():
     print("=" * 60)
     print("STAGE ML PIPELINE")
@@ -226,23 +311,49 @@ def main():
     session.sql(f"USE SCHEMA {STAGE_SCHEMA}").collect()
 
     # Step 1: Train and register model on STAGE compute pool
-    print("\n[1/2] Training model on STAGE compute pool...")
+    print("\n[1/3] Training model on STAGE compute pool...")
     job = train_and_register_stage()
     print("  Job submitted. Waiting for completion...")
     result = job.result()
     print(f"  Training result: {result}")
 
-    # Extract version from result
+    # Extract version and metrics from result
     result_data = json.loads(result)
     version = result_data.get("version", "V1")
+    metrics = result_data.get("metrics", {})
 
-    # Step 2: Replicate model from STAGE to PROD
-    print(f"\n[2/2] Replicating model {version} to PROD...")
+    # Step 2: Quality gate check
+    print("\n[2/3] Quality gate check...")
+    passed, failures = check_quality_gate(metrics)
+
+    if passed:
+        print("  PASSED - all metrics meet thresholds")
+    else:
+        print("  FAILED - the following metrics are below threshold:")
+        for f in failures:
+            print(f"    - {f}")
+
+    # Write job summary and metrics file (for GitHub Actions)
+    write_job_summary(metrics, version, passed)
+    write_metrics_file(metrics, version, passed)
+
+    if not passed:
+        print("\n" + "=" * 60)
+        print("STAGE PIPELINE BLOCKED - Model does not meet quality thresholds")
+        print("  Model was registered but will NOT be replicated to PROD.")
+        print("  Fix model quality and re-run the pipeline.")
+        print("=" * 60)
+        session.close()
+        sys.exit(1)
+
+    # Step 3: Replicate model from STAGE to PROD (only if quality gate passed)
+    print(f"\n[3/3] Replicating model {version} to PROD...")
     replicate_model_to_prod(session, version)
 
     print("\n" + "=" * 60)
     print("STAGE PIPELINE COMPLETE")
     print("  Model trained and registered in SNOW_MLOPS_STAGE.ML")
+    print("  Quality gate: PASSED")
     print("  Model replicated to SNOW_MLOPS_PROD.ML")
     print("  Ready for PROD service deployment (manual dispatch)")
     print("=" * 60)

@@ -31,6 +31,11 @@ FEATURE_STORE_SCHEMA = SCHEMA
 FEATURE_VIEW_NAME = "CUSTOMER_RISK_FEATURES"
 FEATURE_VIEW_VERSION = "V1"  # Bump when feature SQL changes
 
+# Quality gate thresholds (model must meet ALL to promote to PROD)
+MIN_AUC_ROC = 0.85
+MIN_PRECISION = 0.70
+MIN_RECALL = 0.60
+
 # Pipeline defaults
 PIPELINE_CONFIG = {
     "database": DATABASE,
