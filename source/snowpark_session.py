@@ -225,6 +225,8 @@ def create_snowpark_session(connection_name: Optional[str] = None) -> Session:
             "token": os.environ["SNOWFLAKE_TOKEN"],
             "authenticator": "oauth",
         }
+        if os.getenv("SNOWFLAKE_USER"):
+            config["user"] = os.environ["SNOWFLAKE_USER"]
         if os.getenv("SNOWFLAKE_DATABASE"):
             config["database"] = os.environ["SNOWFLAKE_DATABASE"]
         if os.getenv("SNOWFLAKE_SCHEMA"):
