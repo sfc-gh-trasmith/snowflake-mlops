@@ -7,6 +7,11 @@ on:
       - '*.md'
       - 'docs/**'
       - 'LICENSE'
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: 'Reason for manual retrain (e.g., fresh data, threshold change)'
+        required: false
 
 permissions:
   id-token: write
