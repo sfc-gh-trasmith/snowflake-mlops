@@ -138,8 +138,15 @@ snowflake-mlops/
 | Workflow | Trigger | What It Does |
 |----------|---------|--------------|
 | `pr-checks.yml` | PR to `main` | Lint, format check, unit tests |
-| `deploy.yml` | Push to `main` | Train on STAGE pool, register model, replicate to PROD |
-| `deploy-prod.yml` | Manual dispatch | Blue/green: create service, health check, shift gateway |
+| `deploy.yml` | Push to `main` OR manual dispatch | Train on STAGE pool, register model, replicate to PROD, batch inference |
+| `deploy-prod.yml` | Manual dispatch | Blue/green: create service, health check, shift gateway, batch inference |
+
+### Two promotion paths
+
+- **Code Promotion** — change features, hyperparameters, or pipeline code → push to `main` → pipeline runs automatically
+- **Model Promotion** — retrain on fresh data with no code changes → click "Run workflow" on `deploy.yml` in GitHub Actions
+
+Both paths produce a new auto-incremented model version (V1 → V2 → V3). Versions are computed at runtime from the Model Registry, not stored in config.
 
 ## Key Commands
 
