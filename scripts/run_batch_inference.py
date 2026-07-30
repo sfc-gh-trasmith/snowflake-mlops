@@ -58,6 +58,13 @@ def main():
     session.sql(f"USE SCHEMA {SCHEMA}").collect()
     session.sql(f"USE WAREHOUSE {WAREHOUSE}").collect()
 
+    # Ensure Feature View exists in this environment (idempotent)
+    print(f"\n[0/2] Ensuring Feature View exists in {DATABASE}.{SCHEMA}...")
+    from features.feature_views import register_feature_views
+
+    register_feature_views(session=session, database=DATABASE, schema=SCHEMA, warehouse=WAREHOUSE)
+    print("  Feature Views registered (idempotent).")
+
     from serving.batch_inference import run_batch_inference, validate_predictions
 
     # Step 1: Run batch scoring

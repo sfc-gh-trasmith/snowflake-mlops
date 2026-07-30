@@ -48,6 +48,17 @@ jobs:
         run: uv run python scripts/deploy_prod_service.py
         timeout-minutes: 20
 
+      - name: Register Feature Views in PROD
+        run: uv run python -c "
+          import sys; sys.path.insert(0, 'source');
+          from features.feature_views import register_feature_views;
+          from snowpark_session import create_snowpark_session;
+          session = create_snowpark_session();
+          register_feature_views(session=session, database='SNOW_MLOPS_PROD', schema='ML', warehouse='SNOW_MLOPS_PROD_WH');
+          session.close()
+          "
+        timeout-minutes: 5
+
       - name: Run batch inference
         run: uv run python scripts/run_batch_inference.py
         timeout-minutes: 10

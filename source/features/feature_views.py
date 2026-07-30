@@ -87,7 +87,7 @@ def create_transaction_features_df(session: Session):
     return features
 
 
-def register_feature_views(session=None, database=None, schema=None):
+def register_feature_views(session=None, database=None, schema=None, warehouse=None):
     """Register all feature views in the Feature Store. Idempotent (creates or updates)."""
     close_session = False
     if session is None:
@@ -96,14 +96,15 @@ def register_feature_views(session=None, database=None, schema=None):
 
     db = database or DATABASE
     sch = schema or SCHEMA
+    wh = warehouse or WAREHOUSE
 
-    session.sql(f"USE WAREHOUSE {WAREHOUSE}").collect()
+    session.sql(f"USE WAREHOUSE {wh}").collect()
 
     fs = FeatureStore(
         session=session,
         database=db,
         name=sch,
-        default_warehouse=WAREHOUSE,
+        default_warehouse=wh,
         creation_mode=CreationMode.CREATE_IF_NOT_EXIST,
     )
 

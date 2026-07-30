@@ -78,10 +78,17 @@
   <a href="https://docs.snowflake.com/en/developer">Developer</a><span class="sep">&#x276F;</span><a href="https://docs.snowflake.com/en/developer-guide/snowflake-ml/overview">Snowflake ML</a><span class="sep">&#x276F;</span>MLOps Architecture
 </nav>
 
+<img src="logo.png" alt="Snowflake" style="height: 80px; margin-bottom: 24px; display: block;" />
+
 <h1>MLOps on Snowflake</h1>
 <p class="subtitle">End-to-end architecture and workflow guide for production ML pipelines using Snowflake-native services.</p>
 
 <p>This document describes a complete MLOps framework built entirely on Snowflake. It covers every step from feature engineering through production deployment, including two inference modes (batch and real-time), automated CI/CD, quality gates, and zero-downtime model upgrades. The framework is demonstrated with a fraud detection model but applies to any ML problem.</p>
+
+<div class="note">
+  <strong>Note — Single-Account Example</strong>
+  <p>This guide demonstrates the MLOps workflow using a <strong>single Snowflake account</strong> with environments separated at the database level (DEV, STAGE, PROD). This is the simplest topology and ideal for getting started. The architecture is designed to extend to <strong>multi-account deployments</strong> (separate accounts per environment, cross-account model sharing) and <strong>cross-region replication</strong> — see the <a href="#promotion">Pluggable promotion topology</a> section for details on how to configure these patterns.</p>
+</div>
 
 <details class="toc-container" open>
   <summary class="toc-header">On this page</summary>
@@ -218,14 +225,14 @@ flowchart LR
 
 <p>Entities define the join keys for feature lookups. They must be registered before any Feature View that references them.</p>
 
-<pre><code>from snowflake.ml.feature_store import Entity
+<pre><code class="language-python">from snowflake.ml.feature_store import Entity
 
 customer_entity = Entity(name="CUSTOMER", join_keys=["CUSTOMER_ID"])
 transaction_entity = Entity(name="TRANSACTION", join_keys=["CUSTOMER_ID", "TRANSACTION_ID"])</code></pre>
 
 <h4>Step 2: Define feature SQL</h4>
 
-<pre><code>feature_df = session.sql("""
+<pre><code class="language-python">feature_df = session.sql("""
     SELECT
         t.CUSTOMER_ID,
         COUNT(*)                          AS TOTAL_TXN_COUNT,
@@ -246,7 +253,7 @@ transaction_entity = Entity(name="TRANSACTION", join_keys=["CUSTOMER_ID", "TRANS
 
 <h4>Step 3: Register the Feature View</h4>
 
-<pre><code>from snowflake.ml.feature_store import FeatureStore, FeatureView
+<pre><code class="language-python">from snowflake.ml.feature_store import FeatureStore, FeatureView
 
 fs = FeatureStore(session=session, database=database, schema=schema)
 
@@ -277,7 +284,7 @@ fs.register_feature_view(
 
 <p>Feature View versions are tracked manually in <code>source/config.py</code>:</p>
 
-<pre><code>FEATURE_VIEW_NAME = "CUSTOMER_RISK_FEATURES"
+<pre><code class="language-python">FEATURE_VIEW_NAME = "CUSTOMER_RISK_FEATURES"
 FEATURE_VIEW_VERSION = "V1"  # Bump to "V2" when feature SQL changes</code></pre>
 
 <p>When you bump the version, the next pipeline run creates a new Dynamic Table (<code>CUSTOMER_RISK_FEATURES$V2</code>) alongside the old one. The model comment records which feature version it was trained on, providing full lineage.</p>
@@ -288,7 +295,7 @@ FEATURE_VIEW_VERSION = "V1"  # Bump to "V2" when feature SQL changes</code></pre
 
 <p>Feature Views cannot be replicated like models. A Dynamic Table is a live computation, not a static artifact. Promotion means re-running the same registration code against the target database:</p>
 
-<pre><code># In the STAGE pipeline:
+<pre><code class="language-python"># In the STAGE pipeline:
 register_feature_views(session, database="SNOW_MLOPS_STAGE", schema="ML")
 
 # The same function runs in DEV (no args = use config defaults):
@@ -335,7 +342,7 @@ register_feature_views(session)</code></pre>
 
 <h3>Training function pattern</h3>
 
-<pre><code>from snowflake.ml.jobs import remote
+<pre><code class="language-python">from snowflake.ml.jobs import remote
 
 @remote(
     "SNOW_MLOPS_STAGE_POOL",                  # Compute pool to run on
@@ -381,7 +388,7 @@ def train_and_register_stage() -> str:
 
 <p>External references (table names, config values) must be captured as local variables before the function definition. <code>cloudpickle</code> serializes the function's closure, not module state:</p>
 
-<pre><code># Captured as closure variables — works inside @remote
+<pre><code class="language-python"># Captured as closure variables — works inside @remote
 _FV_TABLE = f'"CUSTOMER_RISK_FEATURES$V1"'
 _DATABASE = "SNOW_MLOPS_STAGE"
 
@@ -423,7 +430,7 @@ def train():
 
 <p>Model versions are <strong>not stored in config files</strong>. They are computed at runtime by querying the registry:</p>
 
-<pre><code># Inside the training function:
+<pre><code class="language-python"># Inside the training function:
 try:
     versions_df = session.sql(f"SHOW VERSIONS IN MODEL {db}.{schema}.{model_name}").collect()
     existing = [r["name"] for r in versions_df]
@@ -436,7 +443,7 @@ except Exception:
 
 <h3>Registration with target_platforms</h3>
 
-<pre><code>reg.log_model(
+<pre><code class="language-python">reg.log_model(
     model=model,
     model_name="MLOPS_FRAUD_DETECTOR",
     version_name=version_name,
@@ -477,7 +484,7 @@ except Exception:
 
 <p>Models are promoted from STAGE to PROD using atomic SQL replication:</p>
 
-<pre><code>-- Copy version V3 from STAGE to PROD
+<pre><code class="language-sql">-- Copy version V3 from STAGE to PROD
 ALTER MODEL SNOW_MLOPS_PROD.ML.MLOPS_FRAUD_DETECTOR
   ADD VERSION V3
   FROM MODEL SNOW_MLOPS_STAGE.ML.MLOPS_FRAUD_DETECTOR VERSION V3;
@@ -497,7 +504,7 @@ ALTER MODEL SNOW_MLOPS_PROD.ML.MLOPS_FRAUD_DETECTOR
 
 <h3>How it works</h3>
 
-<pre><code># source/config.py — thresholds
+<pre><code class="language-python"># source/config.py — thresholds
 MIN_AUC_ROC = 0.85
 MIN_PRECISION = 0.70
 MIN_RECALL = 0.60
@@ -548,7 +555,7 @@ def check_quality_gate(metrics: dict) -> tuple[bool, list[str]]:
 
 <h4>How it works</h4>
 
-<pre><code>from snowflake.ml.registry import Registry
+<pre><code class="language-python">from snowflake.ml.registry import Registry
 
 def run_batch_inference(session, input_table, output_table, model_name):
     reg = Registry(session=session)
@@ -605,7 +612,7 @@ def run_batch_inference(session, input_table, output_table, model_name):
 
 <h4>Deploying a service</h4>
 
-<pre><code>from snowflake.ml.registry import Registry
+<pre><code class="language-python">from snowflake.ml.registry import Registry
 
 reg = Registry(session=session, database_name="SNOW_MLOPS_PROD", schema_name="ML")
 model = reg.get_model("MLOPS_FRAUD_DETECTOR")
@@ -621,7 +628,7 @@ mv.create_service(
 
 <h4>Calling the endpoint</h4>
 
-<pre><code>POST https://&lt;gateway-url&gt;/predict-proba
+<pre><code class="language-bash">POST https://&lt;gateway-url&gt;/predict-proba
 Authorization: Snowflake Token="&lt;PAT&gt;"
 Content-Type: application/json
 
@@ -660,7 +667,7 @@ flowchart LR
   <li><strong>Cleanup:</strong> Drop the old service</li>
 </ol>
 
-<pre><code>-- Atomic traffic shift to new service
+<pre><code class="language-sql">-- Atomic traffic shift to new service
 ALTER GATEWAY SNOW_MLOPS_PROD.ML.FRAUD_DETECTOR_GATEWAY
 FROM SPECIFICATION $$
   spec:
@@ -699,7 +706,7 @@ $$;</code></pre>
 
 <p>Model versions are derived at runtime from the Model Registry — not from any config file. The training function queries "what versions exist?" and computes the next sequential number:</p>
 
-<pre><code>V1 (first run) → V2 (next run) → V3 (next run) → ...</code></pre>
+<pre><code class="language-text">V1 (first run) → V2 (next run) → V3 (next run) → ...</code></pre>
 
 <p>Whether triggered by a code change or manual dispatch, every run produces V(n+1). The model comment records the git SHA, feature version, and metrics for traceability.</p>
 
@@ -777,7 +784,7 @@ flowchart TD
 
 <h3>STAGE workflow (deploy.yml) — step by step</h3>
 
-<pre><code>name: Deploy
+<pre><code class="language-yaml">name: Deploy
 
 on:
   push:
@@ -840,7 +847,7 @@ sequenceDiagram
 
 <p>The session helper detects whether it's running in CI or locally and creates the appropriate session:</p>
 
-<pre><code>def create_snowpark_session():
+<pre><code class="language-python">def create_snowpark_session():
     # CI/OIDC: detected by SNOWFLAKE_TOKEN + SNOWFLAKE_ACCOUNT in env
     if os.getenv("SNOWFLAKE_TOKEN") and os.getenv("SNOWFLAKE_ACCOUNT"):
         config = {
@@ -870,7 +877,7 @@ sequenceDiagram
 
 <p>The project uses <code>uv</code> dependency groups to separate CI from dev dependencies:</p>
 
-<pre><code># pyproject.toml
+<pre><code class="language-toml"># pyproject.toml
 [dependency-groups]
 snow = [
     "snowflake-snowpark-python>=1.53.1",
@@ -921,7 +928,7 @@ dev = ["ruff", "pytest"]</code></pre>
 
 <p>Models are Snowflake objects with ownership-based access control. A role can only modify models it owns. The setup script transfers ownership of any existing models to <code>MLOPS_DEPLOY_ROLE</code>:</p>
 
-<pre><code>-- Transfer existing models (created by ACCOUNTADMIN during initial setup)
+<pre><code class="language-sql">-- Transfer existing models (created by ACCOUNTADMIN during initial setup)
 GRANT OWNERSHIP ON ALL MODELS IN SCHEMA SNOW_MLOPS_DEV.ML TO ROLE MLOPS_DEPLOY_ROLE COPY CURRENT GRANTS;
 GRANT OWNERSHIP ON ALL MODELS IN SCHEMA SNOW_MLOPS_STAGE.ML TO ROLE MLOPS_DEPLOY_ROLE COPY CURRENT GRANTS;
 GRANT OWNERSHIP ON ALL MODELS IN SCHEMA SNOW_MLOPS_PROD.ML TO ROLE MLOPS_DEPLOY_ROLE COPY CURRENT GRANTS;</code></pre>
@@ -935,7 +942,7 @@ GRANT OWNERSHIP ON ALL MODELS IN SCHEMA SNOW_MLOPS_PROD.ML TO ROLE MLOPS_DEPLOY_
 
 <p>Each GitHub environment has its own service user with OIDC workload identity:</p>
 
-<pre><code>CREATE USER SVC_GITHUB_ACTIONS_STAGE
+<pre><code class="language-sql">CREATE USER SVC_GITHUB_ACTIONS_STAGE
   TYPE = SERVICE
   DEFAULT_ROLE = MLOPS_DEPLOY_ROLE
   WORKLOAD_IDENTITY = (
@@ -950,7 +957,7 @@ ALTER USER SVC_GITHUB_ACTIONS_STAGE SET NETWORK_POLICY = 'GITHUB_ACTIONS_POLICY'
 
 <p>GitHub Actions runners use dynamic IPs. Snowflake provides a managed network rule that automatically tracks them:</p>
 
-<pre><code>CREATE NETWORK POLICY GITHUB_ACTIONS_POLICY
+<pre><code class="language-sql">CREATE NETWORK POLICY GITHUB_ACTIONS_POLICY
   ALLOWED_NETWORK_RULE_LIST = ('SNOWFLAKE.NETWORK_SECURITY.GITHUBACTIONS_GLOBAL');</code></pre>
 
 <p>This is applied to service users only — it doesn't affect human users or other integrations.</p>
@@ -970,9 +977,13 @@ ALTER USER SVC_GITHUB_ACTIONS_STAGE SET NETWORK_POLICY = 'GITHUB_ACTIONS_POLICY'
   <li><a href="https://docs.snowflake.com/en/developer-guide/snowflake-cli/cicd/github-action">Snowflake CLI GitHub Action</a></li>
 </ul>
 
-<script src="/libs/mermaid@10.9.6/mermaid.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github.min.css" media="(prefers-color-scheme: light)" />
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" media="(prefers-color-scheme: dark)" />
 <script>
   mermaid.initialize({ startOnLoad: true, securityLevel: 'strict' });
+  hljs.highlightAll();
 </script>
 </body>
 </html>

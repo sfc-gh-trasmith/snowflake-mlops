@@ -130,7 +130,7 @@ snowflake-mlops/
 │   ├── test_config.py             # Unit tests
 │   └── test_endpoint.py           # Integration tests (gateway + predictions)
 └── docs/
-    └── mlops-architecture.html    # Detailed architecture documentation
+    └── docs.html    # Detailed architecture documentation
 ```
 
 ## CI/CD Workflows
@@ -190,4 +190,4 @@ All environments live in a **single Snowflake account** with database-level isol
 
 ## Documentation
 
-Open `docs/mlops-architecture.html` in a browser for a detailed Level 300 walkthrough of the entire MLOps workflow, including Feature Store, ML Jobs, Model Registry, Gateway deployment, and CI/CD orchestration.
+Open `docs/docs.html` in a browser for a detailed Level 300 walkthrough of the entire MLOps workflow, including Feature Store, ML Jobs, Model Registry, Gateway deployment, and CI/CD orchestration.
