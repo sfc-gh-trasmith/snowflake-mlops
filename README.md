@@ -105,8 +105,7 @@ Configure GitHub repo settings:
 snowflake-mlops/
 ├── .github/workflows/
 │   ├── pr-checks.yml              # PR: lint + format + tests
-│   ├── deploy.yml                 # STAGE: train + register + replicate (auto on merge)
-│   └── deploy-prod.yml            # PROD: blue/green deploy (manual + approval)
+│   ├── deploy.yml                 # STAGE + PROD: unified workflow with approval gate
 ├── deploy/                        # Promotion strategies (topology-aware)
 │   ├── promote.py                 # CLI dispatcher (reads TOPOLOGY env var)
 │   └── strategies/
@@ -139,7 +138,7 @@ snowflake-mlops/
 |----------|---------|--------------|
 | `pr-checks.yml` | PR to `main` | Lint, format check, unit tests |
 | `deploy.yml` | Push to `main` OR manual dispatch | Train on STAGE pool, register model, replicate to PROD, batch inference |
-| `deploy-prod.yml` | Manual dispatch | Blue/green: create service, health check, shift gateway, batch inference |
+| `deploy.yml` (deploy-prod job) | After STAGE passes + reviewer approval | Blue/green: create service, health check, shift gateway, batch inference |
 
 ### Two promotion paths
 

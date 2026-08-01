@@ -193,8 +193,7 @@ flowchart LR
 │       ├── multi_account.py          # Cross-account (future)
 │       └── cross_region.py           # Cross-region (future)
 ├── .github/workflows/
-│   ├── deploy.yml                    # STAGE: auto on push or manual dispatch
-│   └── deploy-prod.yml              # PROD: manual dispatch only
+│   └── deploy.yml                    # STAGE + PROD (single workflow, approval gate)
 ├── tests/
 ├── pyproject.toml
 └── docs/</code></pre>
@@ -729,7 +728,7 @@ flowchart TD
     GATE -->|"metrics pass"| REG["Step 4: Replicate model to PROD"]
     REG --> BATCH["Step 5: Batch inference (validate predictions)"]
     BATCH --> DONE["STAGE pipeline complete"]
-    DONE --> DISPATCH["Step 6: Manual dispatch deploy-prod.yml"]
+    DONE --> DISPATCH["Step 6: Approve PROD deployment"]
     DISPATCH --> DEPLOY["Step 7: Blue/green SPCS deploy"]
     DEPLOY --> PRODBATCH["Step 8: Batch inference (PROD)"]
     PRODBATCH --> LIVE["Live via Gateway"]
@@ -746,7 +745,7 @@ flowchart TD
     <tr><td>3</td><td>Compare metrics against thresholds</td><td><code>check_quality_gate(metrics)</code></td><td>Model registered but NOT replicated</td></tr>
     <tr><td>4</td><td><code>ALTER MODEL ... ADD VERSION FROM MODEL</code></td><td><code>deploy/strategies/single_account.py</code></td><td>Pipeline stops (PROD doesn't get the model)</td></tr>
     <tr><td>5</td><td>Score feature table in STAGE, validate predictions</td><td><code>run_batch_inference.py</code></td><td>Pipeline fails (flags bad model)</td></tr>
-    <tr><td>6</td><td>Human clicks "Run workflow" on deploy-prod.yml</td><td>GitHub Actions UI</td><td>N/A (manual action)</td></tr>
+    <tr><td>6</td><td>Reviewer approves PROD deployment (environment gate)</td><td>GitHub Actions UI</td><td>N/A (manual action)</td></tr>
     <tr><td>7</td><td>Create versioned SPCS service → health check → shift gateway</td><td><code>deploy_prod_service.py</code></td><td>Old service stays live (no rollback needed)</td></tr>
     <tr><td>8</td><td>Score feature table in PROD, validate predictions</td><td><code>run_batch_inference.py</code></td><td>Flags issue but service already live</td></tr>
   </tbody>
@@ -777,12 +776,16 @@ flowchart TD
 <table>
   <thead><tr><th>File</th><th>Trigger</th><th>Environment</th><th>Actions</th></tr></thead>
   <tbody>
-    <tr><td><code>deploy.yml</code></td><td>Push to <code>main</code> OR manual dispatch</td><td>STAGE</td><td>Register features, train, quality gate, replicate, batch inference</td></tr>
-    <tr><td><code>deploy-prod.yml</code></td><td>Manual dispatch only</td><td>PROD</td><td>Blue/green SPCS deploy, batch inference, verify gateway</td></tr>
+    <tr><td><code>deploy.yml</code> → <code>deploy-stage</code> job</td><td>Push to <code>main</code> OR manual dispatch</td><td>STAGE</td><td>Register features, train, quality gate, replicate, batch inference</td></tr>
+    <tr><td><code>deploy.yml</code> → <code>deploy-prod</code> job</td><td>After STAGE passes + reviewer approval</td><td>PROD</td><td>Blue/green SPCS deploy, batch inference, verify gateway</td></tr>
   </tbody>
 </table>
 
-<h3>STAGE workflow (deploy.yml) — step by step</h3>
+<h3>Unified workflow (deploy.yml) — step by step</h3>
+
+<p>A single workflow file contains two jobs. The <code>deploy-prod</code> job has <code>needs: deploy-stage</code> and references the <code>PROD</code> environment. GitHub pauses and shows an "Approve and deploy" button when the STAGE job passes. Configure required reviewers in <strong>Settings → Environments → PROD</strong>.</p>
+
+<h4>STAGE job</h4>
 
 <pre><code class="language-yaml">name: Deploy
 
