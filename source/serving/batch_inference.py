@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from config import DATABASE, SCHEMA, WAREHOUSE, MODEL_NAME
+from config import DATABASE, SCHEMA, MODEL_NAME
 
 
 def run_batch_inference(

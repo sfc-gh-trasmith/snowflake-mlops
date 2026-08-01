@@ -73,7 +73,7 @@ def ensure_gateway_exists(session, service_name):
                 weight: 100
         $$
     """).collect()
-    print(f"  Gateway created.")
+    print("  Gateway created.")
 
 
 def wait_for_service_ready(session, service_name, timeout=READY_TIMEOUT_SECONDS):

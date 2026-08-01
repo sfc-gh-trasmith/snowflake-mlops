@@ -36,12 +36,12 @@ def write_batch_summary(result: dict, validation: dict):
 
 | Metric | Value |
 |--------|-------|
-| Rows scored | {result['row_count']:,} |
-| Model version | `{result['model_version']}` |
-| Null predictions | {validation['null_predictions']} |
-| Avg probability sum | {validation['avg_probability_sum']:.6f} |
-| Max deviation from 1.0 | {validation['max_deviation_from_1']:.6f} |
-| Output table | `{result['output_table']}` |
+| Rows scored | {result["row_count"]:,} |
+| Model version | `{result["model_version"]}` |
+| Null predictions | {validation["null_predictions"]} |
+| Avg probability sum | {validation["avg_probability_sum"]:.6f} |
+| Max deviation from 1.0 | {validation["max_deviation_from_1"]:.6f} |
+| Output table | `{result["output_table"]}` |
 """
     with open(summary_path, "a") as f:
         f.write(md)
