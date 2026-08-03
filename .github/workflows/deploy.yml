@@ -15,7 +15,7 @@ on:
 
 permissions:
   id-token: write
-  contents: read
+  contents: write
 
 env:
   SNOWFLAKE_ACCOUNT: ${{ vars.SNOWFLAKE_ACCOUNT }}
@@ -160,3 +160,11 @@ jobs:
       - name: Verify gateway endpoint
         run: |
           snow sql -q "DESC GATEWAY SNOW_MLOPS_PROD.ML.FRAUD_DETECTOR_GATEWAY" -x
+
+      - name: Tag release
+        run: |
+          MODEL_VERSION=$(snow sql -q "SHOW MODELS LIKE 'MLOPS_FRAUD_DETECTOR' IN SNOW_MLOPS_PROD.ML" --format json -x | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['default_version_name'])" 2>/dev/null || echo "unknown")
+          TAG="prod/${MODEL_VERSION}-$(date +%Y%m%d-%H%M%S)"
+          git tag "$TAG" -m "PROD deploy: model ${MODEL_VERSION} from commit ${GITHUB_SHA::7}"
+          git push origin "$TAG"
+          echo "Tagged release: $TAG"
