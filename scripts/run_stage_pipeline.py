@@ -15,9 +15,9 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "source"))
-from config import MIN_AUC_ROC, MIN_PRECISION, MIN_RECALL  # noqa: E402
-from snowflake.ml.jobs import remote  # noqa: E402
-from snowpark_session import create_snowpark_session  # noqa: E402
+from config import MIN_AUC_ROC, MIN_PRECISION, MIN_RECALL
+from snowflake.ml.jobs import remote
+from snowpark_session import create_snowpark_session
 
 # --- STAGE Environment Config ---
 STAGE_DATABASE = "SNOW_MLOPS_STAGE"
