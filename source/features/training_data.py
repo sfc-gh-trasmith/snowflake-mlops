@@ -4,11 +4,10 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from config import DATABASE, SCHEMA, WAREHOUSE, SOURCE_DATABASE, SOURCE_SCHEMA
-from snowpark_session import create_snowpark_session
-
-from snowflake.ml.feature_store import FeatureStore, CreationMode
 import snowflake.snowpark.functions as F
+from config import DATABASE, SCHEMA, SOURCE_DATABASE, SOURCE_SCHEMA, WAREHOUSE
+from snowflake.ml.feature_store import CreationMode, FeatureStore
+from snowpark_session import create_snowpark_session
 
 
 def generate_training_data(session=None):

@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from config import DATABASE, SCHEMA, WAREHOUSE, COMPUTE_POOL, MODEL_NAME, SERVICE_NAME
+from config import COMPUTE_POOL, DATABASE, MODEL_NAME, SCHEMA, SERVICE_NAME, WAREHOUSE
 from snowpark_session import create_snowpark_session
 
 

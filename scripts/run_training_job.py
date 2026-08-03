@@ -8,10 +8,9 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "source"))
-from snowpark_session import create_snowpark_session
-from config import DATABASE, SCHEMA, WAREHOUSE, COMPUTE_POOL, JOB_STAGE, FEATURE_VIEW_NAME, FEATURE_VIEW_VERSION
-
+from config import COMPUTE_POOL, DATABASE, FEATURE_VIEW_NAME, FEATURE_VIEW_VERSION, JOB_STAGE, SCHEMA, WAREHOUSE
 from snowflake.ml.jobs import remote
+from snowpark_session import create_snowpark_session
 
 # These get captured by the @remote closure when the function is serialized
 _FV_TABLE = f'"{FEATURE_VIEW_NAME}${FEATURE_VIEW_VERSION}"'
@@ -35,18 +34,19 @@ def train_and_register() -> str:
     via SQL (avoids Dataset API serialization issues in remote containers).
     """
     import json
+
     import numpy as np
     import xgboost as xgb
-    from sklearn.model_selection import train_test_split, StratifiedKFold
     from sklearn.metrics import (
-        roc_auc_score,
+        average_precision_score,
+        f1_score,
         precision_score,
         recall_score,
-        f1_score,
-        average_precision_score,
+        roc_auc_score,
     )
-    from snowflake.snowpark import Session
+    from sklearn.model_selection import StratifiedKFold, train_test_split
     from snowflake.ml.registry import Registry
+    from snowflake.snowpark import Session
 
     session = Session.builder.getOrCreate()
 

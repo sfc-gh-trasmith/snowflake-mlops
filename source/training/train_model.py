@@ -13,18 +13,16 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import xgboost as xgb
-from sklearn.model_selection import train_test_split, StratifiedKFold
 from sklearn.metrics import (
-    roc_auc_score,
+    average_precision_score,
+    f1_score,
     precision_score,
     recall_score,
-    f1_score,
-    average_precision_score,
+    roc_auc_score,
 )
-
-from snowflake.snowpark import Session
+from sklearn.model_selection import StratifiedKFold, train_test_split
 from snowflake.ml.experiment.experiment_tracking import ExperimentTracking
-
+from snowflake.snowpark import Session
 
 DEFAULT_PARAMS = {
     "n_estimators": 200,
@@ -77,7 +75,7 @@ def load_training_data(session: Session, database: str, schema: str) -> pd.DataF
 
 def train_model(
     df: pd.DataFrame,
-    params: dict = None,
+    params: dict | None = None,
     experiment: ExperimentTracking = None,
     run_name: str = "fraud_detector_v1",
 ) -> tuple:
@@ -167,7 +165,7 @@ def train_model(
     return model, metrics, importance
 
 
-def save_model_locally(model, path: str = None) -> str:
+def save_model_locally(model, path: str | None = None) -> str:
     """Serialize model to a local pickle file."""
     if path is None:
         path = str(Path(tempfile.gettempdir()) / "fraud_detector_model.pkl")
@@ -181,7 +179,7 @@ def run_training_pipeline(
     session: Session = None,
     database: str = "SNOW_MLOPS_DEV",
     schema: str = "ML",
-    params: dict = None,
+    params: dict | None = None,
     run_name: str = "fraud_detector_v1",
 ) -> tuple:
     """Full training pipeline: load data, train, evaluate, save.
@@ -209,7 +207,7 @@ def run_training_pipeline(
 
     # Load data and train
     df = load_training_data(session, database, schema)
-    model, metrics, importance = train_model(df, params=params, experiment=experiment, run_name=run_name)
+    model, metrics, _importance = train_model(df, params=params, experiment=experiment, run_name=run_name)
 
     # Save model
     model_path = save_model_locally(model)

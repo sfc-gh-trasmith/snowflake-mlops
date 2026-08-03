@@ -15,9 +15,9 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "source"))
-from snowpark_session import create_snowpark_session
-
-from snowflake.ml.jobs import remote
+from config import MIN_AUC_ROC, MIN_PRECISION, MIN_RECALL  # noqa: E402
+from snowflake.ml.jobs import remote  # noqa: E402
+from snowpark_session import create_snowpark_session  # noqa: E402
 
 # --- STAGE Environment Config ---
 STAGE_DATABASE = "SNOW_MLOPS_STAGE"
@@ -55,16 +55,16 @@ def train_and_register_stage() -> str:
     """Train XGBoost fraud model on STAGE and register to STAGE Model Registry."""
     import numpy as np
     import xgboost as xgb
-    from sklearn.model_selection import train_test_split, StratifiedKFold
     from sklearn.metrics import (
-        roc_auc_score,
+        average_precision_score,
+        f1_score,
         precision_score,
         recall_score,
-        f1_score,
-        average_precision_score,
+        roc_auc_score,
     )
-    from snowflake.snowpark import Session
+    from sklearn.model_selection import StratifiedKFold, train_test_split
     from snowflake.ml.registry import Registry
+    from snowflake.snowpark import Session
 
     session = Session.builder.getOrCreate()
 
@@ -281,10 +281,6 @@ def write_metrics_file(metrics: dict, version: str, passed: bool):
 
     with open(metrics_path, "w") as f:
         f.write(content)
-
-
-# Quality gate thresholds (imported from config for single source of truth)
-from config import MIN_AUC_ROC, MIN_PRECISION, MIN_RECALL  # noqa: E402
 
 
 def check_quality_gate(metrics: dict) -> tuple[bool, list[str]]:

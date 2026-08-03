@@ -34,7 +34,6 @@ from config import (
 )
 from snowpark_session import create_snowpark_session
 
-
 # Environment configurations
 ENV_CONFIG = {
     "dev": {
@@ -144,7 +143,7 @@ END;
     print("\nDeploy complete.")
 
 
-def run_dag(env: str, config_override: dict = None):
+def run_dag(env: str, config_override: dict | None = None):
     """Trigger the Task DAG with runtime config."""
     cfg = get_env_config(env)
     db = cfg["database"]

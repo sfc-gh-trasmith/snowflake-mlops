@@ -9,12 +9,11 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from config import DATABASE, SCHEMA, WAREHOUSE, SOURCE_DATABASE, SOURCE_SCHEMA
-from snowpark_session import create_snowpark_session
-
-from snowflake.ml.feature_store import FeatureStore, FeatureView, Entity, CreationMode
-from snowflake.snowpark import Session
 import snowflake.snowpark.functions as F
+from config import DATABASE, SCHEMA, SOURCE_DATABASE, SOURCE_SCHEMA, WAREHOUSE
+from snowflake.ml.feature_store import CreationMode, Entity, FeatureStore, FeatureView
+from snowflake.snowpark import Session
+from snowpark_session import create_snowpark_session
 
 
 def create_customer_features_df(session: Session):

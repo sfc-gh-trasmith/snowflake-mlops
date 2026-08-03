@@ -208,7 +208,9 @@ def _daytime_probs():
     return [w / total for w in weights]
 
 
-def upload_to_snowflake(session, df: pd.DataFrame, table_name: str, database: str = None, schema: str = None):
+def upload_to_snowflake(
+    session, df: pd.DataFrame, table_name: str, database: str | None = None, schema: str | None = None
+):
     """Write pandas DataFrame to Snowflake table."""
     db = database or DATABASE
     sch = schema or SCHEMA

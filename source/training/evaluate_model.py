@@ -2,12 +2,12 @@
 
 import pandas as pd
 from sklearn.metrics import (
-    roc_auc_score,
     average_precision_score,
+    confusion_matrix,
+    f1_score,
     precision_score,
     recall_score,
-    f1_score,
-    confusion_matrix,
+    roc_auc_score,
 )
 
 

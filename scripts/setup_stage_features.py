@@ -9,10 +9,9 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "source"))
-from snowpark_session import create_snowpark_session
-
-from snowflake.ml.feature_store import FeatureStore, FeatureView, Entity, CreationMode
 import snowflake.snowpark.functions as F
+from snowflake.ml.feature_store import CreationMode, Entity, FeatureStore, FeatureView
+from snowpark_session import create_snowpark_session
 
 STAGE_DATABASE = "SNOW_MLOPS_STAGE"
 STAGE_SCHEMA = "ML"

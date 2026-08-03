@@ -4,10 +4,9 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from config import DATABASE, SCHEMA, WAREHOUSE, MODEL_NAME
-from snowpark_session import create_snowpark_session
-
 import pandas as pd
+from config import DATABASE, MODEL_NAME, SCHEMA, WAREHOUSE
+from snowpark_session import create_snowpark_session
 
 
 def register_model(

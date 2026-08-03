@@ -5,9 +5,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from config import DATABASE, SCHEMA, WAREHOUSE
+from snowflake.ml.feature_store import CreationMode, Entity, FeatureStore
 from snowpark_session import create_snowpark_session
-
-from snowflake.ml.feature_store import FeatureStore, Entity, CreationMode
 
 
 def setup_entities(session=None) -> tuple:

@@ -96,8 +96,8 @@ def wait_for_service_ready(session, service_name, timeout=READY_TIMEOUT_SECONDS)
 
 def health_check(session, service_name, model_version_name):
     """Run a test prediction against the new service to validate it works."""
-    import pandas as pd
     import numpy as np
+    import pandas as pd
     from snowflake.ml.registry import Registry
 
     reg = Registry(session=session, database_name=PROD_DATABASE, schema_name=PROD_SCHEMA)

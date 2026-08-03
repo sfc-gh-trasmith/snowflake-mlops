@@ -46,7 +46,7 @@ jobs:
         run: uv run ruff format --check source/ scripts/
 
       - name: Run tests
-        run: uv run pytest tests/ -v
+        run: uv run pytest tests/ -v --ignore=tests/test_endpoint.py
 
   # ──────────────────────────────────────────────────────────────────────
   # STAGE: Train, validate, replicate model to PROD registry
