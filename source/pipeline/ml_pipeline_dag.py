@@ -31,6 +31,7 @@ from config import (
     MIN_AUC_ROC,
     MIN_PRECISION,
     MIN_RECALL,
+    PIPELINE_CONFIG,
 )
 from snowpark_session import create_snowpark_session
 
@@ -121,9 +122,11 @@ END;
 """
 
     # Root task: orchestrates the pipeline
+    task_timeout = PIPELINE_CONFIG.get("task_timeout_ms", "7200000")
     session.sql(f"""
         CREATE OR REPLACE TASK {db}.{schema}.{DAG_NAME}
             WAREHOUSE = {wh}
+            USER_TASK_TIMEOUT_MS = {task_timeout}
         AS
         {train_sql}
     """).collect()

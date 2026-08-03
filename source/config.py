@@ -57,4 +57,6 @@ PIPELINE_CONFIG = {
     "model_name": MODEL_NAME,
     "service_name": SERVICE_NAME,
     "max_instances": "2",
+    # Task configuration
+    "task_timeout_ms": "7200000",  # 2 hours (max: 86400000 = 24h)
 }
