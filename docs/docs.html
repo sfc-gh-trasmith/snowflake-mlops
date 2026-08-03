@@ -193,7 +193,7 @@ flowchart LR
 │       ├── multi_account.py          # Cross-account (future)
 │       └── cross_region.py           # Cross-region (future)
 ├── .github/workflows/
-│   └── deploy.yml                    # STAGE + PROD (single workflow, approval gate)
+│   └── deploy.yml                    # STAGE + PROD (single workflow, approval gate)\n│       rollback.yml                  # PROD rollback (manual dispatch)
 ├── tests/
 ├── pyproject.toml
 └── docs/</code></pre>
@@ -769,31 +769,44 @@ flowchart TD
 <!-- ================================================================ -->
 <h2 id="cicd"><span class="section-icon">&#x2699;</span>CI/CD Infrastructure</h2>
 
-<p>Two GitHub Actions workflows orchestrate the pipeline. Authentication uses OIDC — no secrets are stored in GitHub.</p>
+<p>A single GitHub Actions workflow (<code>deploy.yml</code>) orchestrates the full pipeline as a 4-job graph. Authentication uses OIDC — no secrets are stored in GitHub. A separate <code>rollback.yml</code> workflow provides emergency reversion to a previous model version.</p>
 
 <h3>Workflow overview</h3>
 
 <table>
   <thead><tr><th>File</th><th>Trigger</th><th>Environment</th><th>Actions</th></tr></thead>
   <tbody>
-    <tr><td><code>deploy.yml</code> → <code>deploy-stage</code> job</td><td>Push to <code>main</code> OR manual dispatch</td><td>STAGE</td><td>Register features, train, quality gate, replicate, batch inference</td></tr>
-    <tr><td><code>deploy.yml</code> → <code>deploy-prod</code> job</td><td>After STAGE passes + reviewer approval</td><td>PROD</td><td>Blue/green SPCS deploy, batch inference, verify gateway</td></tr>
+    <tr><td><code>deploy.yml</code> → <code>lint</code> job</td><td>Push to <code>main</code> OR manual dispatch</td><td>—</td><td>Ruff lint + format check</td></tr>
+    <tr><td><code>deploy.yml</code> → <code>test</code> job</td><td>Push to <code>main</code> OR manual dispatch</td><td>—</td><td>Unit tests (pytest)</td></tr>
+    <tr><td><code>deploy.yml</code> → <code>deploy-stage</code> job</td><td>After lint + test pass</td><td>STAGE</td><td>Register features, train, quality gate, replicate, batch inference</td></tr>
+    <tr><td><code>deploy.yml</code> → <code>deploy-prod</code> job</td><td>After STAGE passes + reviewer approval</td><td>PROD</td><td>Blue/green SPCS deploy, batch inference, verify gateway, tag release</td></tr>
+    <tr><td><code>rollback.yml</code></td><td>Manual dispatch (model version + reason)</td><td>PROD</td><td>Set model version, redeploy SPCS service, validate, tag rollback</td></tr>
+    <tr><td><code>pr-checks.yml</code></td><td>PR opened/updated against <code>main</code></td><td>—</td><td>Lint + test (gates merge)</td></tr>
   </tbody>
 </table>
 
 <h3>Unified workflow (deploy.yml) — step by step</h3>
 
-<p>A single workflow file contains two jobs. The <code>deploy-prod</code> job has <code>needs: deploy-stage</code> and references the <code>PROD</code> environment. GitHub pauses and shows an "Approve and deploy" button when the STAGE job passes. Configure required reviewers in <strong>Settings → Environments → PROD</strong>.</p>
+<p>A single workflow file contains four jobs arranged as a dependency graph:</p>
 
-<h4>STAGE job</h4>
+<pre class="mermaid">
+flowchart LR
+    LINT[lint] --> STAGE[deploy-stage]
+    TEST[test] --> STAGE
+    STAGE --> PROD[deploy-prod]
+</pre>
+
+<p><code>lint</code> and <code>test</code> run in parallel for fast feedback. <code>deploy-stage</code> requires both to pass. <code>deploy-prod</code> requires <code>deploy-stage</code> to pass AND reviewer approval via the <code>PROD</code> environment protection rule.</p>
+
+<h4>STAGE job steps</h4>
 
 <pre><code class="language-yaml">name: Deploy
 
 on:
   push:
     branches: [main]
-    paths-ignore: ['*.md', 'docs/**', 'LICENSE']   # Skip doc-only changes
-  workflow_dispatch:                                 # Allow manual retrain
+    paths-ignore: ['*.md', 'docs/**', 'LICENSE']
+  workflow_dispatch:
     inputs:
       reason:
         description: 'Reason for manual retrain'
@@ -801,20 +814,74 @@ on:
 
 permissions:
   id-token: write        # Required for OIDC token
-  contents: write        # Required for commit comments
-  pull-requests: write   # Required for PR comments</code></pre>
+  contents: write        # Required for git tags on PROD deploy</code></pre>
 
 <h4>Steps explained</h4>
 
 <ol>
-  <li><strong>Checkout</strong> — Clone the repo with <code>fetch-depth: 2</code> (needed for commit comparison)</li>
-  <li><strong>Snowflake CLI setup</strong> — <code>snowflakedb/snowflake-actions@v3</code> with <code>use-oidc: true</code> authenticates and sets env vars</li>
+  <li><strong>Checkout</strong> — Clone the repo with <code>fetch-depth: 2</code></li>
+  <li><strong>Snowflake CLI setup</strong> — <code>snowflakedb/snowflake-actions@v3</code> with <code>use-oidc: true</code></li>
   <li><strong>Connection test</strong> — <code>snow connection test -x</code> validates auth before expensive steps</li>
   <li><strong>Install uv + Python</strong> — Fast package manager, deterministic installs</li>
-  <li><strong>Install deps</strong> — <code>uv sync --group snow --no-default-groups</code> (lean: only orchestration packages, no dev tools)</li>
-  <li><strong>Run STAGE pipeline</strong> — <code>scripts/run_stage_pipeline.py</code> (the full train → gate → replicate flow)</li>
+  <li><strong>Install deps</strong> — <code>uv sync --group snow --no-default-groups</code> (lean: only orchestration packages)</li>
+  <li><strong>Run STAGE pipeline</strong> — <code>scripts/run_stage_pipeline.py</code> (train → gate → replicate)</li>
   <li><strong>Run batch inference</strong> — <code>scripts/run_batch_inference.py</code> (score + validate)</li>
-  <li><strong>Post metrics</strong> — Finds the merged PR and posts model metrics as a comment</li>
+</ol>
+
+<h4>PROD job steps</h4>
+
+<ol>
+  <li><strong>Verify model exists</strong> — Confirm the replicated model is in PROD registry</li>
+  <li><strong>Deploy SPCS service</strong> — Blue/green deployment with health check</li>
+  <li><strong>Register Feature Views</strong> — Ensure Dynamic Tables exist in PROD</li>
+  <li><strong>Run batch inference</strong> — Score and validate predictions</li>
+  <li><strong>Verify gateway</strong> — Confirm traffic routes to new service</li>
+  <li><strong>Tag release</strong> — Create git tag <code>prod/&lt;VERSION&gt;-&lt;TIMESTAMP&gt;</code> marking what's deployed</li>
+</ol>
+
+<h3>Git branching and release tagging</h3>
+
+<p>The project uses a trunk-based development model with feature branches:</p>
+
+<pre class="mermaid">
+flowchart LR
+    FB["feature/* branch"] -->|PR| MAIN[main]
+    MAIN -->|push triggers| DEPLOY[deploy.yml]
+    DEPLOY -->|success| TAG["prod/V11-20260803"]
+</pre>
+
+<ul>
+  <li><strong>Feature branches</strong> — all development happens on <code>feature/*</code> or <code>fix/*</code> branches</li>
+  <li><strong>PRs required</strong> — <code>main</code> is protected; merges require passing <code>lint</code> and <code>test</code> checks + 1 reviewer approval</li>
+  <li><strong>Enforce admins</strong> — even repository admins must go through PRs (no direct pushes)</li>
+  <li><strong>Release tags</strong> — after successful PROD deploy, a lightweight tag is created: <code>prod/V11-20260803-151530</code></li>
+  <li><strong>Rollback tags</strong> — if a rollback is performed: <code>prod/V10-rollback-20260803-160000</code></li>
+</ul>
+
+<p>To see what's currently deployed in PROD:</p>
+
+<pre><code class="language-bash"># From git
+git tag -l "prod/*" --sort=-creatordate | head -1
+
+# From Snowflake
+SHOW MODELS LIKE 'MLOPS_FRAUD_DETECTOR' IN SNOW_MLOPS_PROD.ML;
+-- Check "default_version_name" column</code></pre>
+
+<h3>Rollback workflow (rollback.yml)</h3>
+
+<p>Emergency reversion to a previous model version. Triggered via manual dispatch with two required inputs:</p>
+
+<ul>
+  <li><strong>model_version</strong> — The version to roll back to (e.g., <code>V10</code>)</li>
+  <li><strong>reason</strong> — Audit trail for why the rollback was performed</li>
+</ul>
+
+<p>The rollback workflow:</p>
+<ol>
+  <li>Sets <code>DEFAULT_VERSION</code> on the model (batch inference uses old model immediately)</li>
+  <li>Deploys the SPCS service for the rolled-back version (blue/green)</li>
+  <li>Validates batch inference still works</li>
+  <li>Creates a rollback tag: <code>prod/V10-rollback-20260803-160000</code></li>
 </ol>
 
 <h3>OIDC authentication</h3>
@@ -904,6 +971,7 @@ dev = ["ruff", "pytest"]</code></pre>
     <tr><td><code>TOPOLOGY</code></td><td>Repository variable</td><td><code>single-account</code></td></tr>
     <tr><td>STAGE environment</td><td>Settings → Environments</td><td>No protection rules</td></tr>
     <tr><td>PROD environment</td><td>Settings → Environments</td><td>Required reviewers (approval gate)</td></tr>
+    <tr><td>Branch protection</td><td>Settings → Branches → main</td><td>Require PR, require <code>lint</code> + <code>test</code> checks, enforce for admins</td></tr>
   </tbody>
 </table>
 
