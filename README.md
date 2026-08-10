@@ -7,20 +7,46 @@ The included demo uses a fraud detection classifier (XGBoost), but the pattern a
 ## Architecture
 
 ```
-DEV (experiment) → STAGE (automated CI) → PROD (serving via Gateway)
+feature branch → PR (lint + test) → merge to main → deploy-stage → approve → deploy-prod → tag release
 ```
 
-**Environment separation is at the database level within a single Snowflake account.** Each environment (DEV, STAGE, PROD) is its own database with isolated resources (warehouses, compute pools, models, services). This keeps things simple while providing clear RBAC boundaries.
+**Environment separation is at the database level within a single Snowflake account.** Each environment (DEV, STAGE, PROD) is its own database with isolated resources (warehouses, compute pools, models, services).
 
 | Component | Snowflake Service |
 |-----------|------------------|
-| Feature Engineering | Dynamic Tables (Feature Store) |
+| Pipeline Orchestration | Snowflake Tasks (Python SDK DAG) |
+| Feature Engineering | Feature Store (Dynamic Tables) |
 | Model Training | ML Jobs (`@remote` on Compute Pools) |
 | Model Versioning | Model Registry (auto-increment) |
 | Model Promotion | Cross-database replication |
 | Real-Time Serving | SPCS containers + Snowflake Gateway |
 | Zero-Downtime Deploy | Blue/green with Gateway traffic shift |
+| Batch Inference | Model Registry `run()` on warehouse |
 | CI/CD | GitHub Actions with OIDC (zero secrets) |
+| Rollback | Manual dispatch workflow |
+
+## Pipeline: Snowflake Task DAG
+
+The pipeline is orchestrated as a **Snowflake Task DAG** using the Python SDK (`snowflake.core.task.dagv1`). Each step runs as an **ML Job** on a compute pool (SPCS) or as a stored procedure on a warehouse -- configurable per step via `source/config.py`.
+
+```
+ML_TRAINING_PIPELINE (root)
+  └── FEATURE_ENG (@remote → compute pool)
+        └── TRAIN_MODEL (@remote → compute pool)
+              └── EVALUATE (@remote → compute pool)
+```
+
+Configure compute mode per step in `source/config.py`:
+
+```python
+PIPELINE_CONFIG = {
+    "feature_engineering_compute": "spcs",   # "warehouse" or "spcs"
+    "training_compute": "spcs",
+    "evaluation_compute": "spcs",
+    "task_timeout_ms": "7200000",            # 2 hours max
+    ...
+}
+```
 
 ## Quickstart
 
@@ -42,49 +68,39 @@ uv sync
 ### 2. Create Snowflake Infrastructure
 
 ```bash
-# Creates databases, schemas, warehouses, compute pools, and stages
-# for DEV, STAGE, and PROD environments
 bash scripts/setup.sh
 ```
 
 This creates:
 - `SNOW_MLOPS_DEV`, `SNOW_MLOPS_STAGE`, `SNOW_MLOPS_PROD` databases
 - Warehouses and compute pools per environment
-- Internal stages for job artifacts
+- Internal stages for pipeline artifacts
+- `MLOPS_DEPLOY_ROLE` with appropriate grants
 
 ### 3. Generate Synthetic Data
 
 ```bash
-SNOWFLAKE_CONNECTION_NAME=$YOUR_CONNECTION uv run python scripts/generate_dataset.py
+uv run python scripts/generate_dataset.py
 ```
 
 Creates 100K synthetic transactions with ~3% fraud rate in `SNOW_MLOPS_PROD.ML`.
 
-### 4. Set Up Feature Store
+### 4. Deploy and Run the Pipeline (DEV)
 
 ```bash
-SNOWFLAKE_CONNECTION_NAME=$YOUR_CONNECTION uv run python -c "
-import sys; sys.path.insert(0, 'source')
-from snowpark_session import create_snowpark_session
-from features.feature_views import create_feature_views
-session = create_snowpark_session()
-create_feature_views(session)
-session.close()
-"
+# Deploy the Task DAG to DEV
+uv run python source/pipeline/ml_pipeline_dag.py --deploy --env dev
+
+# Execute the pipeline (triggers Feature Eng → Training → Evaluation)
+uv run python source/pipeline/ml_pipeline_dag.py --execute --env dev
+
+# Check status
+uv run python source/pipeline/ml_pipeline_dag.py --status --env dev
 ```
 
-### 5. Train a Model (DEV)
+### 5. Set Up CI/CD
 
 ```bash
-SNOWFLAKE_CONNECTION_NAME=$YOUR_CONNECTION uv run python scripts/run_training_job.py
-```
-
-Submits training to `SNOW_MLOPS_DEV_POOL`. Takes ~5 minutes (compute pool cold-start + training). Registers model to `SNOW_MLOPS_DEV.ML.MLOPS_FRAUD_DETECTOR`.
-
-### 6. Set Up CI/CD (Optional)
-
-```bash
-# Creates OIDC service users, network policy, and branch protection
 bash scripts/setup_cicd.sh
 ```
 
@@ -94,10 +110,12 @@ Configure GitHub repo variables:
 - `SNOWFLAKE_DATABASE_PROD` - `SNOW_MLOPS_PROD`
 - `SNOWFLAKE_SCHEMA` - `ML`
 - `SNOWFLAKE_USER_STAGE` - `SVC_GITHUB_ACTIONS_STAGE`
-- `TOPOLOGY` - `single-account` (default; also supports `multi-account`, `cross-region`)
+- `SNOWFLAKE_USER_PROD` - `SVC_GITHUB_ACTIONS`
+- `TOPOLOGY` - `single-account` (default)
 
-Configure GitHub repo settings:
-- Settings > Actions > General > Workflow permissions: **"Read and write permissions"** (required for posting commit comments with model metrics)
+Configure GitHub environments:
+- **STAGE** - no protection rules (auto-deploys on merge)
+- **PROD** - requires reviewer approval before deploy
 
 ## Project Structure
 
@@ -105,7 +123,8 @@ Configure GitHub repo settings:
 snowflake-mlops/
 ├── .github/workflows/
 │   ├── pr-checks.yml              # PR: lint + format + tests
-│   ├── deploy.yml                 # STAGE + PROD: unified workflow with approval gate
+│   ├── deploy.yml                 # Main → lint → test → deploy-stage → deploy-prod
+│   └── rollback.yml               # Manual: rollback to previous model version
 ├── deploy/                        # Promotion strategies (topology-aware)
 │   ├── promote.py                 # CLI dispatcher (reads TOPOLOGY env var)
 │   └── strategies/
@@ -116,77 +135,114 @@ snowflake-mlops/
 │   ├── setup.sh                   # Create Snowflake infrastructure
 │   ├── setup_cicd.sh              # OIDC users + network policy
 │   ├── generate_dataset.py        # Synthetic fraud data
-│   ├── run_training_job.py        # DEV: train on compute pool
-│   ├── run_stage_pipeline.py      # STAGE: train + promote (uses TOPOLOGY)
+│   ├── wait_for_task.py           # Poll task DAG until completion
+│   ├── quality_gate_and_register.py  # Validate metrics + register model
+│   ├── run_batch_inference.py     # Batch inference validation
 │   └── deploy_prod_service.py     # PROD: blue/green gateway deploy
 ├── source/
 │   ├── config.py                  # Centralized configuration
-│   ├── snowpark_session.py        # Session helper (local + OIDC)
+│   ├── snowpark_session.py        # Session helper (local SSO + CI OIDC)
 │   ├── features/                  # Feature Store definitions
-│   ├── training/                  # Training utilities
-│   └── pipeline/                  # Snowflake Task DAG (deployed by CI)
+│   │   ├── entities.py            # Entity definitions
+│   │   ├── feature_views.py       # Feature View SQL + registration
+│   │   └── training_data.py       # Training dataset builder
+│   ├── pipeline/
+│   │   └── ml_pipeline_dag.py     # Task DAG definition + ML Job functions
+│   └── serving/
+│       └── batch_inference.py     # Batch inference utilities
 ├── tests/
-│   ├── test_config.py             # Unit tests
+│   ├── test_config.py             # Unit tests (config validation)
 │   └── test_endpoint.py           # Integration tests (gateway + predictions)
+├── notebooks/                     # Educational Jupyter notebooks (01-05)
 └── docs/
-    └── docs.html    # Detailed architecture documentation
+    └── docs.html                  # Detailed architecture documentation
 ```
 
 ## CI/CD Workflows
 
 | Workflow | Trigger | What It Does |
 |----------|---------|--------------|
-| `pr-checks.yml` | PR to `main` | Lint, format check, unit tests |
-| `deploy.yml` | Push to `main` OR manual dispatch | Train on STAGE pool, register model, replicate to PROD, batch inference |
-| `deploy.yml` (deploy-prod job) | After STAGE passes + reviewer approval | Blue/green: create service, health check, shift gateway, batch inference |
+| `pr-checks.yml` | PR to `main` | Lint (ruff), format check, unit tests |
+| `deploy.yml` | Push to `main` or manual dispatch | Full pipeline: lint → test → deploy-stage → deploy-prod |
+| `rollback.yml` | Manual dispatch | Rollback to a previous model version |
 
-### Two promotion paths
+### deploy.yml Pipeline
 
-- **Code Promotion** — change features, hyperparameters, or pipeline code → push to `main` → pipeline runs automatically
-- **Model Promotion** — retrain on fresh data with no code changes → click "Run workflow" on `deploy.yml` in GitHub Actions
+```
+lint → test → deploy-stage → [approval] → deploy-prod
+                  │
+                  ├── Deploy Task DAG (Python SDK)
+                  ├── Execute pipeline (FEATURE_ENG → TRAIN → EVALUATE)
+                  ├── Wait for completion (poll TASK_HISTORY)
+                  ├── Quality gate (AUC-ROC, precision, recall thresholds)
+                  ├── Register model (auto-increment version)
+                  └── Batch inference validation
+                                          │
+                                          ├── Register Feature Views in PROD
+                                          ├── Batch inference (validate model.run())
+                                          ├── Blue/green SPCS deploy
+                                          ├── Verify gateway endpoint
+                                          └── Tag release (prod/V12-20260810-201724)
+```
 
-Both paths produce a new auto-incremented model version (V1 → V2 → V3). Versions are computed at runtime from the Model Registry, not stored in config.
+### Release Tags
+
+Every successful PROD deployment creates a git tag: `prod/{VERSION}-{TIMESTAMP}` (e.g., `prod/V12-20260810-201724`). This tag corresponds to the model version set as DEFAULT in `SNOW_MLOPS_PROD.ML.MLOPS_FRAUD_DETECTOR`.
+
+### Rollback
+
+```bash
+# Via GitHub Actions UI: Actions → Rollback → Run workflow
+# Inputs: model_version (e.g., V11), reason (e.g., "regression in precision")
+```
+
+The rollback workflow sets the DEFAULT version, redeploys the SPCS service, and validates the endpoint.
 
 ## Key Commands
 
 ```bash
-# Run linting
+# Lint and format
 uv run ruff check source/ scripts/
+uv run ruff format source/ scripts/
 
-# Run tests
-uv run pytest tests/ -v
+# Run unit tests
+uv run pytest tests/ -v --ignore=tests/test_endpoint.py
 
-# Run DEV training pipeline
-SNOWFLAKE_CONNECTION_NAME=$YOUR_CONNECTION uv run python scripts/run_training_job.py
+# Deploy Task DAG (local, DEV environment)
+uv run python source/pipeline/ml_pipeline_dag.py --deploy --env dev
 
-# Run STAGE pipeline (normally done by CI)
-SNOWFLAKE_CONNECTION_NAME=$YOUR_CONNECTION uv run python scripts/run_stage_pipeline.py
+# Execute pipeline (local, DEV environment)
+uv run python source/pipeline/ml_pipeline_dag.py --execute --env dev
 
-# Deploy to PROD (normally done by CI)
-SNOWFLAKE_CONNECTION_NAME=$YOUR_CONNECTION uv run python scripts/deploy_prod_service.py
+# Check task history
+uv run python source/pipeline/ml_pipeline_dag.py --status --env dev
 
-# Run endpoint integration tests
-SNOWFLAKE_CONNECTION_NAME=$YOUR_CONNECTION uv run pytest tests/test_endpoint.py -v
+# Run endpoint integration tests (requires active PROD service)
+uv run pytest tests/test_endpoint.py -v
 ```
 
 ## Environment Strategy
 
 | Environment | Database | Purpose | Training | Serving |
-|-------------|----------|---------|----------|--------|
-| DEV | `SNOW_MLOPS_DEV` | Developer experimentation | Yes | Optional |
-| STAGE | `SNOW_MLOPS_STAGE` | Automated CI validation | Yes | Never |
+|-------------|----------|---------|----------|---------|
+| DEV | `SNOW_MLOPS_DEV` | Developer experimentation | Yes (local trigger) | Optional |
+| STAGE | `SNOW_MLOPS_STAGE` | Automated CI validation | Yes (CI trigger) | Never |
 | PROD | `SNOW_MLOPS_PROD` | Production serving | Never | Always (Gateway) |
 
 All environments live in a **single Snowflake account** with database-level isolation. Source data always resides in PROD; DEV and STAGE read from it for training but write artifacts to their own databases.
 
-## Future Work
+## Quality Gate
 
-- Multi-account MLOps (separate accounts per environment)
-- Cross-region model replication
-- A/B testing via Gateway traffic splitting (canary deployments)
-- Online Feature Store with Snowflake Postgres
-- Model monitoring and drift detection
+Models must pass all thresholds to be promoted (configured in `source/config.py`):
+
+| Metric | Threshold |
+|--------|-----------|
+| AUC-ROC | >= 0.60 |
+| Precision | >= 0.03 |
+| Recall | >= 0.30 |
+
+If the quality gate fails, the workflow exits and the model is not registered.
 
 ## Documentation
 
-Open `docs/docs.html` in a browser for a detailed Level 300 walkthrough of the entire MLOps workflow, including Feature Store, ML Jobs, Model Registry, Gateway deployment, and CI/CD orchestration.
+Open `docs/docs.html` in a browser for a detailed architecture walkthrough covering the Task DAG, ML Jobs, Feature Store, Model Registry, Gateway deployment, CI/CD, and RBAC.
