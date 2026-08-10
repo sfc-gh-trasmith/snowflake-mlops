@@ -104,7 +104,10 @@ jobs:
 
       - name: Upload pipeline source to stage
         run: |
-          snow stage copy source/ @${{ vars.SNOWFLAKE_DATABASE_STAGE }}.${{ vars.SNOWFLAKE_SCHEMA }}.PIPELINE_STAGE/source/ --overwrite -x
+          snow sql -q "PUT file://source/pipeline/tasks/*.py @${{ vars.SNOWFLAKE_DATABASE_STAGE }}.${{ vars.SNOWFLAKE_SCHEMA }}.PIPELINE_STAGE/source/pipeline/tasks/ OVERWRITE=TRUE AUTO_COMPRESS=FALSE" -x
+          snow sql -q "PUT file://source/features/*.py @${{ vars.SNOWFLAKE_DATABASE_STAGE }}.${{ vars.SNOWFLAKE_SCHEMA }}.PIPELINE_STAGE/source/features/ OVERWRITE=TRUE AUTO_COMPRESS=FALSE" -x
+          snow sql -q "PUT file://source/config.py @${{ vars.SNOWFLAKE_DATABASE_STAGE }}.${{ vars.SNOWFLAKE_SCHEMA }}.PIPELINE_STAGE/source/ OVERWRITE=TRUE AUTO_COMPRESS=FALSE" -x
+          snow sql -q "PUT file://source/snowpark_session.py @${{ vars.SNOWFLAKE_DATABASE_STAGE }}.${{ vars.SNOWFLAKE_SCHEMA }}.PIPELINE_STAGE/source/ OVERWRITE=TRUE AUTO_COMPRESS=FALSE" -x
 
       - name: Trigger ML training pipeline
         run: uv run python source/pipeline/ml_pipeline_dag.py --run --env stage
