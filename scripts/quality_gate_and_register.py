@@ -69,7 +69,7 @@ def register_model(session, metrics: dict):
         model=model,
         model_name=MODEL_NAME,
         version_name=version_name,
-        conda_dependencies=["xgboost", "scikit-learn"],
+        conda_dependencies=["xgboost==3.3.0", "scikit-learn"],
         sample_input_data=sample_input,
         target_platforms=["WAREHOUSE", "SNOWPARK_CONTAINER_SERVICES"],
         comment=f"features:{fv} | AUC={metrics.get('auc_roc', 0):.4f} | git:{git_sha}",
