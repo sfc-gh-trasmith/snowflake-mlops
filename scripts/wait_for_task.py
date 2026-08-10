@@ -31,7 +31,11 @@ def main():
     session = create_snowpark_session()
     session.sql(f"USE WAREHOUSE {WAREHOUSE}").collect()
 
-    expected_tasks = {"ML_TRAINING_PIPELINE$FEATURE_ENG", "ML_TRAINING_PIPELINE$TRAIN_MODEL", "ML_TRAINING_PIPELINE$EVALUATE"}
+    expected_tasks = {
+        "ML_TRAINING_PIPELINE$FEATURE_ENG",
+        "ML_TRAINING_PIPELINE$TRAIN_MODEL",
+        "ML_TRAINING_PIPELINE$EVALUATE",
+    }
     start = time.time()
 
     while time.time() - start < MAX_WAIT:
