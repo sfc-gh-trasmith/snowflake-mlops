@@ -17,6 +17,7 @@ dev = [
 snow = [
     "snowflake-snowpark-python>=1.53.1",
     "snowflake-ml-python>=1.47.0",
+    "snowflake>=1.0.0",
 ]
 
 [tool.ruff]
