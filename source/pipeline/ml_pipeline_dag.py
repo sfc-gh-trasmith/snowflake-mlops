@@ -19,7 +19,6 @@ Usage:
 """
 
 import argparse
-import json
 import os
 import sys
 from pathlib import Path
@@ -85,6 +84,8 @@ def build_feature_eng_remote(cfg: dict):
         pip_requirements=["snowflake-ml-python"],
     )
     def feature_engineering() -> str:
+        import json
+
         from snowflake.ml.feature_store import CreationMode, Entity, FeatureStore
         from snowflake.snowpark import Session as _Session
 
@@ -123,6 +124,8 @@ def build_train_model_remote(cfg: dict):
         pip_requirements=["xgboost", "scikit-learn", "snowflake-ml-python"],
     )
     def train_model() -> str:
+        import json
+
         import numpy as np
         import xgboost as xgb
         from sklearn.metrics import average_precision_score, f1_score, precision_score, recall_score, roc_auc_score
@@ -234,6 +237,8 @@ def build_evaluate_remote(cfg: dict):
         pip_requirements=["snowflake-ml-python"],
     )
     def evaluate_model() -> str:
+        import json
+
         from snowflake.snowpark import Session as _Session
 
         session = _Session.builder.getOrCreate()

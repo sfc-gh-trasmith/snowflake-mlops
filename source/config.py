@@ -45,7 +45,7 @@ PIPELINE_CONFIG = {
     "warehouse": WAREHOUSE,
     "compute_pool": COMPUTE_POOL,
     # Compute mode for each pipeline step: "warehouse" or "spcs"
-    "feature_engineering_compute": "warehouse",
+    "feature_engineering_compute": "spcs",
     "training_compute": "spcs",
     "evaluation_compute": "spcs",
     # Training hyperparameters
