@@ -1,14 +1,20 @@
-"""ML Pipeline Task DAG — Deploy and manage the Snowflake Task graph.
+"""ML Pipeline Task DAG — Python SDK with configurable compute per step.
 
-Creates a 3-task dependency chain:
-  ML_PIPELINE_FEATURE_ENG → ML_PIPELINE_TRAIN → ML_PIPELINE_EVALUATE
+Uses snowflake.core.task.dagv1 (DAG, DAGTask, DAGOperation) for task management
+and snowflake.ml.jobs.remote for ML Job definitions on compute pools.
 
-Each task runs as an ML Job. Compute mode (warehouse or SPCS) is configurable
-per step via PIPELINE_CONFIG in source/config.py.
+Each step can run on either:
+  - Warehouse: StoredProcedureCall (for SQL-heavy / lightweight Python)
+  - SPCS Compute Pool: @remote ML Job (for training, GPU, custom packages)
+
+Configured via PIPELINE_CONFIG in source/config.py:
+  "feature_engineering_compute": "warehouse" | "spcs"
+  "training_compute": "warehouse" | "spcs"
+  "evaluation_compute": "warehouse" | "spcs"
 
 Usage:
     python source/pipeline/ml_pipeline_dag.py --deploy --env stage
-    python source/pipeline/ml_pipeline_dag.py --run --env stage
+    python source/pipeline/ml_pipeline_dag.py --execute --env stage
     python source/pipeline/ml_pipeline_dag.py --status --env stage
 """
 
@@ -24,6 +30,12 @@ from config import (
     FEATURE_VIEW_VERSION,
     PIPELINE_CONFIG,
 )
+from snowflake.core import Root
+from snowflake.core._common import CreateMode
+from snowflake.core.task import StoredProcedureCall
+from snowflake.core.task.dagv1 import DAG, DAGOperation, DAGTask
+from snowflake.ml.jobs import remote
+from snowflake.snowpark import Session
 from snowpark_session import create_snowpark_session
 
 # Environment configurations
@@ -46,10 +58,7 @@ ENV_CONFIG = {
     },
 }
 
-DAG_ROOT = "ML_TRAINING_PIPELINE"
-TASK_FEATURE_ENG = "ML_PIPELINE_FEATURE_ENG"
-TASK_TRAIN = "ML_PIPELINE_TRAIN"
-TASK_EVALUATE = "ML_PIPELINE_EVALUATE"
+DAG_NAME = "ML_TRAINING_PIPELINE"
 
 
 def get_env_config(env: str) -> dict:
@@ -58,151 +67,320 @@ def get_env_config(env: str) -> dict:
     return ENV_CONFIG[env]
 
 
+# ─── ML Job Definitions (@remote) ────────────────────────────────────────────
+# These run on compute pools when the corresponding config is set to "spcs"
+
+
+def build_feature_eng_remote(cfg: dict):
+    """Build the @remote-decorated feature engineering function."""
+    pool = cfg["compute_pool"]
+    db = cfg["database"]
+    schema = cfg["schema"]
+    wh = cfg["warehouse"]
+    stage = f"@{db}.{schema}.PIPELINE_STAGE"
+
+    @remote(
+        pool,
+        stage_name=stage,
+        pip_requirements=["snowflake-ml-python"],
+    )
+    def feature_engineering() -> str:
+        from snowflake.ml.feature_store import CreationMode, Entity, FeatureStore
+        from snowflake.snowpark import Session as _Session
+
+        session = _Session.builder.getOrCreate()
+        session.sql(f"USE WAREHOUSE {wh}").collect()
+
+        fs = FeatureStore(
+            session=session,
+            database=db,
+            name=schema,
+            default_warehouse=wh,
+            creation_mode=CreationMode.CREATE_IF_NOT_EXIST,
+        )
+        customer_entity = Entity(name="CUSTOMER", join_keys=["CUSTOMER_ID"])
+        fs.register_entity(customer_entity)
+
+        return json.dumps({"status": "success", "step": "feature_engineering"})
+
+    return feature_engineering
+
+
+def build_train_model_remote(cfg: dict):
+    """Build the @remote-decorated training function."""
+    pool = cfg["compute_pool"]
+    db = cfg["database"]
+    schema = cfg["schema"]
+    wh = cfg["warehouse"]
+    src_db = cfg["source_database"]
+    src_schema = cfg["source_schema"]
+    fv = f"{FEATURE_VIEW_NAME}${FEATURE_VIEW_VERSION}"
+    stage = f"@{db}.{schema}.PIPELINE_STAGE"
+
+    @remote(
+        pool,
+        stage_name=stage,
+        pip_requirements=["xgboost", "scikit-learn", "snowflake-ml-python"],
+    )
+    def train_model() -> str:
+        import numpy as np
+        import xgboost as xgb
+        from sklearn.metrics import average_precision_score, f1_score, precision_score, recall_score, roc_auc_score
+        from sklearn.model_selection import StratifiedKFold, train_test_split
+        from snowflake.snowpark import Session as _Session
+
+        session = _Session.builder.getOrCreate()
+        session.sql(f"USE WAREHOUSE {wh}").collect()
+
+        fv_table = f'"{fv}"'
+        df = session.sql(f"""
+            SELECT c.CUSTOMER_ID, c.TOTAL_TXN_COUNT, c.AVG_TXN_AMOUNT, c.MAX_TXN_AMOUNT,
+                c.STDDEV_TXN_AMOUNT, c.UNIQUE_MERCHANTS, c.HISTORICAL_FRAUD_COUNT,
+                c.HISTORICAL_FRAUD_RATE, c.ACTIVE_DAYS, c.LATE_NIGHT_TXN_RATIO,
+                c.CREDIT_SCORE, c.ACCOUNT_AGE_DAYS, c.ANNUAL_INCOME, t.IS_FRAUD
+            FROM {db}.{schema}.{fv_table} c
+            JOIN {src_db}.{src_schema}.RAW_TRANSACTIONS t ON c.CUSTOMER_ID = t.CUSTOMER_ID
+        """).to_pandas()
+
+        feature_cols = [
+            "TOTAL_TXN_COUNT",
+            "AVG_TXN_AMOUNT",
+            "MAX_TXN_AMOUNT",
+            "STDDEV_TXN_AMOUNT",
+            "UNIQUE_MERCHANTS",
+            "HISTORICAL_FRAUD_COUNT",
+            "HISTORICAL_FRAUD_RATE",
+            "ACTIVE_DAYS",
+            "LATE_NIGHT_TXN_RATIO",
+            "CREDIT_SCORE",
+            "ACCOUNT_AGE_DAYS",
+            "ANNUAL_INCOME",
+        ]
+        X = df[feature_cols].fillna(0)
+        y = df["IS_FRAUD"].astype(int)
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, stratify=y, random_state=42)
+
+        params = {
+            "n_estimators": 200,
+            "learning_rate": 0.1,
+            "max_depth": 6,
+            "scale_pos_weight": 33,
+            "objective": "binary:logistic",
+            "eval_metric": "aucpr",
+            "random_state": 42,
+        }
+
+        # Cross-validation
+        cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+        cv_scores = []
+        for _, (train_idx, val_idx) in enumerate(cv.split(X_train, y_train)):
+            fold_model = xgb.XGBClassifier(**params)
+            fold_model.fit(X_train.iloc[train_idx], y_train.iloc[train_idx], verbose=False)
+            fold_proba = fold_model.predict_proba(X_train.iloc[val_idx])[:, 1]
+            cv_scores.append(roc_auc_score(y_train.iloc[val_idx], fold_proba))
+
+        # Final model
+        model = xgb.XGBClassifier(**params)
+        model.fit(X_train, y_train, eval_set=[(X_test, y_test)], verbose=False)
+
+        y_proba = model.predict_proba(X_test)[:, 1]
+        y_pred = (y_proba >= 0.5).astype(int)
+        metrics = {
+            "auc_roc": float(roc_auc_score(y_test, y_proba)),
+            "pr_auc": float(average_precision_score(y_test, y_proba)),
+            "precision": float(precision_score(y_test, y_pred, zero_division=0)),
+            "recall": float(recall_score(y_test, y_pred, zero_division=0)),
+            "f1": float(f1_score(y_test, y_pred, zero_division=0)),
+            "cv_auc_mean": float(np.mean(cv_scores)),
+            "feature_view": fv,
+        }
+
+        # Save model artifact to stage
+        model.save_model("/tmp/model.ubj")
+        session.file.put(
+            "/tmp/model.ubj", f"@{db}.{schema}.PIPELINE_STAGE/artifacts/", auto_compress=False, overwrite=True
+        )
+
+        # Save sample input
+        X_test.head(10).to_json("/tmp/sample_input.json", orient="records")
+        session.file.put(
+            "/tmp/sample_input.json", f"@{db}.{schema}.PIPELINE_STAGE/artifacts/", auto_compress=False, overwrite=True
+        )
+
+        # Write metrics to results table
+        result = {"status": "success", "step": "training", "metrics": metrics}
+        result_json = json.dumps(result).replace("'", "''")
+        session.sql(f"""
+            INSERT INTO {db}.{schema}.PIPELINE_RESULTS (STEP, STATUS, RESULT, CREATED_AT)
+            VALUES ('training', 'SUCCESS', PARSE_JSON('{result_json}'), CURRENT_TIMESTAMP())
+        """).collect()
+
+        return json.dumps(result)
+
+    return train_model
+
+
+def build_evaluate_remote(cfg: dict):
+    """Build the @remote-decorated evaluation function."""
+    pool = cfg["compute_pool"]
+    db = cfg["database"]
+    schema = cfg["schema"]
+    wh = cfg["warehouse"]
+    stage = f"@{db}.{schema}.PIPELINE_STAGE"
+
+    @remote(
+        pool,
+        stage_name=stage,
+        pip_requirements=["snowflake-ml-python"],
+    )
+    def evaluate_model() -> str:
+        from snowflake.snowpark import Session as _Session
+
+        session = _Session.builder.getOrCreate()
+        session.sql(f"USE WAREHOUSE {wh}").collect()
+
+        rows = session.sql(f"""
+            SELECT RESULT FROM {db}.{schema}.PIPELINE_RESULTS
+            WHERE STEP = 'training' AND STATUS = 'SUCCESS'
+            ORDER BY CREATED_AT DESC LIMIT 1
+        """).collect()
+
+        if not rows:
+            return json.dumps({"status": "error", "message": "No training results found"})
+
+        training_result = json.loads(rows[0]["RESULT"])
+        metrics = training_result.get("metrics", {})
+
+        result = {"status": "success", "step": "evaluation", "metrics": metrics, "pipeline_status": "READY_FOR_REVIEW"}
+        result_json = json.dumps(result).replace("'", "''")
+        session.sql(f"""
+            INSERT INTO {db}.{schema}.PIPELINE_RESULTS (STEP, STATUS, RESULT, CREATED_AT)
+            VALUES ('evaluation', 'SUCCESS', PARSE_JSON('{result_json}'), CURRENT_TIMESTAMP())
+        """).collect()
+
+        return json.dumps(result)
+
+    return evaluate_model
+
+
+# ─── Warehouse-based alternatives (StoredProcedureCall) ──────────────────────
+
+
+def feature_eng_warehouse(session: Session) -> str:
+    """Feature engineering on warehouse — registers Feature Views."""
+    from features.feature_views import register_feature_views
+
+    register_feature_views(session=session)
+    return "feature_engineering_complete"
+
+
+def train_model_warehouse(session: Session) -> str:
+    """Placeholder — training on warehouse (limited, no custom packages)."""
+    raise NotImplementedError("Training requires SPCS compute pool for custom packages (xgboost, sklearn)")
+
+
+def evaluate_warehouse(session: Session) -> str:
+    """Evaluation on warehouse — reads metrics from results table."""
+    rows = session.sql("""
+        SELECT RESULT FROM PIPELINE_RESULTS
+        WHERE STEP = 'training' AND STATUS = 'SUCCESS'
+        ORDER BY CREATED_AT DESC LIMIT 1
+    """).collect()
+    if rows:
+        return "evaluation_complete"
+    return "evaluation_error_no_training_results"
+
+
+# ─── DAG Deployment ──────────────────────────────────────────────────────────
+
+
 def deploy_dag(env: str):
-    """Deploy the 3-task ML pipeline DAG."""
+    """Deploy the ML Training Pipeline DAG using Python SDK."""
     cfg = get_env_config(env)
     db = cfg["database"]
     schema = cfg["schema"]
     wh = cfg["warehouse"]
-    pool = cfg["compute_pool"]
-    src_db = cfg["source_database"]
-    src_schema = cfg["source_schema"]
-    fv = f"{FEATURE_VIEW_NAME}${FEATURE_VIEW_VERSION}"
-    timeout = PIPELINE_CONFIG.get("task_timeout_ms", "7200000")
+    cfg["compute_pool"]
 
     fe_compute = PIPELINE_CONFIG.get("feature_engineering_compute", "warehouse")
     train_compute = PIPELINE_CONFIG.get("training_compute", "spcs")
+    eval_compute = PIPELINE_CONFIG.get("evaluation_compute", "spcs")
 
     session = create_snowpark_session()
     session.sql(f"USE WAREHOUSE {wh}").collect()
 
-    print(f"Deploying Task DAG: {db}.{schema}.{DAG_ROOT}")
-    print(f"  Environment: {env.upper()}")
-    print(f"  Feature eng compute: {fe_compute}")
-    print(f"  Training compute: {train_compute}")
-    print(f"  Compute Pool: {pool}")
+    print(f"Deploying DAG: {db}.{schema}.{DAG_NAME}")
+    print(f"  Feature eng: {fe_compute} | Training: {train_compute} | Evaluation: {eval_compute}")
 
-    # Create results table
+    # Create infrastructure
+    session.sql(f"CREATE STAGE IF NOT EXISTS {db}.{schema}.PIPELINE_STAGE").collect()
     session.sql(f"""
         CREATE TABLE IF NOT EXISTS {db}.{schema}.PIPELINE_RESULTS (
-            STEP VARCHAR,
-            STATUS VARCHAR,
-            RESULT VARIANT,
-            CREATED_AT TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
+            STEP VARCHAR, STATUS VARCHAR, RESULT VARIANT, CREATED_AT TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
         )
     """).collect()
 
-    # Create pipeline stage for code + artifacts
-    session.sql(f"CREATE STAGE IF NOT EXISTS {db}.{schema}.PIPELINE_STAGE").collect()
+    # Build the DAG
+    root = Root(session)
+    stage_location = f"@{db}.{schema}.PIPELINE_STAGE"
 
-    # --- Task 1: Feature Engineering (root task) ---
-    if fe_compute == "warehouse":
-        # For warehouse mode, feature engineering is handled by the GH Actions upload step
-        # or inline SQL. The task just marks completion.
-        session.sql(f"""
-            CREATE OR REPLACE TASK {db}.{schema}.{TASK_FEATURE_ENG}
-                WAREHOUSE = {wh}
-                USER_TASK_TIMEOUT_MS = {timeout}
-            AS
-            BEGIN
-                -- Feature Views are registered via the uploaded pipeline code
-                -- This task triggers the ML Job for feature engineering
-                LET job_id VARCHAR;
-                CALL SYSTEM$ML_JOB_SUBMIT(
-                    '{pool}',
-                    '@{db}.{schema}.PIPELINE_STAGE/source/pipeline/tasks/feature_engineering.py',
-                    '{{"pip_requirements": ["snowflake-ml-python"], "env_vars": {{"PIPELINE_DATABASE": "{db}", "PIPELINE_SCHEMA": "{schema}", "PIPELINE_WAREHOUSE": "{wh}"}}}}'
-                );
-                CALL SYSTEM$SET_RETURN_VALUE('feature_engineering_submitted');
-            END;
-        """).collect()
-    else:
-        session.sql(f"""
-            CREATE OR REPLACE TASK {db}.{schema}.{TASK_FEATURE_ENG}
-                WAREHOUSE = {wh}
-                USER_TASK_TIMEOUT_MS = {timeout}
-            AS
-            BEGIN
-                CALL SYSTEM$ML_JOB_SUBMIT(
-                    '{pool}',
-                    '@{db}.{schema}.PIPELINE_STAGE/source/pipeline/tasks/feature_engineering.py',
-                    '{{"pip_requirements": ["snowflake-ml-python"], "env_vars": {{"PIPELINE_DATABASE": "{db}", "PIPELINE_SCHEMA": "{schema}", "PIPELINE_WAREHOUSE": "{wh}"}}}}'
-                );
-                CALL SYSTEM$SET_RETURN_VALUE('feature_engineering_submitted');
-            END;
-        """).collect()
-    print(f"  Created: {TASK_FEATURE_ENG} (compute: {fe_compute})")
+    with DAG(DAG_NAME, warehouse=wh) as dag:
+        # Feature Engineering task
+        if fe_compute == "spcs":
+            fe_func = build_feature_eng_remote(cfg)
+            fe_task = DAGTask("FEATURE_ENG", definition=fe_func)
+        else:
+            fe_task = DAGTask(
+                "FEATURE_ENG",
+                StoredProcedureCall(
+                    feature_eng_warehouse,
+                    stage_location=stage_location,
+                    packages=["snowflake-ml-python", "snowflake-snowpark-python"],
+                ),
+                warehouse=wh,
+            )
 
-    # --- Task 2: Model Training ---
-    train_env_vars = json.dumps(
-        {
-            "PIPELINE_DATABASE": db,
-            "PIPELINE_SCHEMA": schema,
-            "PIPELINE_WAREHOUSE": wh,
-            "PIPELINE_SOURCE_DATABASE": src_db,
-            "PIPELINE_SOURCE_SCHEMA": src_schema,
-            "PIPELINE_FEATURE_VIEW": fv,
-            "PIPELINE_N_ESTIMATORS": PIPELINE_CONFIG.get("n_estimators", "200"),
-            "PIPELINE_LEARNING_RATE": PIPELINE_CONFIG.get("learning_rate", "0.1"),
-            "PIPELINE_MAX_DEPTH": PIPELINE_CONFIG.get("max_depth", "6"),
-            "PIPELINE_SCALE_POS_WEIGHT": PIPELINE_CONFIG.get("scale_pos_weight", "33"),
-        }
-    ).replace("'", "''")
+        # Training task
+        if train_compute == "spcs":
+            train_func = build_train_model_remote(cfg)
+            train_task = DAGTask("TRAIN_MODEL", definition=train_func)
+        else:
+            train_task = DAGTask(
+                "TRAIN_MODEL",
+                StoredProcedureCall(
+                    train_model_warehouse, stage_location=stage_location, packages=["snowflake-snowpark-python"]
+                ),
+                warehouse=wh,
+            )
 
-    session.sql(f"""
-        CREATE OR REPLACE TASK {db}.{schema}.{TASK_TRAIN}
-            WAREHOUSE = {wh}
-            USER_TASK_TIMEOUT_MS = {timeout}
-            AFTER {db}.{schema}.{TASK_FEATURE_ENG}
-        AS
-        BEGIN
-            CALL SYSTEM$ML_JOB_SUBMIT(
-                '{pool}',
-                '@{db}.{schema}.PIPELINE_STAGE/source/pipeline/tasks/train_model.py',
-                '{{"pip_requirements": ["xgboost", "scikit-learn", "snowflake-ml-python"], "env_vars": {train_env_vars}}}'
-            );
-            CALL SYSTEM$SET_RETURN_VALUE('training_submitted');
-        END;
-    """).collect()
-    print(f"  Created: {TASK_TRAIN} (compute: spcs/{pool})")
+        # Evaluation task
+        if eval_compute == "spcs":
+            eval_func = build_evaluate_remote(cfg)
+            eval_task = DAGTask("EVALUATE", definition=eval_func)
+        else:
+            eval_task = DAGTask(
+                "EVALUATE",
+                StoredProcedureCall(
+                    evaluate_warehouse, stage_location=stage_location, packages=["snowflake-snowpark-python"]
+                ),
+                warehouse=wh,
+            )
 
-    # --- Task 3: Evaluation ---
-    eval_env_vars = json.dumps(
-        {
-            "PIPELINE_DATABASE": db,
-            "PIPELINE_SCHEMA": schema,
-            "PIPELINE_WAREHOUSE": wh,
-        }
-    ).replace("'", "''")
+        # Define dependencies
+        fe_task >> train_task >> eval_task
 
-    session.sql(f"""
-        CREATE OR REPLACE TASK {db}.{schema}.{TASK_EVALUATE}
-            WAREHOUSE = {wh}
-            USER_TASK_TIMEOUT_MS = {timeout}
-            AFTER {db}.{schema}.{TASK_TRAIN}
-        AS
-        BEGIN
-            CALL SYSTEM$ML_JOB_SUBMIT(
-                '{pool}',
-                '@{db}.{schema}.PIPELINE_STAGE/source/pipeline/tasks/evaluate_model.py',
-                '{{"pip_requirements": ["snowflake-ml-python"], "env_vars": {eval_env_vars}}}'
-            );
-            CALL SYSTEM$SET_RETURN_VALUE('evaluation_submitted');
-        END;
-    """).collect()
-    print(f"  Created: {TASK_EVALUATE} (compute: spcs/{pool})")
-
-    # Resume child tasks only (root task is triggered via EXECUTE TASK, not scheduled)
-    for task in [TASK_TRAIN, TASK_EVALUATE]:
-        session.sql(f"ALTER TASK {db}.{schema}.{task} RESUME").collect()
-    print("  Child tasks resumed (root task triggered on-demand via EXECUTE TASK).")
+    # Deploy
+    schema_ref = root.databases[db].schemas[schema]
+    dag_op = DAGOperation(schema_ref)
+    dag_op.deploy(dag, mode=CreateMode.or_replace)
+    print(f"  DAG deployed: {DAG_NAME}")
 
     session.close()
-    print("\nDAG deployment complete.")
+    print("Deploy complete.")
 
 
-def run_dag(env: str):
-    """Trigger the Task DAG."""
+def execute_dag(env: str):
+    """Trigger the DAG execution."""
     cfg = get_env_config(env)
     db = cfg["database"]
     schema = cfg["schema"]
@@ -214,9 +392,12 @@ def run_dag(env: str):
     # Clear previous results
     session.sql(f"DELETE FROM {db}.{schema}.PIPELINE_RESULTS").collect()
 
-    print(f"Executing Task: {db}.{schema}.{TASK_FEATURE_ENG}")
-    session.sql(f"EXECUTE TASK {db}.{schema}.{TASK_FEATURE_ENG}").collect()
-    print("  Task triggered!")
+    # Execute the root task
+    root = Root(session)
+    task_res = root.databases[db].schemas[schema].tasks[DAG_NAME]
+    task_res.execute()
+    print(f"Executed: {db}.{schema}.{DAG_NAME}")
+
     session.close()
 
 
@@ -255,22 +436,17 @@ def show_status(env: str):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="ML Pipeline Task DAG")
+    parser = argparse.ArgumentParser(description="ML Pipeline Task DAG (Python SDK)")
     parser.add_argument("--deploy", action="store_true", help="Deploy the Task DAG")
-    parser.add_argument("--run", action="store_true", help="Trigger pipeline execution")
+    parser.add_argument("--execute", action="store_true", help="Execute the Task DAG")
     parser.add_argument("--status", action="store_true", help="Show recent task history")
-    parser.add_argument(
-        "--env",
-        default=os.getenv("ML_ENV", "dev"),
-        choices=["dev", "stage"],
-        help="Target environment (default: $ML_ENV or 'dev')",
-    )
+    parser.add_argument("--env", default=os.getenv("ML_ENV", "dev"), choices=["dev", "stage"])
     args = parser.parse_args()
 
     if args.deploy:
         deploy_dag(args.env)
-    elif args.run:
-        run_dag(args.env)
+    elif args.execute:
+        execute_dag(args.env)
     elif args.status:
         show_status(args.env)
     else:
