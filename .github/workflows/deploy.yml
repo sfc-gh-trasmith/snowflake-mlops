@@ -99,16 +99,34 @@ jobs:
       - name: Install dependencies
         run: uv sync --group snow --no-default-groups
 
-      - name: Run STAGE ML Pipeline (train + register + replicate)
-        run: uv run python scripts/run_stage_pipeline.py
-        timeout-minutes: 20
+      - name: Upload pipeline source to stage
+        run: |
+          snow stage copy source/ @${{ vars.SNOWFLAKE_DATABASE_STAGE }}.${{ vars.SNOWFLAKE_SCHEMA }}.PIPELINE_STAGE/source/ --overwrite -x
 
-      - name: Run batch inference
+      - name: Deploy Task DAG
+        run: uv run python source/pipeline/ml_pipeline_dag.py --deploy --env stage
+
+      - name: Trigger ML training pipeline
+        run: uv run python source/pipeline/ml_pipeline_dag.py --run --env stage
+
+      - name: Wait for training pipeline completion
+        run: uv run python scripts/wait_for_task.py
+        timeout-minutes: 30
+        env:
+          METRICS_FILE: ${{ runner.temp }}/pipeline_metrics.json
+
+      - name: "Quality gate: evaluate metrics"
+        run: uv run python scripts/quality_gate_and_register.py
+        timeout-minutes: 10
+        env:
+          METRICS_FILE: ${{ runner.temp }}/pipeline_metrics.json
+
+      - name: Run batch inference (validate)
         run: uv run python scripts/run_batch_inference.py
         timeout-minutes: 10
 
   # ──────────────────────────────────────────────────────────────────────
-  # PROD: Blue/green SPCS deploy + batch inference (requires approval)
+  # PROD: Model deployment (requires approval)
   # Gated by: (1) STAGE must pass, (2) PROD environment required reviewers
   # ──────────────────────────────────────────────────────────────────────
   deploy-prod:
@@ -145,23 +163,23 @@ jobs:
       - name: Install dependencies
         run: uv sync --group snow --no-default-groups
 
-      - name: Deploy with blue/green gateway swap
-        run: uv run python scripts/deploy_prod_service.py
-        timeout-minutes: 20
-
       - name: Register Feature Views in PROD
         run: uv run python -c "import sys; sys.path.insert(0, 'source'); from features.feature_views import register_feature_views; from snowpark_session import create_snowpark_session; session = create_snowpark_session(); register_feature_views(session=session, database='SNOW_MLOPS_PROD', schema='ML', warehouse='SNOW_MLOPS_PROD_WH'); session.close()"
         timeout-minutes: 5
 
-      - name: Run batch inference
+      - name: "Deploy batch inference (validate model.run())"
         run: uv run python scripts/run_batch_inference.py
         timeout-minutes: 10
+
+      - name: "Deploy real-time service (SPCS blue/green)"
+        run: uv run python scripts/deploy_prod_service.py
+        timeout-minutes: 20
 
       - name: Verify gateway endpoint
         run: |
           snow sql -q "DESC GATEWAY SNOW_MLOPS_PROD.ML.FRAUD_DETECTOR_GATEWAY" -x
 
-      - name: Tag release
+      - name: Tag production release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

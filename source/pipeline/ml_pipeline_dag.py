@@ -1,21 +1,15 @@
-"""ML Pipeline DAG - Snowflake Task Graph Orchestration.
+"""ML Pipeline Task DAG — Deploy and manage the Snowflake Task graph.
 
-Orchestrates the ML workflow as a Snowflake Task Graph:
-  REFRESH_FEATURES -> TRAIN_MODEL -> REPLICATE_MODEL (STAGE only)
+Creates a 3-task dependency chain:
+  ML_PIPELINE_FEATURE_ENG → ML_PIPELINE_TRAIN → ML_PIPELINE_EVALUATE
 
-The DAG is deployed from git (via CI/CD or manually) and executed via
-EXECUTE TASK. Config is passed at runtime via USING CONFIG.
-
-Environments:
-  - DEV: Deploy + run manually for experimentation
-  - STAGE: Deployed by CI (deploy.yml), executed on every merge
-  - PROD: No DAG (serving only, no training)
+Each task runs as an ML Job. Compute mode (warehouse or SPCS) is configurable
+per step via PIPELINE_CONFIG in source/config.py.
 
 Usage:
-    python source/pipeline/ml_pipeline_dag.py --deploy --env dev
     python source/pipeline/ml_pipeline_dag.py --deploy --env stage
     python source/pipeline/ml_pipeline_dag.py --run --env stage
-    python source/pipeline/ml_pipeline_dag.py --status --env dev
+    python source/pipeline/ml_pipeline_dag.py --status --env stage
 """
 
 import argparse
@@ -28,9 +22,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from config import (
     FEATURE_VIEW_NAME,
     FEATURE_VIEW_VERSION,
-    MIN_AUC_ROC,
-    MIN_PRECISION,
-    MIN_RECALL,
     PIPELINE_CONFIG,
 )
 from snowpark_session import create_snowpark_session
@@ -55,19 +46,20 @@ ENV_CONFIG = {
     },
 }
 
-DAG_NAME = "ML_TRAINING_PIPELINE"
-MODEL_NAME = "MLOPS_FRAUD_DETECTOR"
+DAG_ROOT = "ML_TRAINING_PIPELINE"
+TASK_FEATURE_ENG = "ML_PIPELINE_FEATURE_ENG"
+TASK_TRAIN = "ML_PIPELINE_TRAIN"
+TASK_EVALUATE = "ML_PIPELINE_EVALUATE"
 
 
 def get_env_config(env: str) -> dict:
-    """Get configuration for the specified environment."""
     if env not in ENV_CONFIG:
         raise ValueError(f"Unknown environment: {env}. Use 'dev' or 'stage'.")
     return ENV_CONFIG[env]
 
 
 def deploy_dag(env: str):
-    """Deploy (CREATE OR REPLACE) the Task DAG for the specified environment."""
+    """Deploy the 3-task ML pipeline DAG."""
     cfg = get_env_config(env)
     db = cfg["database"]
     schema = cfg["schema"]
@@ -75,106 +67,156 @@ def deploy_dag(env: str):
     pool = cfg["compute_pool"]
     src_db = cfg["source_database"]
     src_schema = cfg["source_schema"]
-    fv_table = f"{FEATURE_VIEW_NAME}${FEATURE_VIEW_VERSION}"
+    fv = f"{FEATURE_VIEW_NAME}${FEATURE_VIEW_VERSION}"
+    timeout = PIPELINE_CONFIG.get("task_timeout_ms", "7200000")
+
+    fe_compute = PIPELINE_CONFIG.get("feature_engineering_compute", "warehouse")
+    train_compute = PIPELINE_CONFIG.get("training_compute", "spcs")
 
     session = create_snowpark_session()
     session.sql(f"USE WAREHOUSE {wh}").collect()
 
-    print(f"Deploying Task DAG: {db}.{schema}.{DAG_NAME}")
+    print(f"Deploying Task DAG: {db}.{schema}.{DAG_ROOT}")
     print(f"  Environment: {env.upper()}")
+    print(f"  Feature eng compute: {fe_compute}")
+    print(f"  Training compute: {train_compute}")
     print(f"  Compute Pool: {pool}")
-    print(f"  Feature View: {fv_table}")
 
-    # Create alerts table
+    # Create results table
     session.sql(f"""
-        CREATE TABLE IF NOT EXISTS {db}.{schema}.PIPELINE_ALERTS (
-            ALERT_TIME TIMESTAMP_NTZ,
-            MESSAGE VARCHAR,
-            METRICS VARIANT
+        CREATE TABLE IF NOT EXISTS {db}.{schema}.PIPELINE_RESULTS (
+            STEP VARCHAR,
+            STATUS VARCHAR,
+            RESULT VARIANT,
+            CREATED_AT TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
         )
     """).collect()
 
-    # Create the root task: TRAIN_AND_REGISTER
-    # This task submits the @remote training job and waits for it
-    train_sql = f"""
-BEGIN
-    LET feature_table VARCHAR := '{fv_table}';
-    LET src_database VARCHAR := '{src_db}';
-    LET src_schema VARCHAR := '{src_schema}';
-    LET target_db VARCHAR := '{db}';
-    LET target_schema VARCHAR := '{schema}';
-    LET model_name VARCHAR := '{MODEL_NAME}';
+    # Create pipeline stage for code + artifacts
+    session.sql(f"CREATE STAGE IF NOT EXISTS {db}.{schema}.PIPELINE_STAGE").collect()
 
-    -- Auto-increment version
-    LET version_name VARCHAR := 'V1';
-    BEGIN
-        LET versions RESULTSET := (SHOW VERSIONS IN MODEL IDENTIFIER(:target_db || '.' || :target_schema || '.' || :model_name));
-        LET max_v NUMBER := (SELECT MAX(TRY_TO_NUMBER(REPLACE("name", 'V', ''))) FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())));
-        version_name := 'V' || (:max_v + 1)::VARCHAR;
-    EXCEPTION
-        WHEN OTHER THEN
-            version_name := 'V1';
-    END;
+    # --- Task 1: Feature Engineering (root task) ---
+    if fe_compute == "warehouse":
+        # For warehouse mode, feature engineering is handled by the GH Actions upload step
+        # or inline SQL. The task just marks completion.
+        session.sql(f"""
+            CREATE OR REPLACE TASK {db}.{schema}.{TASK_FEATURE_ENG}
+                WAREHOUSE = {wh}
+                USER_TASK_TIMEOUT_MS = {timeout}
+            AS
+            BEGIN
+                -- Feature Views are registered via the uploaded pipeline code
+                -- This task triggers the ML Job for feature engineering
+                LET job_id VARCHAR;
+                CALL SYSTEM$ML_JOB_SUBMIT(
+                    '{pool}',
+                    '@{db}.{schema}.PIPELINE_STAGE/source/pipeline/tasks/feature_engineering.py',
+                    '{{"pip_requirements": ["snowflake-ml-python"], "env_vars": {{"PIPELINE_DATABASE": "{db}", "PIPELINE_SCHEMA": "{schema}", "PIPELINE_WAREHOUSE": "{wh}"}}}}'
+                );
+                CALL SYSTEM$SET_RETURN_VALUE('feature_engineering_submitted');
+            END;
+        """).collect()
+    else:
+        session.sql(f"""
+            CREATE OR REPLACE TASK {db}.{schema}.{TASK_FEATURE_ENG}
+                WAREHOUSE = {wh}
+                USER_TASK_TIMEOUT_MS = {timeout}
+            AS
+            BEGIN
+                CALL SYSTEM$ML_JOB_SUBMIT(
+                    '{pool}',
+                    '@{db}.{schema}.PIPELINE_STAGE/source/pipeline/tasks/feature_engineering.py',
+                    '{{"pip_requirements": ["snowflake-ml-python"], "env_vars": {{"PIPELINE_DATABASE": "{db}", "PIPELINE_SCHEMA": "{schema}", "PIPELINE_WAREHOUSE": "{wh}"}}}}'
+                );
+                CALL SYSTEM$SET_RETURN_VALUE('feature_engineering_submitted');
+            END;
+        """).collect()
+    print(f"  Created: {TASK_FEATURE_ENG} (compute: {fe_compute})")
 
-    -- Store version for downstream tasks
-    CALL SYSTEM$SET_RETURN_VALUE(:version_name);
-END;
-"""
+    # --- Task 2: Model Training ---
+    train_env_vars = json.dumps(
+        {
+            "PIPELINE_DATABASE": db,
+            "PIPELINE_SCHEMA": schema,
+            "PIPELINE_WAREHOUSE": wh,
+            "PIPELINE_SOURCE_DATABASE": src_db,
+            "PIPELINE_SOURCE_SCHEMA": src_schema,
+            "PIPELINE_FEATURE_VIEW": fv,
+            "PIPELINE_N_ESTIMATORS": PIPELINE_CONFIG.get("n_estimators", "200"),
+            "PIPELINE_LEARNING_RATE": PIPELINE_CONFIG.get("learning_rate", "0.1"),
+            "PIPELINE_MAX_DEPTH": PIPELINE_CONFIG.get("max_depth", "6"),
+            "PIPELINE_SCALE_POS_WEIGHT": PIPELINE_CONFIG.get("scale_pos_weight", "33"),
+        }
+    ).replace("'", "''")
 
-    # Root task: orchestrates the pipeline
-    task_timeout = PIPELINE_CONFIG.get("task_timeout_ms", "7200000")
     session.sql(f"""
-        CREATE OR REPLACE TASK {db}.{schema}.{DAG_NAME}
+        CREATE OR REPLACE TASK {db}.{schema}.{TASK_TRAIN}
             WAREHOUSE = {wh}
-            USER_TASK_TIMEOUT_MS = {task_timeout}
+            USER_TASK_TIMEOUT_MS = {timeout}
+            AFTER {db}.{schema}.{TASK_FEATURE_ENG}
         AS
-        {train_sql}
+        BEGIN
+            CALL SYSTEM$ML_JOB_SUBMIT(
+                '{pool}',
+                '@{db}.{schema}.PIPELINE_STAGE/source/pipeline/tasks/train_model.py',
+                '{{"pip_requirements": ["xgboost", "scikit-learn", "snowflake-ml-python"], "env_vars": {train_env_vars}}}'
+            );
+            CALL SYSTEM$SET_RETURN_VALUE('training_submitted');
+        END;
     """).collect()
+    print(f"  Created: {TASK_TRAIN} (compute: spcs/{pool})")
 
-    # Child task: Execute the actual training via stored procedure
-    # The training itself is done by run_stage_pipeline.py / run_training_job.py
-    # which the CI workflow calls after deploying the DAG
-    # For now, the DAG is a placeholder for future scheduled runs
+    # --- Task 3: Evaluation ---
+    eval_env_vars = json.dumps(
+        {
+            "PIPELINE_DATABASE": db,
+            "PIPELINE_SCHEMA": schema,
+            "PIPELINE_WAREHOUSE": wh,
+        }
+    ).replace("'", "''")
 
-    print(f"  Task created: {db}.{schema}.{DAG_NAME}")
+    session.sql(f"""
+        CREATE OR REPLACE TASK {db}.{schema}.{TASK_EVALUATE}
+            WAREHOUSE = {wh}
+            USER_TASK_TIMEOUT_MS = {timeout}
+            AFTER {db}.{schema}.{TASK_TRAIN}
+        AS
+        BEGIN
+            CALL SYSTEM$ML_JOB_SUBMIT(
+                '{pool}',
+                '@{db}.{schema}.PIPELINE_STAGE/source/pipeline/tasks/evaluate_model.py',
+                '{{"pip_requirements": ["snowflake-ml-python"], "env_vars": {eval_env_vars}}}'
+            );
+            CALL SYSTEM$SET_RETURN_VALUE('evaluation_submitted');
+        END;
+    """).collect()
+    print(f"  Created: {TASK_EVALUATE} (compute: spcs/{pool})")
 
-    # Resume the task (needed for EXECUTE TASK to work)
-    session.sql(f"ALTER TASK {db}.{schema}.{DAG_NAME} RESUME").collect()
-    print("  Task resumed (ready for EXECUTE TASK)")
+    # Resume all tasks
+    for task in [TASK_FEATURE_ENG, TASK_TRAIN, TASK_EVALUATE]:
+        session.sql(f"ALTER TASK {db}.{schema}.{task} RESUME").collect()
+    print("  All tasks resumed.")
 
     session.close()
-    print("\nDeploy complete.")
+    print("\nDAG deployment complete.")
 
 
-def run_dag(env: str, config_override: dict | None = None):
-    """Trigger the Task DAG with runtime config."""
+def run_dag(env: str):
+    """Trigger the Task DAG."""
     cfg = get_env_config(env)
     db = cfg["database"]
     schema = cfg["schema"]
     wh = cfg["warehouse"]
 
-    runtime_config = {
-        "environment": env,
-        "feature_view": f"{FEATURE_VIEW_NAME}${FEATURE_VIEW_VERSION}",
-        "min_auc_roc": str(MIN_AUC_ROC),
-        "min_precision": str(MIN_PRECISION),
-        "min_recall": str(MIN_RECALL),
-        **(config_override or {}),
-    }
-
     session = create_snowpark_session()
     session.sql(f"USE WAREHOUSE {wh}").collect()
 
-    config_json = json.dumps(runtime_config)
-    print(f"Executing Task: {db}.{schema}.{DAG_NAME}")
-    print(f"  Config: {config_json}")
+    # Clear previous results
+    session.sql(f"DELETE FROM {db}.{schema}.PIPELINE_RESULTS").collect()
 
-    session.sql(f"""
-        EXECUTE TASK {db}.{schema}.{DAG_NAME}
-        USING CONFIG = $${config_json}$$
-    """).collect()
-
-    print("  Task triggered! Monitor with --status")
+    print(f"Executing Task: {db}.{schema}.{TASK_FEATURE_ENG}")
+    session.sql(f"EXECUTE TASK {db}.{schema}.{TASK_FEATURE_ENG}").collect()
+    print("  Task triggered!")
     session.close()
 
 
@@ -214,8 +256,8 @@ def show_status(env: str):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="ML Pipeline Task DAG")
-    parser.add_argument("--deploy", action="store_true", help="Deploy (create/replace) the Task DAG")
-    parser.add_argument("--run", action="store_true", help="Trigger a pipeline execution")
+    parser.add_argument("--deploy", action="store_true", help="Deploy the Task DAG")
+    parser.add_argument("--run", action="store_true", help="Trigger pipeline execution")
     parser.add_argument("--status", action="store_true", help="Show recent task history")
     parser.add_argument(
         "--env",

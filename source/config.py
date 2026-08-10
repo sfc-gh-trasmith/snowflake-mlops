@@ -44,6 +44,10 @@ PIPELINE_CONFIG = {
     "source_schema": SOURCE_SCHEMA,
     "warehouse": WAREHOUSE,
     "compute_pool": COMPUTE_POOL,
+    # Compute mode for each pipeline step: "warehouse" or "spcs"
+    "feature_engineering_compute": "warehouse",
+    "training_compute": "spcs",
+    "evaluation_compute": "spcs",
     # Training hyperparameters
     "n_estimators": "200",
     "learning_rate": "0.1",
@@ -57,6 +61,12 @@ PIPELINE_CONFIG = {
     "model_name": MODEL_NAME,
     "service_name": SERVICE_NAME,
     "max_instances": "2",
+    # Deployment toggles
+    "deploy_batch_inference": "true",
+    "deploy_realtime_service": "true",
+    "enable_model_monitor": "false",
     # Task configuration
     "task_timeout_ms": "7200000",  # 2 hours (max: 86400000 = 24h)
+    # Internal stage for pipeline code
+    "pipeline_stage": f"@{DATABASE}.{SCHEMA}.PIPELINE_STAGE",
 }
