@@ -62,9 +62,9 @@ PIPELINE_CONFIG = {
     "service_name": SERVICE_NAME,
     "max_instances": "2",
     # Deployment toggles
-    "deploy_batch_inference": True,
-    "deploy_realtime_service": True,
-    "enable_model_monitor": False,
+    "deploy_batch_inference": "true",
+    "deploy_realtime_service": "true",
+    "enable_model_monitor": "false",
     # Task configuration
     "task_timeout_ms": "7200000",  # 2 hours (max: 86400000 = 24h)
     # Internal stage for pipeline code
