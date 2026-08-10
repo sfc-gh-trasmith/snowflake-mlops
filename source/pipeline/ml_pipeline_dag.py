@@ -215,7 +215,7 @@ def build_train_model_remote(cfg: dict):
         result_json = json.dumps(result).replace("'", "''")
         session.sql(f"""
             INSERT INTO {db}.{schema}.PIPELINE_RESULTS (STEP, STATUS, RESULT, CREATED_AT)
-            VALUES ('training', 'SUCCESS', PARSE_JSON('{result_json}'), CURRENT_TIMESTAMP())
+            SELECT 'training', 'SUCCESS', PARSE_JSON('{result_json}'), CURRENT_TIMESTAMP()
         """).collect()
 
         return json.dumps(result)
@@ -260,7 +260,7 @@ def build_evaluate_remote(cfg: dict):
         result_json = json.dumps(result).replace("'", "''")
         session.sql(f"""
             INSERT INTO {db}.{schema}.PIPELINE_RESULTS (STEP, STATUS, RESULT, CREATED_AT)
-            VALUES ('evaluation', 'SUCCESS', PARSE_JSON('{result_json}'), CURRENT_TIMESTAMP())
+            SELECT 'evaluation', 'SUCCESS', PARSE_JSON('{result_json}'), CURRENT_TIMESTAMP()
         """).collect()
 
         return json.dumps(result)
