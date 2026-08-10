@@ -99,12 +99,12 @@ jobs:
       - name: Install dependencies
         run: uv sync --group snow --no-default-groups
 
+      - name: Deploy Task DAG (creates stage + results table)
+        run: uv run python source/pipeline/ml_pipeline_dag.py --deploy --env stage
+
       - name: Upload pipeline source to stage
         run: |
           snow stage copy source/ @${{ vars.SNOWFLAKE_DATABASE_STAGE }}.${{ vars.SNOWFLAKE_SCHEMA }}.PIPELINE_STAGE/source/ --overwrite -x
-
-      - name: Deploy Task DAG
-        run: uv run python source/pipeline/ml_pipeline_dag.py --deploy --env stage
 
       - name: Trigger ML training pipeline
         run: uv run python source/pipeline/ml_pipeline_dag.py --run --env stage
