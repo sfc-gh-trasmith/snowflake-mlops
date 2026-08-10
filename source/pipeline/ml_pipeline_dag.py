@@ -192,10 +192,10 @@ def deploy_dag(env: str):
     """).collect()
     print(f"  Created: {TASK_EVALUATE} (compute: spcs/{pool})")
 
-    # Resume all tasks
-    for task in [TASK_FEATURE_ENG, TASK_TRAIN, TASK_EVALUATE]:
+    # Resume child tasks only (root task is triggered via EXECUTE TASK, not scheduled)
+    for task in [TASK_TRAIN, TASK_EVALUATE]:
         session.sql(f"ALTER TASK {db}.{schema}.{task} RESUME").collect()
-    print("  All tasks resumed.")
+    print("  Child tasks resumed (root task triggered on-demand via EXECUTE TASK).")
 
     session.close()
     print("\nDAG deployment complete.")
