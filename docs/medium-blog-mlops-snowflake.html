@@ -1,0 +1,593 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Production-Grade MLOps on Snowflake | Blog Post</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      max-width: 880px;
+      margin: 0 auto;
+      padding: 48px 24px;
+      color: light-dark(#222, #e0e0e0);
+      background: light-dark(#fff, #1a1a2e);
+      line-height: 1.75;
+      font-size: 16px;
+    }
+    h1 {
+      font-size: 2rem;
+      font-weight: 700;
+      margin: 48px 0 16px;
+      color: light-dark(#111, #f0f0f0);
+    }
+    h1:first-child {
+      margin-top: 0;
+    }
+    h2 {
+      font-size: 1.5rem;
+      font-weight: 700;
+      margin: 56px 0 18px;
+      color: light-dark(#111, #f0f0f0);
+      padding-bottom: 8px;
+      border-bottom: 1px solid light-dark(#e0e0e0, #333);
+    }
+    h3 {
+      font-size: 1.15rem;
+      font-weight: 600;
+      margin: 36px 0 12px;
+      color: light-dark(#111, #e0e0e0);
+    }
+    h4 {
+      font-size: 1rem;
+      font-weight: 600;
+      margin: 24px 0 8px;
+      color: light-dark(#333, #ccc);
+    }
+    p {
+      margin: 14px 0;
+    }
+    a {
+      color: light-dark(#0066cc, #6cb4ee);
+      text-decoration: none;
+    }
+    a:hover {
+      text-decoration: underline;
+    }
+    code {
+      font-family: 'SF Mono', SFMono-Regular, Consolas, 'Liberation Mono', Menlo, monospace;
+      background: light-dark(#f0f0f0, #2a2a3e);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 0.87em;
+    }
+    pre {
+      background: light-dark(#f5f5f5, #1e1e30);
+      border: 1px solid light-dark(#e0e0e0, #333);
+      padding: 16px 18px;
+      overflow-x: auto;
+      font-size: 0.85em;
+      line-height: 1.55;
+      border-radius: 8px;
+      margin: 20px 0;
+    }
+    pre code {
+      background: none;
+      padding: 0;
+      font-size: 1em;
+    }
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 16px 0;
+      font-size: 0.92em;
+    }
+    th, td {
+      border: 1px solid light-dark(#e0e0e0, #444);
+      padding: 10px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: light-dark(#f5f5f5, #252540);
+      font-weight: 600;
+    }
+    ul, ol {
+      padding-left: 24px;
+      margin: 14px 0;
+    }
+    li {
+      margin: 5px 0;
+    }
+    hr {
+      border: none;
+      border-top: 1px solid light-dark(#e5e5e5, #333);
+      margin: 48px 0;
+    }
+    blockquote {
+      border-left: 4px solid light-dark(#e0e0e0, #444);
+      margin: 20px 0;
+      padding: 12px 20px;
+      background: light-dark(#f8f8f8, #1a1a2e);
+      font-style: italic;
+    }
+    strong {
+      font-weight: 600;
+    }
+    em {
+      font-style: italic;
+    }
+  </style>
+</head>
+<body>
+<h1>Production MLOps on Snowflake: A Git-Native Framework</h1>
+<p>Machine learning teams face a persistent challenge: how do you safely promote models from experimentation to production? How do you prevent regressions? How do you roll back when predictions fail? This article presents a production-ready MLOps framework built on Snowflake that treats models as first-class infrastructure—versioned, tested, and deployed through automated CI/CD pipelines.</p>
+<p>This is <strong>not</strong> a tutorial on training models. This is about the infrastructure and deployment patterns that let you ship ML changes safely and frequently. The framework targets <strong>single-account deployments</strong> with three environments (DEV, STAGE, PROD as separate databases), though the patterns extend naturally to multi-account topologies for enterprises requiring stricter isolation.</p>
+<hr />
+<h2>The Architecture: Git-Driven Model Promotion</h2>
+<p>The framework implements a <strong>three-stage promotion pipeline</strong> where every environment maps to a git branch:</p>
+<pre><code class="language-">main branch    → PROD database   (production traffic)
+stage branch   → STAGE database  (pre-production validation)  
+feature/* branches → DEV database   (rapid iteration)
+</code></pre>
+<p><strong>Core principle</strong>: The state of your production models always matches the state of your <code>main</code> branch. Want to know what's deployed? Check git tags. Want to roll back? Revert a commit.</p>
+<h3>Deployment Flow</h3>
+<pre><code class="language-">┌─────────────────────────────────────────────────────┐
+│          Feature Branch → DEV                        │
+│  • Push triggers CI                                  │
+│  • Basic linting only                                │
+│  • Deploy for manual testing                         │
+└─────────────────────────────────────────────────────┘
+                        ↓
+                   PR to stage
+                        ↓
+┌─────────────────────────────────────────────────────┐
+│          Stage Branch → STAGE                        │
+│  • Full test suite runs                              │
+│  • Train model on STAGE compute pool                 │
+│  • Quality gate checks metrics                       │
+│  • Batch inference validates predictions             │
+│  • Model replicates to PROD registry (if passing)    │
+└─────────────────────────────────────────────────────┘
+                        ↓
+                PR to main + approval
+                        ↓
+┌─────────────────────────────────────────────────────┐
+│          Main Branch → PROD                          │
+│  • Requires manual approval                          │
+│  • Blue/green SPCS deployment                        │
+│  • Batch inference validation                        │
+│  • Gateway cutover                                   │
+│  • Git release tag                                   │
+└─────────────────────────────────────────────────────┘
+</code></pre>
+<hr />
+<h2>The Three Environments</h2>
+<h3>DEV: Fast Feedback Loop</h3>
+<p><strong>Trigger</strong>: Push to any <code>feature/*</code> branch <strong>Purpose</strong>: Rapid iteration and manual testing <strong>Quality bar</strong>: Lint only (no tests)</p>
+<pre><code class="language-bash"># Developer workflow
+git checkout -b feature/fraud-v2
+# Edit training code
+git push origin feature/fraud-v2
+# CI deploys to SNOW_MLOPS_DEV.ML automatically
+</code></pre>
+<p>DEV exists for speed. Break things, experiment, test manually. The only gate is basic code formatting.</p>
+<h3>STAGE: Pre-Production Validation</h3>
+<p><strong>Trigger</strong>: PR merge to <code>stage</code> branch <strong>Purpose</strong>: Validate models before production <strong>Quality bar</strong>: Full test suite + quality gate</p>
+<p>STAGE is where models prove they work. The pipeline:</p>
+<ol>
+<li><strong>Registers features</strong>: Creates Dynamic Tables in Feature Store</li>
+<li><strong>Trains model</strong>: Runs <code>@remote</code> training job on dedicated compute pool</li>
+<li><strong>Quality gate</strong>: Compares metrics (AUC-ROC, F1, precision) against thresholds</li>
+<li><strong>Replicates model</strong>: If passing, copies model to PROD registry using <code>ALTER MODEL ... ADD VERSION FROM MODEL</code></li>
+<li><strong>Batch inference</strong>: Scores test dataset and validates prediction schema</li>
+</ol>
+<p><strong>Key insight</strong>: The model is replicated to PROD registry but not yet serving traffic. PROD still uses the old version until you explicitly deploy.</p>
+<h3>PROD: Production Deployment</h3>
+<p><strong>Trigger</strong>: PR merge to <code>main</code> (with approval) <strong>Purpose</strong>: Serve production traffic <strong>Quality bar</strong>: STAGE passed + human approval</p>
+<p>PROD deployment is a <strong>two-step process</strong>:</p>
+<ol>
+<li><strong>Approval gate</strong>: GitHub environment protection requires at least one team member to approve</li>
+<li><strong>Blue/green deployment</strong>: New SPCS service version spins up, health checks pass, Gateway switches traffic</li>
+</ol>
+<p>If anything fails, the old service continues serving. No downtime, no partial rollout.</p>
+<hr />
+<h2>Model Registry: The Source of Truth</h2>
+<p>Models in Snowflake Model Registry are versioned objects with full metadata:</p>
+<pre><code class="language-sql">-- Each version has:
+-- • Feature Store snapshot (which features were used)
+-- • Training metrics (AUC-ROC, F1, precision)
+-- • Git commit SHA (exact code that produced this model)
+-- • Target platforms (warehouse, SPCS, or both)
+</code></pre>
+<h3>Cross-Database Replication</h3>
+<p>Models are promoted from STAGE to PROD using atomic SQL:</p>
+<pre><code class="language-sql">-- Copy version V3 from STAGE to PROD
+ALTER MODEL SNOW_MLOPS_PROD.ML.MLOPS_FRAUD_DETECTOR
+  ADD VERSION V3
+  FROM MODEL SNOW_MLOPS_STAGE.ML.MLOPS_FRAUD_DETECTOR VERSION V3;
+
+-- Make it the active version for batch inference
+ALTER MODEL SNOW_MLOPS_PROD.ML.MLOPS_FRAUD_DETECTOR
+  SET DEFAULT_VERSION = V3;
+</code></pre>
+<p>This preserves all metadata, signatures, and configuration. The PROD model is immediately usable for both batch and real-time inference.</p>
+<h3>Model Versioning Strategy</h3>
+<p><strong>Version naming</strong>: <code>V{counter}</code> (V1, V2, V3...) tracked in the model object <strong>Git tagging</strong>: After successful PROD deploy → <code>prod/V11-20260803-151530</code> <strong>Rollback tagging</strong>: After emergency rollback → <code>prod/V10-rollback-20260803-160000</code></p>
+<p>To see what's deployed in PROD:</p>
+<pre><code class="language-bash"># From git
+git tag -l "prod/*" --sort=-creatordate | head -1
+
+# From Snowflake
+SHOW MODELS LIKE 'MLOPS_FRAUD_DETECTOR' IN SNOW_MLOPS_PROD.ML;
+-- Check "default_version_name" column
+</code></pre>
+<hr />
+<h2>The Quality Gate: Preventing Bad Models from Reaching Production</h2>
+<p>The quality gate is a Python function that compares training metrics against thresholds:</p>
+<pre><code class="language-python">def check_quality_gate(metrics: dict) -&gt; bool:
+    """
+    Returns True if metrics pass, False if blocked.
+    Thresholds are configurable per model.
+    """
+    thresholds = {
+        "auc_roc": 0.85,
+        "f1_score": 0.75,
+        "precision": 0.80
+    }
+    
+    for metric, min_value in thresholds.items():
+        if metrics.get(metric, 0) &lt; min_value:
+            print(f"❌ {metric} = {metrics[metric]} below threshold {min_value}")
+            return False
+    
+    return True
+</code></pre>
+<p><strong>What happens when the gate fails:</strong></p>
+<ul>
+<li>Model is registered in STAGE (you can inspect it)</li>
+<li>Model is <strong>not replicated</strong> to PROD</li>
+<li>CI pipeline stops with clear error message</li>
+<li>You fix the model and re-run</li>
+</ul>
+<p><strong>What happens when the gate passes:</strong></p>
+<ul>
+<li>Model is replicated to PROD registry</li>
+<li>STAGE completes successfully</li>
+<li>You can now deploy to PROD (requires approval)</li>
+</ul>
+<hr />
+<h2>The Full Promotion Flow</h2>
+<p>Here's the complete step-by-step for a STAGE → PROD deployment:</p>
+<p>| Step | What Happens | Script / Location | If It Fails | |------|-------------|-------------------|-------------| | 1 | Register entities + feature views in STAGE (creates Dynamic Tables) | <code>run_stage_pipeline.py → register_feature_views()</code> | Pipeline stops | | 2 | Submit <code>@remote</code> training job to STAGE compute pool | <code>run_stage_pipeline.py → train_and_register_stage()</code> | Pipeline stops | | 3 | Compare metrics against thresholds | <code>check_quality_gate(metrics)</code> | Model registered but NOT replicated | | 4 | <code>ALTER MODEL ... ADD VERSION FROM MODEL</code> | <code>deploy/strategies/single_account.py</code> | Pipeline stops (PROD doesn't get the model) | | 5 | Score feature table in STAGE, validate predictions | <code>run_batch_inference.py</code> | Pipeline fails (flags bad model) | | 6 | Reviewer approves PROD deployment (environment gate) | GitHub Actions UI | N/A (manual action) | | 7 | Create versioned SPCS service → health check → shift gateway | <code>deploy_prod_service.py</code> | Old service stays live (no rollback needed) | | 8 | Score feature table in PROD, validate predictions | <code>run_batch_inference.py</code> | Flags issue but service already live |</p>
+<hr />
+<h2>Pluggable Promotion Strategies</h2>
+<p>The model promotion step (Step 4) is implemented as a <strong>pluggable strategy</strong> controlled by the <code>TOPOLOGY</code> environment variable:</p>
+<p>| Topology | Mechanism | When to Use | |----------|-----------|-------------| | <code>single-account</code> (default) | <code>ALTER MODEL ... ADD VERSION FROM MODEL</code> | All environments in one account | | <code>multi-account</code> | Cross-account model sharing | Separate accounts per environment | | <code>cross-region</code> | Replication group | Accounts in different regions |</p>
+<p><strong>Single-account</strong> (this framework):</p>
+<pre><code class="language-">One Snowflake account
+├── SNOW_MLOPS_DEV (database)
+├── SNOW_MLOPS_STAGE (database)
+└── SNOW_MLOPS_PROD (database)
+</code></pre>
+<p><strong>Multi-account</strong> (extension):</p>
+<pre><code class="language-">Three Snowflake accounts
+├── dev_account (entire account for DEV)
+├── stage_account (entire account for STAGE)
+└── prod_account (entire account for PROD)
+</code></pre>
+<p>The CI/CD workflow, testing gates, and approval flows remain identical. You're just deploying to different accounts instead of different databases. The model promotion mechanism changes from direct SQL replication to cross-account sharing, but the pipeline structure is unchanged.</p>
+<hr />
+<h2>CI/CD Infrastructure: A Single Unified Workflow</h2>
+<p>The entire pipeline is orchestrated by a <strong>single GitHub Actions workflow</strong> (<code>deploy.yml</code>) with four jobs arranged as a dependency graph:</p>
+<pre><code class="language-">┌──────┐     ┌──────┐
+│ lint │     │ test │
+└───┬──┘     └───┬──┘
+    └────┬───────┘
+         ↓
+   ┌─────────────┐
+   │ deploy-stage │
+   └──────┬──────┘
+          ↓
+   ┌─────────────┐
+   │ deploy-prod  │ (requires approval)
+   └─────────────┘
+</code></pre>
+<h3>Job Breakdown</h3>
+<p>| File | Trigger | Environment | Actions | |------|---------|-------------|---------| | <code>deploy.yml → lint job</code> | Push to main OR manual dispatch | — | Ruff lint + format check | | <code>deploy.yml → test job</code> | Push to main OR manual dispatch | — | Unit tests (pytest) | | <code>deploy.yml → deploy-stage job</code> | After lint + test pass | STAGE | Register features, train, quality gate, replicate, batch inference | | <code>deploy.yml → deploy-prod job</code> | After STAGE passes + reviewer approval | PROD | Blue/green SPCS deploy, batch inference, verify gateway, tag release | | <code>rollback.yml</code> | Manual dispatch (model version + reason) | PROD | Set model version, redeploy SPCS service, validate, tag rollback | | <code>pr-checks.yml</code> | PR opened/updated against main | — | Lint + test (gates merge) |</p>
+<h3>STAGE Job Steps</h3>
+<pre><code class="language-yaml">name: Deploy
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['*.md', 'docs/**', 'LICENSE']
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: 'Reason for manual retrain'
+        required: false
+
+permissions:
+  id-token: write        # Required for OIDC token
+  contents: write        # Required for git tags on PROD deploy
+</code></pre>
+<p><strong>Steps executed:</strong></p>
+<ol>
+<li><strong>Checkout</strong> — Clone repo with <code>fetch-depth: 2</code></li>
+<li><strong>Snowflake CLI setup</strong> — <code>snowflakedb/snowflake-actions@v3</code> with <code>use-oidc: true</code></li>
+<li><strong>Connection test</strong> — <code>snow connection test -x</code> validates auth before expensive steps</li>
+<li><strong>Install uv + Python</strong> — Fast package manager, deterministic installs</li>
+<li><strong>Install deps</strong> — <code>uv sync --group snow --no-default-groups</code> (lean: only orchestration packages)</li>
+<li><strong>Run STAGE pipeline</strong> — <code>scripts/run_stage_pipeline.py</code> (train → gate → replicate)</li>
+<li><strong>Run batch inference</strong> — <code>scripts/run_batch_inference.py</code> (score + validate)</li>
+</ol>
+<h3>PROD Job Steps</h3>
+<ol>
+<li><strong>Verify model exists</strong> — Confirm the replicated model is in PROD registry</li>
+<li><strong>Deploy SPCS service</strong> — Blue/green deployment with health check</li>
+<li><strong>Register Feature Views</strong> — Ensure Dynamic Tables exist in PROD</li>
+<li><strong>Run batch inference</strong> — Score and validate predictions</li>
+<li><strong>Verify gateway</strong> — Confirm traffic routes to new service</li>
+<li><strong>Tag release</strong> — Create git tag <code>prod/<VERSION>-<TIMESTAMP></code> marking what's deployed</li>
+</ol>
+<hr />
+<h2>Authentication: OIDC, No Stored Secrets</h2>
+<p>GitHub Actions authenticates to Snowflake using <strong>OIDC workload identity</strong>. GitHub mints a short-lived JWT; Snowflake validates the issuer and subject claim. No passwords or API keys are stored anywhere.</p>
+<pre><code class="language-">┌─────────────────┐
+│ GitHub Actions  │
+└────────┬────────┘
+         │ 1. Request OIDC token
+         ↓
+┌─────────────────┐
+│ GitHub OIDC     │
+│ Provider        │
+└────────┬────────┘
+         │ 2. Mint JWT (subject: repo:owner@ID/repo@ID:environment:PROD)
+         ↓
+┌─────────────────┐
+│ Snowflake       │
+│ Account         │
+└────────┬────────┘
+         │ 3. Validate issuer + subject
+         │ 4. Return session token
+         ↓
+   CI pipeline runs
+</code></pre>
+<h3>Service User Configuration</h3>
+<p>Each GitHub environment has its own service user:</p>
+<pre><code class="language-sql">CREATE USER SVC_GITHUB_ACTIONS_STAGE
+  TYPE = SERVICE
+  DEFAULT_ROLE = MLOPS_DEPLOY_ROLE
+  WORKLOAD_IDENTITY = (
+    TYPE = OIDC
+    ISSUER = 'https://token.actions.githubusercontent.com'
+    SUBJECT = 'repo:owner@ID/repo@ID:environment:STAGE'
+  );
+
+ALTER USER SVC_GITHUB_ACTIONS_STAGE 
+  SET NETWORK_POLICY = 'GITHUB_ACTIONS_POLICY';
+</code></pre>
+<h3>Environment Variables Set by Snowflake Action</h3>
+<p>The <code>snowflake-actions@v3</code> action automatically sets these after successful OIDC exchange:</p>
+<p>| Variable | Value | Purpose | |----------|-------|---------| | <code>SNOWFLAKE_TOKEN</code> | (short-lived token) | Session authentication | | <code>SNOWFLAKE_AUTHENTICATOR</code> | <code>WORKLOAD_IDENTITY</code> | Tells connector which auth method | | <code>SNOWFLAKE_WORKLOAD_IDENTITY_PROVIDER</code> | <code>OIDC</code> | Required for workload identity flow | | <code>SNOWFLAKE_AUDIENCE</code> | <code>snowflakecomputing.com</code> | Token audience validation |</p>
+<h3>Session Helper</h3>
+<p>The project includes a helper that detects whether it's running in CI or locally:</p>
+<pre><code class="language-python">def create_snowpark_session():
+    # CI/OIDC: detected by SNOWFLAKE_TOKEN + SNOWFLAKE_ACCOUNT in env
+    if os.getenv("SNOWFLAKE_TOKEN") and os.getenv("SNOWFLAKE_ACCOUNT"):
+        config = {
+            "account": os.environ["SNOWFLAKE_ACCOUNT"],
+            "token": os.environ["SNOWFLAKE_TOKEN"],
+            "authenticator": os.getenv("SNOWFLAKE_AUTHENTICATOR", "oauth"),
+        }
+        # Pass OIDC-specific params
+        if os.getenv("SNOWFLAKE_WORKLOAD_IDENTITY_PROVIDER"):
+            config["workload_identity_provider"] = os.environ["SNOWFLAKE_WORKLOAD_IDENTITY_PROVIDER"]
+        if os.getenv("SNOWFLAKE_AUDIENCE"):
+            config["audience"] = os.environ["SNOWFLAKE_AUDIENCE"]
+        return Session.builder.configs(config).create()
+
+    # Local dev: use connections.toml
+    connection_name = os.getenv("SNOWFLAKE_CONNECTION_NAME", "default")
+    return Session.builder.configs({"connection_name": connection_name}).create()
+</code></pre>
+<p><strong>Critical detail</strong>: The authenticator is <code>WORKLOAD_IDENTITY</code>, not <code>oauth</code>. If you hardcode <code>"oauth"</code>, CI fails with "Invalid OAuth access token." Always read it from the environment variable.</p>
+<hr />
+<h2>Git Branching and Release Tagging</h2>
+<p>The project uses <strong>trunk-based development</strong> with feature branches:</p>
+<pre><code class="language-">feature/* branch → PR → main → deploy.yml → prod/V11-20260803
+</code></pre>
+<p><strong>Branching rules:</strong></p>
+<ul>
+<li>All development happens on <code>feature/<em></code> or <code>fix/</em></code> branches</li>
+<li><code>main</code> is protected: merges require passing lint + test checks + 1 reviewer approval</li>
+<li>Enforce for admins: even repository admins must go through PRs (no direct pushes)</li>
+</ul>
+<p><strong>Release tags:</strong></p>
+<ul>
+<li>After successful PROD deploy: <code>prod/V11-20260803-151530</code></li>
+<li>After rollback: <code>prod/V10-rollback-20260803-160000</code></li>
+</ul>
+<p>To see what's currently deployed:</p>
+<pre><code class="language-bash">git tag -l "prod/*" --sort=-creatordate | head -1
+</code></pre>
+<hr />
+<h2>Rollback: When Things Go Wrong</h2>
+<p>The rollback workflow (<code>rollback.yml</code>) provides emergency reversion to a previous model version. Triggered via manual dispatch with two required inputs:</p>
+<ul>
+<li><code>model_version</code> — The version to roll back to (e.g., V10)</li>
+<li><code>reason</code> — Audit trail for why the rollback was performed</li>
+</ul>
+<p><strong>What the rollback workflow does:</strong></p>
+<ol>
+<li>Sets <code>DEFAULT_VERSION</code> on the model (batch inference uses old model immediately)</li>
+<li>Deploys the SPCS service for the rolled-back version (blue/green)</li>
+<li>Validates batch inference still works</li>
+<li>Creates a rollback tag: <code>prod/V10-rollback-20260803-160000</code></li>
+</ol>
+<p><strong>Key characteristic</strong>: Rollback is as automated as forward deployment. No manual SQL. No scrambling through logs. You specify a version number and hit "Run workflow."</p>
+<hr />
+<h2>RBAC and Security</h2>
+<p>CI/CD runs with a <strong>least-privilege service role</strong> (<code>MLOPS_DEPLOY_ROLE</code>) — never ACCOUNTADMIN. This role has exactly the permissions needed to run the pipeline and nothing more.</p>
+<h3>MLOPS_DEPLOY_ROLE Permissions</h3>
+<p>| Category | Grants | |----------|--------| | Database access | <code>USAGE</code> on all three databases (DEV, STAGE, PROD) | | Schema control | <code>ALL</code> on <code>.ML</code> schema in each database | | Objects | <code>ALL</code> on all tables, dynamic tables, stages, models in each schema | | Compute | <code>USAGE</code> on all warehouses and compute pools | | Account-level | <code>BIND SERVICE ENDPOINT</code>, <code>EXECUTE TASK</code>, <code>EXECUTE MANAGED TASK</code> |</p>
+<h3>Model Ownership</h3>
+<p>Models are Snowflake objects with ownership-based access control. A role can only modify models it owns. The setup script transfers ownership of any existing models to <code>MLOPS_DEPLOY_ROLE</code>:</p>
+<pre><code class="language-sql">-- Transfer existing models (created by ACCOUNTADMIN during initial setup)
+GRANT OWNERSHIP ON ALL MODELS IN SCHEMA SNOW_MLOPS_DEV.ML 
+  TO ROLE MLOPS_DEPLOY_ROLE COPY CURRENT GRANTS;
+GRANT OWNERSHIP ON ALL MODELS IN SCHEMA SNOW_MLOPS_STAGE.ML 
+  TO ROLE MLOPS_DEPLOY_ROLE COPY CURRENT GRANTS;
+GRANT OWNERSHIP ON ALL MODELS IN SCHEMA SNOW_MLOPS_PROD.ML 
+  TO ROLE MLOPS_DEPLOY_ROLE COPY CURRENT GRANTS;
+</code></pre>
+<p><strong>Why this matters</strong>: Without this ownership transfer, CI fails with "Model 'MLOPS_FRAUD_DETECTOR' already exists, but current role has no privileges on it." This happens because <code>setup.sh</code> creates infrastructure as ACCOUNTADMIN, but CI runs as <code>MLOPS_DEPLOY_ROLE</code>.</p>
+<h3>Network Policy</h3>
+<p>GitHub Actions runners use dynamic IPs. Snowflake provides a managed network rule that automatically tracks them:</p>
+<pre><code class="language-sql">CREATE NETWORK POLICY GITHUB_ACTIONS_POLICY
+  ALLOWED_NETWORK_RULE_LIST = ('SNOWFLAKE.NETWORK_SECURITY.GITHUBACTIONS_GLOBAL');
+</code></pre>
+<p>This is applied to service users only — it doesn't affect human users or other integrations. Even if someone steals the OIDC configuration, they can't authenticate from outside GitHub Actions.</p>
+<hr />
+<h2>Lean CI Installs</h2>
+<p>The project uses <code>uv</code> dependency groups to separate CI from dev dependencies:</p>
+<pre><code class="language-toml"># pyproject.toml
+[dependency-groups]
+snow = [
+    "snowflake-snowpark-python&gt;=1.53.1",
+    "snowflake-ml-python&gt;=1.47.0",
+]
+dev = ["ruff", "pytest"]
+</code></pre>
+<p>CI runs: <code>uv sync --group snow --no-default-groups</code> — installs only the Snowflake packages needed for orchestration. Dev tools (ruff, pytest) are not installed in the deploy workflow. This keeps CI fast and reduces attack surface.</p>
+<hr />
+<h2>GitHub Repository Configuration</h2>
+<p>Required settings for the framework to work:</p>
+<p>| Setting | Where | Value | |---------|-------|-------| | <code>SNOWFLAKE_ACCOUNT</code> | Repository variable | Your account identifier (e.g., <code>MYORG-MYACCOUNT</code>) | | <code>SNOWFLAKE_DATABASE_STAGE</code> | Repository variable | <code>SNOW_MLOPS_STAGE</code> | | <code>SNOWFLAKE_DATABASE_PROD</code> | Repository variable | <code>SNOW_MLOPS_PROD</code> | | <code>SNOWFLAKE_SCHEMA</code> | Repository variable | <code>ML</code> | | <code>SNOWFLAKE_USER_STAGE</code> | Repository variable | <code>SVC_GITHUB_ACTIONS_STAGE</code> | | <code>SNOWFLAKE_USER_PROD</code> | Repository variable | <code>SVC_GITHUB_ACTIONS</code> | | <code>TOPOLOGY</code> | Repository variable | <code>single-account</code> | | STAGE environment | Settings → Environments | No protection rules | | PROD environment | Settings → Environments | Required reviewers (approval gate) | | Branch protection | Settings → Branches → main | Require PR, require <code>lint</code> + <code>test</code> checks, enforce for admins |</p>
+<hr />
+<h2>Real-World Workflow: Deploying a Fraud Detection Model</h2>
+<p>Here's what it looks like in practice:</p>
+<h3>Step 1: Develop on a Feature Branch</h3>
+<pre><code class="language-bash">git checkout -b feature/fraud-v2
+# Edit src/train_fraud_model.py
+git commit -am "Improve fraud detection with velocity features"
+git push origin feature/fraud-v2
+</code></pre>
+<p>CI automatically deploys to DEV. You test manually in <code>SNOW_MLOPS_DEV.ML.MLOPS_FRAUD_DETECTOR</code>.</p>
+<h3>Step 2: Promote to STAGE</h3>
+<pre><code class="language-bash">gh pr create --base stage --title "Fraud detector v2"
+# CI runs: lint, test, train, quality gate, replicate
+# If metrics pass, model is replicated to PROD registry
+git checkout stage
+git merge feature/fraud-v2
+git push
+</code></pre>
+<p>You validate in STAGE:</p>
+<ul>
+<li>Check training metrics in CI logs</li>
+<li>Run manual batch inference tests</li>
+<li>Review predictions for sanity</li>
+</ul>
+<h3>Step 3: Deploy to PROD</h3>
+<pre><code class="language-bash">gh pr create --base main --title "Deploy fraud detector v2 to PROD"
+# PR requires 1 reviewer approval
+# After approval + merge:
+# - Blue/green SPCS deploy
+# - Batch inference validation
+# - Gateway cutover
+# - Git tag: prod/V11-20260803-151530
+</code></pre>
+<p>Your new fraud detector is live.</p>
+<h3>Step 4: Rollback (If Needed)</h3>
+<p>Production predictions look wrong? Rollback is a manual workflow dispatch:</p>
+<pre><code class="language-bash"># Go to Actions → Rollback workflow → Run workflow
+# Inputs:
+#   model_version: V10
+#   reason: "High false positive rate on corporate cards"
+# CI executes:
+# - SET DEFAULT_VERSION = V10
+# - Blue/green redeploy of V10 service
+# - Validation
+# - Git tag: prod/V10-rollback-20260803-160000
+</code></pre>
+<p>Rollback completes in minutes. Your system is back to the previous version.</p>
+<hr />
+<h2>Key Takeaways for ML Engineers</h2>
+<h3>What This Framework Gives You</h3>
+<ol>
+<li><strong>Versioned models</strong>: Every model version is tracked with git commit SHA, training metrics, and feature snapshot</li>
+<li><strong>Automated quality gates</strong>: Bad models never reach production</li>
+<li><strong>Environment isolation</strong>: Break things in DEV without affecting users</li>
+<li><strong>Approval gates</strong>: Production changes require human review</li>
+<li><strong>Instant rollbacks</strong>: Revert to any previous version in minutes</li>
+<li><strong>Audit trail</strong>: Git tags show exactly what's deployed and when</li>
+<li><strong>Least-privilege security</strong>: CI runs with minimal permissions</li>
+<li><strong>No stored secrets</strong>: OIDC authentication means no passwords to rotate</li>
+</ol>
+<h3>What This Framework Does NOT Cover</h3>
+<p>This is an <strong>infrastructure and deployment framework</strong>. It assumes you already know how to:</p>
+<ul>
+<li>Write training code with Snowpark ML</li>
+<li>Define features in Feature Store</li>
+<li>Build inference pipelines (batch or real-time)</li>
+<li>Monitor model performance</li>
+</ul>
+<p>The framework focuses on <strong>safely promoting models through environments</strong>, not on the ML engineering itself.</p>
+<h3>Single-Account vs Multi-Account</h3>
+<p>This framework targets <strong>single-account deployments</strong>:</p>
+<pre><code class="language-">One account
+├── SNOW_MLOPS_DEV (database)
+├── SNOW_MLOPS_STAGE (database)
+└── SNOW_MLOPS_PROD (database)
+</code></pre>
+<p><strong>Pros</strong>: Simpler setup, lower cost, easier data sharing, no cross-account networking <strong>Cons</strong>: Less isolation, shared compute quotas, single blast radius</p>
+<p><strong>To extend to multi-account</strong>: Change the topology strategy from <code>single-account</code> to <code>multi-account</code>. The CI/CD workflow, testing gates, and approval flows remain identical. You're just deploying to different accounts instead of different databases. Model promotion changes from direct SQL replication to cross-account sharing (via Snowflake's built-in sharing mechanisms), but the pipeline structure is unchanged.</p>
+<hr />
+<h2>Common Pitfalls</h2>
+<h3>Pitfall 1: Models Breaking in PROD but Not STAGE</h3>
+<p><strong>Cause</strong>: Data differences between environments</p>
+<p><strong>Solution</strong>: Use production data samples in STAGE:</p>
+<pre><code class="language-sql">CREATE TABLE SNOW_MLOPS_STAGE.SAMPLE_TRANSACTIONS 
+CLONE SNOW_MLOPS_PROD.TRANSACTIONS;
+
+CREATE TASK refresh_stage_sample
+  WAREHOUSE = ML_WH
+  SCHEDULE = 'DAILY'
+AS
+  CREATE OR REPLACE TABLE SNOW_MLOPS_STAGE.SAMPLE_TRANSACTIONS 
+  AS SELECT * FROM SNOW_MLOPS_PROD.TRANSACTIONS SAMPLE (10 ROWS);
+</code></pre>
+<h3>Pitfall 2: Manual Drift Between Environments</h3>
+<p><strong>Cause</strong>: Someone manually modifies PROD objects</p>
+<p><strong>Solution</strong>: Use ownership-based access control. Only <code>MLOPS_DEPLOY_ROLE</code> owns models. Human users can query models but can't modify them. All changes go through CI/CD.</p>
+<h3>Pitfall 3: "Model Already Exists" Error in CI</h3>
+<p><strong>Cause</strong>: <code>setup.sh</code> creates objects as ACCOUNTADMIN, but CI runs as <code>MLOPS_DEPLOY_ROLE</code></p>
+<p><strong>Error message</strong>: "Model 'MLOPS_FRAUD_DETECTOR' already exists, but current role has no privileges on it"</p>
+<p><strong>Solution</strong>: Transfer ownership after initial setup (shown in RBAC section above)</p>
+<hr />
+<h2>Conclusion</h2>
+<p>Production MLOps is not about training better models—it's about building <strong>reliable, auditable, and reversible deployment pipelines</strong>. This framework gives you:</p>
+<ul>
+<li>Git-driven deployments: every model version is tracked and reversible</li>
+<li>Automated testing gates: models don't reach production without proving they work</li>
+<li>Environment isolation: break things in DEV without affecting users</li>
+<li>Approval gates for production: humans review before deployment</li>
+<li>Instant rollbacks: revert in minutes, not hours</li>
+</ul>
+<p>The patterns here work for single-account deployments. For enterprises requiring stricter isolation, the same patterns extend to multi-account architectures—just deploy to separate accounts instead of separate databases.</p>
+<p>Models are too important to deploy manually. Build a pipeline that gives you confidence to ship ML changes frequently and safely.</p>
+<hr />
+<h2>Additional Resources</h2>
+<ul>
+<li><a href="https://docs.snowflake.com/en/developer-guide/snowflake-ml/feature-store/overview">Snowflake Feature Store</a></li>
+<li><a href="https://docs.snowflake.com/en/developer-guide/snowflake-ml/ml-jobs/overview">Snowflake ML Jobs</a></li>
+<li><a href="https://docs.snowflake.com/en/developer-guide/snowflake-ml/model-registry/overview">Snowflake Model Registry</a></li>
+<li><a href="https://docs.snowflake.com/en/developer-guide/snowflake-ml/model-registry/warehouse">Warehouse Inference</a></li>
+<li><a href="https://docs.snowflake.com/en/developer-guide/snowflake-ml/inference/real-time-inference-rest-api">Real-Time Inference (REST API)</a></li>
+<li><a href="https://docs.snowflake.com/en/developer-guide/snowflake-ml/inference/stable-endpoints-api-reference">Snowflake Gateway</a></li>
+<li><a href="https://docs.snowflake.com/en/developer-guide/snowflake-cli/cicd/github-action">Snowflake CLI GitHub Action</a></li>
+</ul>
+</body>
+</html>

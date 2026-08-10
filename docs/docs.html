@@ -65,6 +65,15 @@
     .toc a { color: light-dark(#0066cc, #6cb4ee); font-size: 0.93rem; }
     .subtitle { color: light-dark(#555, #999); font-size: 1rem; margin: 0 0 28px; }
     .mermaid { margin: 24px 0; }
+    /* Enhanced mermaid diagram styling */
+    .mermaid svg { max-width: 100%; height: auto; }
+    /* Custom mermaid theme variables */
+    .mermaid .node rect, .mermaid .node circle, .mermaid .node ellipse, .mermaid .node polygon { stroke-width: 2px; }
+    .mermaid .edgeLabel { background-color: light-dark(#fff, #1a1a2e); }
+    /* Increase node padding and min-width to prevent text cutoff */
+    .mermaid .node rect { rx: 5px; ry: 5px; min-width: 180px; }
+    .mermaid .nodeLabel { padding: 12px 16px; }
+    .mermaid text { font-size: 14px !important; }
     ul, ol { padding-left: 24px; }
     li { margin: 5px 0; }
     hr { border: none; border-top: 1px solid light-dark(#e5e5e5, #333); margin: 48px 0; }
@@ -119,28 +128,33 @@
 <hr />
 
 <!-- ================================================================ -->
-<h2 id="overview"><span class="section-icon">&#x1F3D7;</span>Overview &amp; Architecture</h2>
+<h2 id="overview">Overview &amp; Architecture</h2>
 
 <p>The pipeline moves ML models from experimentation to production through three environments. All environments exist within a single Snowflake account, separated at the database level. Source data always lives in PROD; DEV and STAGE read from PROD for training but write artifacts to their own databases.</p>
 
 <pre class="mermaid">
+%%{init: {'theme':'base', 'themeVariables': { 'primaryColor':'#e8f4f8','primaryTextColor':'#1a1a2e','primaryBorderColor':'#29b5e8','lineColor':'#29b5e8','secondaryColor':'#fff4e6','tertiaryColor':'#f0fdf4','fontSize':'14px','fontFamily':'system-ui','nodePadding':'20','nodeSpacing':'80'}}}%%
 flowchart LR
     subgraph dev["DEV (interactive)"]
-        D1[Feature Views] --> D2["Train (@remote)"]
-        D2 --> D3[Register Model]
+        D1["Feature Views"] --> D2["Train (@remote)"]
+        D2 --> D3["Register Model"]
     end
     subgraph stage["STAGE (CI-triggered)"]
-        S1[Feature Views] --> S2["Train (@remote)"]
-        S2 --> S3[Quality Gate]
-        S3 --> S4[Register + Replicate]
-        S4 --> S5[Batch Inference]
+        S1["Feature Views"] --> S2["Train (@remote)"]
+        S2 --> S3["Quality Gate"]
+        S3 --> S4["Register + Replicate"]
+        S4 --> S5["Batch Inference"]
     end
     subgraph prod["PROD (manual gate)"]
-        P1[SPCS Service] --> P2[Gateway]
-        P3[Batch Inference]
+        P1["SPCS Service"] --> P2["Gateway"]
+        P3["Batch Inference"]
     end
     dev -->|"merge to main"| stage
-    stage -->|"manual dispatch"| prod
+    stage -->|"manual approval"| prod
+    
+    style dev fill:#e8f4f8,stroke:#29b5e8,stroke-width:3px
+    style stage fill:#fff4e6,stroke:#fb923c,stroke-width:3px
+    style prod fill:#f0fdf4,stroke:#22c55e,stroke-width:3px
 </pre>
 
 <h3>Component map</h3>
@@ -212,7 +226,7 @@ flowchart LR
 <hr />
 
 <!-- ================================================================ -->
-<h2 id="feature-store"><span class="section-icon">&#x1F4CA;</span>Feature Store</h2>
+<h2 id="feature-store">Feature Store</h2>
 
 <p>Features are defined as Snowflake <strong>Feature Views</strong> backed by Dynamic Tables. You declare the transformation SQL once; Snowflake handles scheduling, refresh, and serving. The Feature Store API provides entity registration, versioning, and point-in-time correctness.</p>
 
@@ -325,7 +339,7 @@ register_feature_views(session)</code></pre>
 <hr />
 
 <!-- ================================================================ -->
-<h2 id="model-training"><span class="section-icon">&#x1F3CB;</span>Model Training</h2>
+<h2 id="model-training">Model Training</h2>
 
 <p>Training runs on Snowflake <strong>Compute Pools</strong> using the <code>@remote</code> decorator from <code>snowflake.ml.jobs</code>. The decorator serializes your Python function and executes it inside a managed container with full Snowflake SQL access.</p>
 
@@ -421,7 +435,7 @@ def train():
 <hr />
 
 <!-- ================================================================ -->
-<h2 id="model-registry"><span class="section-icon">&#x1F4E6;</span>Model Registry</h2>
+<h2 id="model-registry">Model Registry</h2>
 
 <p>The Snowflake Model Registry stores trained models as versioned database objects. Each model has versions (V1, V2, ...), a default version, aliases, and SQL-level access control. Models are first-class Snowflake objects — they support RBAC, replication, and can be called directly from SQL.</p>
 
@@ -497,7 +511,7 @@ ALTER MODEL SNOW_MLOPS_PROD.ML.MLOPS_FRAUD_DETECTOR
 <hr />
 
 <!-- ================================================================ -->
-<h2 id="quality-gate"><span class="section-icon">&#x2705;</span>Quality Gate</h2>
+<h2 id="quality-gate">Quality Gate</h2>
 
 <p>The quality gate blocks models that don't meet minimum performance thresholds from being promoted to PROD. It runs after training and before replication.</p>
 
@@ -544,7 +558,7 @@ def check_quality_gate(metrics: dict) -> tuple[bool, list[str]]:
 <hr />
 
 <!-- ================================================================ -->
-<h2 id="inference"><span class="section-icon">&#x26A1;</span>Inference (Batch &amp; Real-Time)</h2>
+<h2 id="inference">Inference (Batch &amp; Real-Time)</h2>
 
 <p>The framework supports two inference modes. Both can run simultaneously — they serve different use cases.</p>
 
@@ -649,10 +663,17 @@ Content-Type: application/json
 <p>The Gateway provides a permanent hostname that routes traffic to underlying services. During model upgrades, the URL does not change — only the routing target shifts.</p>
 
 <pre class="mermaid">
+%%{init: {'theme':'base', 'themeVariables': { 'primaryColor':'#dbeafe','primaryTextColor':'#1e3a8a','primaryBorderColor':'#3b82f6','lineColor':'#10b981','fontSize':'14px','fontFamily':'system-ui','nodePadding':'20','nodeSpacing':'80'}}}%%
 flowchart LR
-    CLIENT[API Clients] --> GW["Gateway (stable URL)"]
-    GW -->|"100%"| V3["SERVICE_V3 (new)"]
-    OLD["SERVICE_V2 (old)"] -.->|"dropped after shift"| X[fa:fa-trash]
+    CLIENT["API Clients"] --> GW["Gateway<br/>(stable URL)"]
+    GW -->|"100% traffic"| V3["SERVICE_V3<br/>(new version)"]
+    OLD["SERVICE_V2<br/>(old version)"] -.->|"dropped after shift"| X[X]
+    
+    style CLIENT fill:#dbeafe,stroke:#3b82f6,stroke-width:2px
+    style GW fill:#d1fae5,stroke:#10b981,stroke-width:3px
+    style V3 fill:#dcfce7,stroke:#22c55e,stroke-width:2px
+    style OLD fill:#fee2e2,stroke:#ef4444,stroke-width:2px,stroke-dasharray: 5 5
+    style X fill:#fecaca,stroke:#dc2626
 </pre>
 
 <h4>Blue/green deployment flow</h4>
@@ -683,7 +704,7 @@ $$;</code></pre>
 <hr />
 
 <!-- ================================================================ -->
-<h2 id="promotion"><span class="section-icon">&#x1F680;</span>Environment Promotion</h2>
+<h2 id="promotion">Environment Promotion</h2>
 
 <p>Code and models flow through three environments with automated validation and manual approval gates.</p>
 
@@ -717,22 +738,31 @@ $$;</code></pre>
 <h3>Full promotion flow</h3>
 
 <pre class="mermaid">
+%%{init: {'theme':'base', 'themeVariables': { 'primaryColor':'#f0f9ff','primaryTextColor':'#0c4a6e','primaryBorderColor':'#0ea5e9','lineColor':'#64748b','fontSize':'14px','fontFamily':'system-ui','nodePadding':'20','nodeSpacing':'80'}}}%%
 flowchart TD
     subgraph triggers["Triggers"]
-        CODE["Code change → push to main"] 
-        MANUAL["Manual dispatch (retrain)"]
+        CODE["Code change<br/>→ push to main"] 
+        MANUAL["Manual dispatch<br/>(retrain)"]
     end
-    triggers --> FS["Step 1: Register Feature Store in STAGE"]
-    FS --> TRAIN["Step 2: Train on STAGE_POOL (@remote)"]
-    TRAIN --> GATE{"Step 3: Quality Gate"}
-    GATE -->|"metrics pass"| REG["Step 4: Replicate model to PROD"]
-    REG --> BATCH["Step 5: Batch inference (validate predictions)"]
-    BATCH --> DONE["STAGE pipeline complete"]
-    DONE --> DISPATCH["Step 6: Approve PROD deployment"]
-    DISPATCH --> DEPLOY["Step 7: Blue/green SPCS deploy"]
-    DEPLOY --> PRODBATCH["Step 8: Batch inference (PROD)"]
+    triggers --> FS["1. Register Feature Store<br/>in STAGE"]
+    FS --> TRAIN["2. Train on STAGE_POOL<br/>(@remote)"]
+    TRAIN --> GATE{"3. Quality Gate<br/>pass/fail"}
+    GATE -->|"metrics pass"| REG["4. Replicate model<br/>to PROD"]
+    REG --> BATCH["5. Batch inference<br/>(validate predictions)"]
+    BATCH --> DONE["STAGE pipeline<br/>complete"]
+    DONE --> DISPATCH["6. Approve PROD<br/>deployment"]
+    DISPATCH --> DEPLOY["7. Blue/green<br/>SPCS deploy"]
+    DEPLOY --> PRODBATCH["8. Batch inference<br/>(PROD)"]
     PRODBATCH --> LIVE["Live via Gateway"]
-    GATE -->|"metrics fail"| BLOCK["Pipeline blocked — model stays in STAGE"]
+    GATE -->|"metrics fail"| BLOCK["Pipeline blocked<br/>model stays in STAGE"]
+    
+    style triggers fill:#f0f9ff,stroke:#0ea5e9,stroke-width:2px
+    style GATE fill:#fef3c7,stroke:#f59e0b,stroke-width:3px
+    style REG fill:#dcfce7,stroke:#22c55e,stroke-width:2px
+    style DONE fill:#dcfce7,stroke:#22c55e,stroke-width:2px
+    style LIVE fill:#dcfce7,stroke:#22c55e,stroke-width:3px
+    style BLOCK fill:#fee2e2,stroke:#ef4444,stroke-width:2px
+    style DISPATCH fill:#e0e7ff,stroke:#6366f1,stroke-width:2px
 </pre>
 
 <h3>Step-by-step detail</h3>
@@ -767,7 +797,7 @@ flowchart TD
 <hr />
 
 <!-- ================================================================ -->
-<h2 id="cicd"><span class="section-icon">&#x2699;</span>CI/CD Infrastructure</h2>
+<h2 id="cicd">CI/CD Infrastructure</h2>
 
 <p>A single GitHub Actions workflow (<code>deploy.yml</code>) orchestrates the full pipeline as a 4-job graph. Authentication uses OIDC — no secrets are stored in GitHub. A separate <code>rollback.yml</code> workflow provides emergency reversion to a previous model version.</p>
 
@@ -790,10 +820,16 @@ flowchart TD
 <p>A single workflow file contains four jobs arranged as a dependency graph:</p>
 
 <pre class="mermaid">
+%%{init: {'theme':'base', 'themeVariables': { 'primaryColor':'#f5f3ff','primaryTextColor':'#5b21b6','primaryBorderColor':'#8b5cf6','lineColor':'#64748b','fontSize':'14px','fontFamily':'system-ui','nodePadding':'20','nodeSpacing':'80'}}}%%
 flowchart LR
-    LINT[lint] --> STAGE[deploy-stage]
-    TEST[test] --> STAGE
-    STAGE --> PROD[deploy-prod]
+    LINT["lint<br/>(ruff)"] --> STAGE["deploy-stage<br/>(train + gate)"]
+    TEST["test<br/>(pytest)"] --> STAGE
+    STAGE --> PROD["deploy-prod<br/>(SPCS + Gateway)"]
+    
+    style LINT fill:#fef3c7,stroke:#f59e0b,stroke-width:2px
+    style TEST fill:#dbeafe,stroke:#3b82f6,stroke-width:2px
+    style STAGE fill:#fff4e6,stroke:#fb923c,stroke-width:3px
+    style PROD fill:#dcfce7,stroke:#22c55e,stroke-width:3px
 </pre>
 
 <p><code>lint</code> and <code>test</code> run in parallel for fast feedback. <code>deploy-stage</code> requires both to pass. <code>deploy-prod</code> requires <code>deploy-stage</code> to pass AND reviewer approval via the <code>PROD</code> environment protection rule.</p>
@@ -844,10 +880,16 @@ permissions:
 <p>The project uses a trunk-based development model with feature branches:</p>
 
 <pre class="mermaid">
+%%{init: {'theme':'base', 'themeVariables': { 'primaryColor':'#f8fafc','primaryTextColor':'#334155','primaryBorderColor':'#64748b','lineColor':'#10b981','fontSize':'14px','fontFamily':'system-ui','nodePadding':'20','nodeSpacing':'80'}}}%%
 flowchart LR
-    FB["feature/* branch"] -->|PR| MAIN[main]
-    MAIN -->|push triggers| DEPLOY[deploy.yml]
-    DEPLOY -->|success| TAG["prod/V11-20260803"]
+    FB["feature/* branch"] -->|"Pull Request"| MAIN["main branch"]
+    MAIN -->|"push triggers CI"| DEPLOY["deploy.yml"]
+    DEPLOY -->|"success"| TAG["prod/V11-20260803"]
+    
+    style FB fill:#fef3c7,stroke:#f59e0b,stroke-width:2px
+    style MAIN fill:#dbeafe,stroke:#3b82f6,stroke-width:3px
+    style DEPLOY fill:#e0e7ff,stroke:#6366f1,stroke-width:2px
+    style TAG fill:#dcfce7,stroke:#22c55e,stroke-width:2px
 </pre>
 
 <ul>
@@ -889,14 +931,15 @@ SHOW MODELS LIKE 'MLOPS_FRAUD_DETECTOR' IN SNOW_MLOPS_PROD.ML;
 <p>GitHub Actions authenticates to Snowflake using OIDC. GitHub mints a short-lived JWT; Snowflake validates the issuer and subject claim. No passwords or API keys are stored anywhere.</p>
 
 <pre class="mermaid">
+%%{init: {'theme':'base', 'themeVariables': { 'primaryColor':'#f0f9ff','primaryTextColor':'#0c4a6e','primaryBorderColor':'#0ea5e9','actorBkg':'#dbeafe','actorBorder':'#3b82f6','actorTextColor':'#1e3a8a','signalColor':'#64748b','signalTextColor':'#334155','fontSize':'14px','fontFamily':'system-ui','notePadding':'15','noteMargin':'20'}}}%%
 sequenceDiagram
     participant GH as GitHub Actions
     participant SF as Snowflake
-    GH->>GH: Mint OIDC JWT (short-lived)
-    GH->>SF: Present JWT with subject claim
-    SF->>SF: Validate issuer + subject
-    SF-->>GH: Session token (SNOWFLAKE_TOKEN)
-    GH->>SF: Execute pipeline via Python SDK
+    GH->>GH: Mint OIDC JWT<br/>(short-lived)
+    GH->>SF: Present JWT with<br/>subject claim
+    SF->>SF: Validate issuer<br/>+ subject
+    SF-->>GH: Session token<br/>(SNOWFLAKE_TOKEN)
+    GH->>SF: Execute pipeline<br/>via Python SDK
 </pre>
 
 <h4>Environment variables set by snowflake-actions@v3</h4>
@@ -978,7 +1021,7 @@ dev = ["ruff", "pytest"]</code></pre>
 <hr />
 
 <!-- ================================================================ -->
-<h2 id="rbac"><span class="section-icon">&#x1F512;</span>RBAC &amp; Security</h2>
+<h2 id="rbac">RBAC &amp; Security</h2>
 
 <p>CI/CD uses a least-privilege role (<code>MLOPS_DEPLOY_ROLE</code>) — never ACCOUNTADMIN. This role has exactly the permissions needed to run the pipeline and nothing more.</p>
 
@@ -1036,7 +1079,7 @@ ALTER USER SVC_GITHUB_ACTIONS_STAGE SET NETWORK_POLICY = 'GITHUB_ACTIONS_POLICY'
 <hr />
 
 <!-- ================================================================ -->
-<h2 id="see-also"><span class="section-icon">&#x1F4D6;</span>See also</h2>
+<h2 id="see-also">See also</h2>
 
 <ul>
   <li><a href="https://docs.snowflake.com/en/developer-guide/snowflake-ml/feature-store/overview">Snowflake Feature Store</a></li>
@@ -1053,7 +1096,24 @@ ALTER USER SVC_GITHUB_ACTIONS_STAGE SET NETWORK_POLICY = 'GITHUB_ACTIONS_POLICY'
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github.min.css" media="(prefers-color-scheme: light)" />
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css" media="(prefers-color-scheme: dark)" />
 <script>
-  mermaid.initialize({ startOnLoad: true, securityLevel: 'strict' });
+  // Enhanced mermaid configuration for better diagram rendering
+  mermaid.initialize({ 
+    startOnLoad: true, 
+    securityLevel: 'strict',
+    flowchart: { 
+      curve: 'basis',
+      padding: 20,
+      nodeSpacing: 50,
+      rankSpacing: 50
+    },
+    sequence: {
+      actorMargin: 50,
+      boxMargin: 10,
+      boxTextMargin: 5,
+      noteMargin: 10,
+      messageMargin: 35
+    }
+  });
   hljs.highlightAll();
 </script>
 </body>
