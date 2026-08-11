@@ -306,12 +306,71 @@ SELECT 'training', 'SUCCESS', PARSE_JSON('{"metrics": {...}}'), CURRENT_TIMESTAM
   <h2 id="inference">Inference (Batch &amp; Real-Time)</h2>
 
   <h3>Batch Inference</h3>
-  <p>Uses the Model Registry's <code>model.run()</code> method on a warehouse:</p>
+  <p>Batch inference scores the entire Feature View table using the <strong>default model version</strong> from the Model Registry. It runs on a <strong>warehouse</strong> (no SPCS service needed) and writes predictions to an output table.</p>
+
+  <h4>Architecture</h4>
+  <pre><code>Feature View Table              Model Registry               Output Table
+┌─────────────────────────┐   ┌───────────────────────┐   ┌────────────────────────┐
+│ CUSTOMER_RISK_FEATURES  │   │ MLOPS_FRAUD_DETECTOR  │   │ BATCH_PREDICTIONS      │
+│ $V1 (5000 rows)         │──>│ .default (V12)        │──>│ (5000 scored rows)     │
+│                         │   │                       │   │                        │
+│ 12 feature columns      │   │ mv.run(input_df,      │   │ + output_feature_0     │
+│                         │   │   "predict_proba")    │   │ + output_feature_1     │
+└─────────────────────────┘   └───────────────────────┘   └────────────────────────┘
+         │                             │                              │
+         └──── Warehouse compute ──────┘                              ▼
+                                                            Validation checks:
+                                                            - No NULL predictions
+                                                            - P(0)+P(1) ≈ 1.0</code></pre>
+
+  <h4>When It Runs</h4>
+  <table>
+    <thead><tr><th>CI/CD Stage</th><th>Environment</th><th>Purpose</th></tr></thead>
+    <tbody>
+      <tr><td>deploy-stage (step 5)</td><td>STAGE</td><td>Validate newly registered model works</td></tr>
+      <tr><td>deploy-prod (step 2)</td><td>PROD</td><td>Validate model runs correctly in PROD</td></tr>
+    </tbody>
+  </table>
+
+  <h4>Code Pattern</h4>
   <pre><code>from snowflake.ml.registry import Registry
 
 reg = Registry(session, database_name="SNOW_MLOPS_PROD", schema_name="ML")
-mv = reg.get_model("MLOPS_FRAUD_DETECTOR").default
-predictions = mv.run(input_df, function_name="predict_proba")</code></pre>
+model = reg.get_model("MLOPS_FRAUD_DETECTOR")
+mv = model.default                              # Current DEFAULT version (e.g., V12)
+
+input_df = session.table('DB.SCHEMA."CUSTOMER_RISK_FEATURES$V1"')
+predictions_df = mv.run(input_df, function_name="predict_proba")
+
+predictions_df.write.mode("overwrite").save_as_table("BATCH_PREDICTIONS")</code></pre>
+
+  <h4>Output Schema</h4>
+  <table>
+    <thead><tr><th>Column</th><th>Type</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td><em>(all input features)</em></td><td>-</td><td>Passed through from input</td></tr>
+      <tr><td><code>output_feature_0</code></td><td>FLOAT</td><td>P(legitimate) — probability of class 0</td></tr>
+      <tr><td><code>output_feature_1</code></td><td>FLOAT</td><td>P(fraud) — probability of class 1</td></tr>
+    </tbody>
+  </table>
+
+  <h4>Validation Checks</h4>
+  <ul>
+    <li><strong>No NULLs:</strong> If any prediction is NULL, the model failed to score that row (exit code 1)</li>
+    <li><strong>Probability sanity:</strong> P(class0) + P(class1) must be within 0.01 of 1.0</li>
+  </ul>
+
+  <h4>How It Works Under the Hood</h4>
+  <p>When the model was registered with <code>conda_dependencies=["xgboost==3.3.0", "scikit-learn"]</code>, Snowflake created a <strong>vectorized Python UDF</strong> backed by the serialized model. <code>mv.run()</code> invokes that UDF over the input DataFrame — all computation stays inside the warehouse, no data leaves Snowflake, no SPCS service needed.</p>
+
+  <h4>Files</h4>
+  <table>
+    <thead><tr><th>File</th><th>Role</th></tr></thead>
+    <tbody>
+      <tr><td><code>scripts/run_batch_inference.py</code></td><td>CI entry point: orchestrates scoring + validation</td></tr>
+      <tr><td><code>source/serving/batch_inference.py</code></td><td>Core logic: <code>run_batch_inference()</code> and <code>validate_predictions()</code></td></tr>
+    </tbody>
+  </table>
 
   <h3>Real-Time Inference (SPCS + Gateway)</h3>
   <p>Models are deployed as SPCS container services behind a Snowflake Gateway for HTTP access.</p>
