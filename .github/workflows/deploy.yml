@@ -123,7 +123,7 @@ jobs:
 
   # ──────────────────────────────────────────────────────────────────────
   # PROD: Model deployment (requires approval)
-  # Gated by: (1) STAGE must pass, (2) PROD environment required reviewers
+  # Gated by: (1) STAGE must pass, (2) PROD environment requires reviewer approval
   # ──────────────────────────────────────────────────────────────────────
   deploy-prod:
     needs: deploy-stage
