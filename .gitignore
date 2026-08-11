@@ -45,3 +45,4 @@ htmlcov/
 
 # uv
 uv.lock
+# E2E test trigger
