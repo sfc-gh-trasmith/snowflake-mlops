@@ -64,9 +64,20 @@ PIPELINE_CONFIG = {
     # Deployment toggles
     "deploy_batch_inference": "true",
     "deploy_realtime_service": "true",
-    "enable_model_monitor": "false",
+    "enable_model_monitor": "true",
     # Task configuration
     "task_timeout_ms": "7200000",  # 2 hours (max: 86400000 = 24h)
     # Internal stage for pipeline code
     "pipeline_stage": f"@{DATABASE}.{SCHEMA}.PIPELINE_STAGE",
+}
+
+# Model Monitor configuration
+MONITOR_CONFIG = {
+    "monitor_name": "FRAUD_DETECTOR_MONITOR",
+    "function_name": "predict_proba",
+    "source_table": "BATCH_PREDICTIONS",
+    "timestamp_column": "PREDICTION_TS",
+    "prediction_columns": ["output_feature_1"],  # P(fraud)
+    "refresh_interval": "1 day",
+    "aggregation_window": "7 days",
 }
