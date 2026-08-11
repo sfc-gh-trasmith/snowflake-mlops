@@ -373,18 +373,100 @@ predictions_df.write.mode("overwrite").save_as_table("BATCH_PREDICTIONS")</code>
   </table>
 
   <h3>Real-Time Inference (SPCS + Gateway)</h3>
-  <p>Models are deployed as SPCS container services behind a Snowflake Gateway for HTTP access.</p>
+  <p>The latest model version is deployed as a <strong>containerized SPCS service</strong> behind a <strong>Snowflake Gateway</strong> for HTTP access. Uses a <strong>blue/green deployment</strong> strategy for zero-downtime rollouts.</p>
 
-  <h4>Blue/Green Deployment</h4>
+  <h4>Architecture</h4>
+  <pre><code>Model Registry                 SPCS Compute Pool                    Gateway
+┌───────────────────┐       ┌─────────────────────────────┐     ┌──────────────────────┐
+│ MLOPS_FRAUD_      │       │ SNOW_MLOPS_PROD_POOL        │     │ FRAUD_DETECTOR_      │
+│ DETECTOR          │──────>│                             │     │ GATEWAY              │
+│ DEFAULT: V12      │       │ MLOPS_FRAUD_DETECTOR_       │     │                      │
+└───────────────────┘       │ SERVICE_V12 (container)     │<────│ traffic_split:       │
+                            │   - XGBoost model loaded    │     │   SERVICE_V12: 100%  │
+                            │   - REST endpoint /inference│     │                      │
+                            │   - max_instances: 2        │     │ ingress_url: https://│
+                            └─────────────────────────────┘     └──────────────────────┘
+                                                                         ▲
+                                                                         │
+                                                                  External clients
+                                                                  (HTTPS requests)</code></pre>
+
+  <h4>Blue/Green Deployment Flow (6 steps)</h4>
+  <table>
+    <thead><tr><th>Step</th><th>Action</th><th>Detail</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td>Get latest model version</td><td><code>SHOW MODELS</code> &rarr; reads <code>default_version_name</code> (e.g., V12)</td></tr>
+      <tr><td>2</td><td>Determine service names</td><td>New: <code>MLOPS_FRAUD_DETECTOR_SERVICE_V12</code>, Old: <code>..._V11</code></td></tr>
+      <tr><td>3</td><td>Create new versioned service</td><td><code>mv.create_service()</code> &mdash; builds container image on compute pool</td></tr>
+      <tr><td>4</td><td>Wait for READY</td><td>Polls <code>SYSTEM$GET_SERVICE_STATUS()</code> every 15s, up to 10 min</td></tr>
+      <tr><td>5</td><td>Health check</td><td>Test prediction via <code>mv.run(sample, service_name=...)</code></td></tr>
+      <tr><td>6</td><td>Shift traffic + cleanup</td><td><code>ALTER GATEWAY</code> &rarr; 100% to new service, then <code>DROP SERVICE</code> old</td></tr>
+    </tbody>
+  </table>
+
+  <h4>Service Creation</h4>
+  <pre><code>from snowflake.ml.registry import Registry
+
+reg = Registry(session, database_name="SNOW_MLOPS_PROD", schema_name="ML")
+mv = reg.get_model("MLOPS_FRAUD_DETECTOR").version("V12")
+
+mv.create_service(
+    service_name="MLOPS_FRAUD_DETECTOR_SERVICE_V12",
+    service_compute_pool="SNOW_MLOPS_PROD_POOL",
+    image_build_compute_pool="SNOW_MLOPS_PROD_POOL",
+    ingress_enabled=True,
+    max_instances=2,
+)</code></pre>
+
+  <h4>Health Check</h4>
+  <p>Before shifting traffic, a test prediction is sent directly to the new service:</p>
+  <pre><code># Targets the new service specifically (bypasses gateway)
+result = mv.run(sample_df, function_name="predict_proba",
+                service_name="MLOPS_FRAUD_DETECTOR_SERVICE_V12")
+
+# Validates:
+# - output_feature_0 and output_feature_1 columns exist
+# - Probabilities sum to ~1.0 (within 0.01 tolerance)</code></pre>
+
+  <h4>Gateway Traffic Shift</h4>
+  <pre><code>ALTER GATEWAY SNOW_MLOPS_PROD.ML.FRAUD_DETECTOR_GATEWAY
+FROM SPECIFICATION $$
+  spec:
+    type: traffic_split
+    split_type: custom
+    targets:
+      - type: endpoint
+        value: SNOW_MLOPS_PROD.ML.MLOPS_FRAUD_DETECTOR_SERVICE_V12!inference
+        weight: 100
+$$</code></pre>
+
+  <h4>Gateway Access</h4>
+  <pre><code>-- Get the gateway URL
+DESC GATEWAY SNOW_MLOPS_PROD.ML.FRAUD_DETECTOR_GATEWAY
+-- Returns: ingress_url (e.g., https://&lt;hash&gt;.snowflakecomputing.app)</code></pre>
+
+  <h4>Key Details</h4>
+  <table>
+    <thead><tr><th>Aspect</th><th>Value</th></tr></thead>
+    <tbody>
+      <tr><td>Compute</td><td>SPCS (<code>SNOW_MLOPS_PROD_POOL</code>, CPU_X64_M, 1-3 nodes)</td></tr>
+      <tr><td>Service naming</td><td><code>MLOPS_FRAUD_DETECTOR_SERVICE_{VERSION}</code></td></tr>
+      <tr><td>Container build time</td><td>~2-5 min (image built on compute pool)</td></tr>
+      <tr><td>Max instances</td><td>2 (auto-scales)</td></tr>
+      <tr><td>Zero downtime</td><td>Old service stays live until new is READY + health-checked</td></tr>
+      <tr><td>Cleanup</td><td>Old service dropped after gateway traffic shifts</td></tr>
+      <tr><td>READY timeout</td><td>10 minutes (configurable)</td></tr>
+      <tr><td>File</td><td><code>scripts/deploy_prod_service.py</code></td></tr>
+    </tbody>
+  </table>
+
+  <h4>Rollback</h4>
+  <p>If the real-time service has issues after deployment, the <code>rollback.yml</code> workflow:</p>
   <ol>
-    <li>Create new service: <code>MLOPS_FRAUD_DETECTOR_SERVICE_V12</code></li>
-    <li>Wait for health check (READY status)</li>
-    <li>Shift gateway traffic: <code>ALTER GATEWAY ... SET ENDPOINTS</code></li>
-    <li>Remove old service after validation</li>
+    <li>Sets model DEFAULT back to previous version (e.g., V11)</li>
+    <li>Runs <code>deploy_prod_service.py</code> again &rarr; creates <code>_V11</code> service, shifts gateway back</li>
+    <li>Drops the broken <code>_V12</code> service</li>
   </ol>
-
-  <h4>Gateway</h4>
-  <pre><code>DESCRIBE GATEWAY SNOW_MLOPS_PROD.ML.FRAUD_DETECTOR_GATEWAY</code></pre>
 
 
   <h2 id="cicd">CI/CD Pipeline</h2>
