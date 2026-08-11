@@ -81,3 +81,16 @@ MONITOR_CONFIG = {
     "refresh_interval": "1 day",
     "aggregation_window": "7 days",
 }
+
+# Experiment Tracking configuration
+EXPERIMENT_CONFIG = {
+    "enabled": "true",
+    "experiment_name": "FRAUD_DETECTION_TRAINING",
+    "run_name_prefix": "pipeline",  # run name = prefix + timestamp
+}
+
+# Feature View refresh configuration
+FEATURE_VIEW_CONFIG = {
+    "customer_features_refresh": "1 hour",  # TARGET_LAG for CUSTOMER_RISK_FEATURES
+    "transaction_features_refresh": "1 hour",  # TARGET_LAG for TRANSACTION_CONTEXT_FEATURES
+}

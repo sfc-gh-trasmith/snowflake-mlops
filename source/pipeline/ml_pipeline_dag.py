@@ -25,6 +25,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from config import (
+    EXPERIMENT_CONFIG,
     FEATURE_VIEW_NAME,
     FEATURE_VIEW_VERSION,
     PIPELINE_CONFIG,
@@ -117,6 +118,10 @@ def build_train_model_remote(cfg: dict):
     src_schema = cfg["source_schema"]
     fv = f"{FEATURE_VIEW_NAME}${FEATURE_VIEW_VERSION}"
     stage = f"@{db}.{schema}.PIPELINE_STAGE"
+    # Experiment tracking config (captured by closure)
+    exp_enabled = EXPERIMENT_CONFIG.get("enabled", "false") == "true"
+    exp_name = EXPERIMENT_CONFIG.get("experiment_name", "FRAUD_DETECTION_TRAINING")
+    exp_run_prefix = EXPERIMENT_CONFIG.get("run_name_prefix", "pipeline")
 
     @remote(
         pool,
@@ -209,6 +214,20 @@ def build_train_model_remote(cfg: dict):
         session.file.put(
             "/tmp/sample_input.json", f"@{db}.{schema}.PIPELINE_STAGE/artifacts/", auto_compress=False, overwrite=True
         )
+
+        # Experiment tracking
+        if exp_enabled:
+            from datetime import datetime
+
+            from snowflake.ml.experiment import ExperimentTracking
+
+            exp = ExperimentTracking(session=session, database_name=db, schema_name=schema)
+            exp.set_experiment(exp_name)
+            run_name = f"{exp_run_prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            with exp.start_run(run_name):
+                exp.log_params(params)
+                exp.log_params({"feature_view": fv, "dataset_rows": len(df), "test_size": 0.2})
+                exp.log_metrics(metrics)
 
         # Write metrics to results table
         result = {"status": "success", "step": "training", "metrics": metrics}
