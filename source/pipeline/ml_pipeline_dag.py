@@ -227,8 +227,10 @@ def build_train_model_remote(cfg: dict):
             run_name = f"{exp_run_prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
             with exp.start_run(run_name):
                 exp.log_params(params)
-                exp.log_params({"feature_view": fv, "dataset_rows": len(df), "test_size": 0.2})
-                exp.log_metrics(metrics)
+                exp.log_params({"feature_view": fv, "dataset_rows": str(len(df)), "test_size": "0.2"})
+                # log_metrics only accepts numeric values — filter out strings
+                numeric_metrics = {k: v for k, v in metrics.items() if isinstance(v, (int, float))}
+                exp.log_metrics(numeric_metrics)
 
         # Write metrics to results table
         result = {"status": "success", "step": "training", "metrics": metrics}
