@@ -160,6 +160,10 @@ def main():
     if stage_only:
         print("\n[3/3] STAGE_ONLY mode — skipping PROD promotion.")
         print(f"  Candidate {version} is ready for human review.")
+        # Write version back to metrics file for notify step
+        metrics["model_version"] = version
+        with open(metrics_file, "w") as f:
+            json.dump(metrics, f)
         write_summary(metrics, version, True)
 
         print("\n" + "=" * 60)
