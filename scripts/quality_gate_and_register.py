@@ -154,18 +154,34 @@ def main():
     version = register_model(session, metrics)
     print(f"  Registered: {MODEL_NAME}/{version}")
 
-    # Replicate to PROD
-    print(f"\n[3/3] Promoting model {version} to PROD...")
-    replicate_to_prod(session, version)
-    print(f"  Model replicated to {PROD_DATABASE}.{PROD_SCHEMA}.{MODEL_NAME}/{version}")
+    # Check if stage-only mode (scheduled retrain — skip PROD promotion)
+    stage_only = os.getenv("STAGE_ONLY", "false").lower() == "true"
 
-    write_summary(metrics, version, True)
+    if stage_only:
+        print("\n[3/3] STAGE_ONLY mode — skipping PROD promotion.")
+        print(f"  Candidate {version} is ready for human review.")
+        write_summary(metrics, version, True)
 
-    print("\n" + "=" * 60)
-    print(f"MODEL PROMOTED: {MODEL_NAME}/{version}")
-    print("  Quality gate: PASSED")
-    print(f"  Registered in: {DATABASE}.{SCHEMA}")
-    print(f"  Replicated to: {PROD_DATABASE}.{PROD_SCHEMA}")
+        print("\n" + "=" * 60)
+        print(f"CANDIDATE REGISTERED: {MODEL_NAME}/{version}")
+        print("  Quality gate: PASSED")
+        print(f"  Registered in: {DATABASE}.{SCHEMA}")
+        print("  Awaiting human approval for PROD promotion.")
+        print("=" * 60)
+    else:
+        # Replicate to PROD
+        print(f"\n[3/3] Promoting model {version} to PROD...")
+        replicate_to_prod(session, version)
+        print(f"  Model replicated to {PROD_DATABASE}.{PROD_SCHEMA}.{MODEL_NAME}/{version}")
+
+        write_summary(metrics, version, True)
+
+        print("\n" + "=" * 60)
+        print(f"MODEL PROMOTED: {MODEL_NAME}/{version}")
+        print("  Quality gate: PASSED")
+        print(f"  Registered in: {DATABASE}.{SCHEMA}")
+        print(f"  Replicated to: {PROD_DATABASE}.{PROD_SCHEMA}")
+        print("=" * 60)
     print("=" * 60)
 
     session.close()

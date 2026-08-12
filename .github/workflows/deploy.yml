@@ -9,13 +9,18 @@ on:
       - 'LICENSE'
   workflow_dispatch:
     inputs:
+      promote_only:
+        description: 'Skip training, promote existing STAGE candidate to PROD'
+        type: boolean
+        default: false
       reason:
-        description: 'Reason for manual retrain (e.g., fresh data, threshold change)'
+        description: 'Reason for manual trigger (e.g., promote candidate, fresh data retrain)'
         required: false
 
 permissions:
   id-token: write
   contents: write
+  issues: write
 
 env:
   SNOWFLAKE_ACCOUNT: ${{ vars.SNOWFLAKE_ACCOUNT }}
@@ -66,9 +71,11 @@ jobs:
 
   # ──────────────────────────────────────────────────────────────────────
   # STAGE: Train, validate, replicate model to PROD registry
+  # Skipped when promote_only=true (candidate already in STAGE)
   # ──────────────────────────────────────────────────────────────────────
   deploy-stage:
     needs: [lint, test]
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.promote_only) }}
     runs-on: ubuntu-latest
     environment: STAGE
     env:
@@ -123,10 +130,12 @@ jobs:
 
   # ──────────────────────────────────────────────────────────────────────
   # PROD: Model deployment (requires approval)
-  # Gated by: (1) STAGE must pass, (2) PROD environment requires reviewer approval
+  # Gated by: PROD environment requires reviewer approval
+  # When promote_only=true, deploy-stage is skipped so we use always() to allow running
   # ──────────────────────────────────────────────────────────────────────
   deploy-prod:
     needs: deploy-stage
+    if: ${{ always() && (needs.deploy-stage.result == 'success' || (github.event_name == 'workflow_dispatch' && inputs.promote_only)) }}
     runs-on: ubuntu-latest
     environment: PROD
     env:

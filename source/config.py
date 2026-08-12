@@ -94,3 +94,11 @@ FEATURE_VIEW_CONFIG = {
     "customer_features_refresh": "1 hour",  # TARGET_LAG for CUSTOMER_RISK_FEATURES
     "transaction_features_refresh": "1 hour",  # TARGET_LAG for TRANSACTION_CONTEXT_FEATURES
 }
+
+# Scheduled Retraining configuration
+RETRAIN_CONFIG = {
+    "enabled": "true",
+    "schedule": "USING CRON 0 6 * * MON America/Los_Angeles",  # Every Monday 6AM PT
+    "stage_only": "true",  # Train + register in STAGE only; human promotes to PROD
+    "notify_github_issue": "true",  # Create GitHub issue when candidate is ready
+}

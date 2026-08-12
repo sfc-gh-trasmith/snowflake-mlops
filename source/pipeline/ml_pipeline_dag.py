@@ -29,6 +29,7 @@ from config import (
     FEATURE_VIEW_NAME,
     FEATURE_VIEW_VERSION,
     PIPELINE_CONFIG,
+    RETRAIN_CONFIG,
 )
 from snowflake.core import Root
 from snowflake.core._common import CreateMode
@@ -348,7 +349,14 @@ def deploy_dag(env: str):
     root = Root(session)
     stage_location = f"@{db}.{schema}.PIPELINE_STAGE"
 
-    with DAG(DAG_NAME, warehouse=wh) as dag:
+    # Add schedule for periodic retraining (if enabled)
+    dag_schedule = None
+    if RETRAIN_CONFIG.get("enabled", "false") == "true":
+        dag_schedule = RETRAIN_CONFIG.get("schedule")
+        if dag_schedule:
+            print(f"  Schedule: {dag_schedule}")
+
+    with DAG(DAG_NAME, warehouse=wh, schedule=dag_schedule) as dag:
         # Feature Engineering task
         if fe_compute == "spcs":
             fe_func = build_feature_eng_remote(cfg)
@@ -398,6 +406,11 @@ def deploy_dag(env: str):
     dag_op = DAGOperation(schema_ref)
     dag_op.deploy(dag, mode=CreateMode.or_replace)
     print(f"  DAG deployed: {DAG_NAME}")
+
+    # Resume root task if scheduled (so cron fires)
+    if dag_schedule:
+        session.sql(f"ALTER TASK {db}.{schema}.{DAG_NAME} RESUME").collect()
+        print("  Root task resumed (scheduled retraining active)")
 
     session.close()
     print("Deploy complete.")
