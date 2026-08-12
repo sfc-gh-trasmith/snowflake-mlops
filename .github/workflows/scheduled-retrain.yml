@@ -46,6 +46,8 @@ jobs:
 
       - name: Deploy Task DAG (ensures schedule is set)
         run: uv run python source/pipeline/ml_pipeline_dag.py --deploy --env stage
+        env:
+          RESUME_SCHEDULE: 'true'
 
       - name: Trigger ML training pipeline
         run: uv run python source/pipeline/ml_pipeline_dag.py --execute --env stage

@@ -418,8 +418,9 @@ def deploy_dag(env: str):
     dag_op.deploy(dag, mode=CreateMode.or_replace)
     print(f"  DAG deployed: {DAG_NAME}")
 
-    # Resume root task if scheduled (so cron fires)
-    if dag_schedule:
+    # Only resume root task if explicitly requested (scheduled-retrain workflow sets RESUME_SCHEDULE=true).
+    # Do NOT auto-resume — otherwise cron fires during CI runs and interferes with wait_for_task.
+    if os.getenv("RESUME_SCHEDULE", "false").lower() == "true" and dag_schedule:
         session.sql(f"ALTER TASK {db}.{schema}.{DAG_NAME} RESUME").collect()
         print("  Root task resumed (scheduled retraining active)")
 
