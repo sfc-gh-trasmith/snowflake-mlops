@@ -202,7 +202,7 @@ def main():
             ingress_enabled=True,
             max_instances=2,
             gpu_requests=None,
-            enable_remote_inference_auto_capture=True,
+            autocapture=True,
         )
         print("  Service creation initiated.")
     except Exception as e:

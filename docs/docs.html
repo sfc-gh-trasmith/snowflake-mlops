@@ -471,18 +471,70 @@ DESC GATEWAY SNOW_MLOPS_PROD.ML.FRAUD_DETECTOR_GATEWAY
 
   <h2 id="cicd">CI/CD Pipeline</h2>
 
-  <h3>Workflow: deploy.yml</h3>
-  <p>Triggered on push to <code>main</code> or manual dispatch. Four jobs in sequence:</p>
+  <h3>Workflows Overview</h3>
+  <table>
+    <thead><tr><th>Workflow</th><th>Trigger</th><th>Purpose</th></tr></thead>
+    <tbody>
+      <tr><td><code>pr-checks.yml</code></td><td>PR to <code>main</code></td><td>Lint + unit tests (must pass before merge)</td></tr>
+      <tr><td><code>deploy.yml</code></td><td>Push to <code>main</code> or manual dispatch</td><td>Full pipeline: train &rarr; promote &rarr; deploy to PROD</td></tr>
+      <tr><td><code>scheduled-retrain.yml</code></td><td>Weekly cron (Mon 6AM PT) or manual dispatch</td><td>Retrain on fresh data, register candidate in STAGE only</td></tr>
+      <tr><td><code>rollback.yml</code></td><td>Manual dispatch</td><td>Revert PROD to a previous model version</td></tr>
+    </tbody>
+  </table>
 
+  <h3>Two Promotion Paths</h3>
+  <table>
+    <thead><tr><th>Path</th><th>When</th><th>What Happens</th><th>PROD Approval</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Code Promotion</strong></td><td>Push to <code>main</code> (new features, hyperparams, pipeline changes)</td><td>lint &rarr; test &rarr; deploy-stage (train+register+promote) &rarr; deploy-prod</td><td>Required (PROD environment reviewer)</td></tr>
+      <tr><td><strong>Candidate Promotion</strong></td><td>Manual dispatch with <code>promote_only=true</code> (after reviewing scheduled retrain candidate)</td><td>lint &rarr; test &rarr; <em>skip stage</em> &rarr; deploy-prod directly</td><td>Required (PROD environment reviewer)</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Approval Flow</h3>
+  <p>Every PROD deployment requires explicit human approval via the <strong>GitHub Environment protection rule</strong> on the <code>PROD</code> environment:</p>
+  <ol>
+    <li>deploy-stage completes (or skipped for promote_only)</li>
+    <li>deploy-prod enters <strong>"Waiting for review"</strong> state</li>
+    <li>You review metrics in the Job Summary or GitHub Issue</li>
+    <li>Go to Actions &rarr; click <strong>"Review deployments"</strong> &rarr; Approve</li>
+    <li>deploy-prod runs: Feature Views &rarr; Batch inference &rarr; SPCS deploy &rarr; Gateway &rarr; Tag release</li>
+  </ol>
+
+  <h3>Workflow: deploy.yml (Main Pipeline)</h3>
   <table>
     <thead><tr><th>Job</th><th>Steps</th><th>Environment</th></tr></thead>
     <tbody>
       <tr><td><strong>lint</strong></td><td>ruff check + format check</td><td>-</td></tr>
       <tr><td><strong>test</strong></td><td>pytest (unit tests only)</td><td>-</td></tr>
       <tr><td><strong>deploy-stage</strong></td><td>Deploy DAG &rarr; Execute &rarr; Wait &rarr; Quality gate &rarr; Register &rarr; Batch inference</td><td>STAGE</td></tr>
-      <tr><td><strong>deploy-prod</strong></td><td>Feature Views &rarr; Batch inference &rarr; SPCS deploy &rarr; Gateway verify &rarr; Tag release</td><td>PROD (approval required)</td></tr>
+      <tr><td><strong>deploy-prod</strong></td><td>Feature Views &rarr; Batch inference &rarr; SPCS deploy &rarr; Monitor setup &rarr; Gateway verify &rarr; Tag release</td><td>PROD (approval required)</td></tr>
     </tbody>
   </table>
+  <p><strong>Manual dispatch inputs:</strong></p>
+  <ul>
+    <li><code>promote_only</code> (boolean) &mdash; skip training, go straight to PROD deployment</li>
+    <li><code>reason</code> (string) &mdash; why this was triggered manually</li>
+  </ul>
+
+  <h3>Workflow: scheduled-retrain.yml (Periodic Retraining)</h3>
+  <p>Trains a new model on fresh data without promoting to PROD. Creates a GitHub Issue so a human can review and approve.</p>
+  <table>
+    <thead><tr><th>Step</th><th>Action</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td>Deploy Task DAG (with <code>RESUME_SCHEDULE=true</code> to enable cron)</td></tr>
+      <tr><td>2</td><td>Trigger pipeline (FEATURE_ENG &rarr; TRAIN &rarr; EVALUATE)</td></tr>
+      <tr><td>3</td><td>Wait for ML Jobs to complete</td></tr>
+      <tr><td>4</td><td>Quality gate + register (<code>STAGE_ONLY=true</code> &mdash; does NOT promote to PROD)</td></tr>
+      <tr><td>5</td><td>Create GitHub Issue: "Model Candidate Ready: V2" with metrics table</td></tr>
+    </tbody>
+  </table>
+  <p><strong>To promote the candidate:</strong></p>
+  <ol>
+    <li>Review the GitHub Issue (metrics, version)</li>
+    <li>Go to Actions &rarr; Deploy &rarr; Run workflow &rarr; check <code>promote_only: true</code></li>
+    <li>Approve the PROD deployment when prompted</li>
+  </ol>
 
   <h3>Authentication</h3>
   <p>CI uses <strong>OIDC workload identity</strong> (zero secrets stored in GitHub). The Snowflake CLI action handles token exchange automatically.</p>
@@ -494,13 +546,10 @@ DESC GATEWAY SNOW_MLOPS_PROD.ML.FRAUD_DETECTOR_GATEWAY
     </tbody>
   </table>
 
-  <h3>Workflow: pr-checks.yml</h3>
-  <p>Triggered on PRs to <code>main</code>. Runs lint and unit tests. Both must pass before merge is allowed (branch protection).</p>
-
   <h3>Release Tagging</h3>
   <p>On successful PROD deployment, the workflow creates a git tag via GitHub API:</p>
   <pre><code>prod/{MODEL_VERSION}-{YYYYMMDD}-{HHMMSS}
-# Example: prod/V12-20260810-201724</code></pre>
+# Example: prod/V1-20260812-031500</code></pre>
   <p>This tag corresponds 1:1 with the model version set as DEFAULT in the PROD Model Registry.</p>
 
 
@@ -578,7 +627,36 @@ PIPELINE_CONFIG = {
     # Deployment toggles
     "deploy_batch_inference": "true",
     "deploy_realtime_service": "true",
-    "enable_model_monitor": "false",
+    "enable_model_monitor": "true",
+}
+
+# Experiment Tracking
+EXPERIMENT_CONFIG = {
+    "enabled": "true",
+    "experiment_name": "FRAUD_DETECTION_TRAINING",
+    "run_name_prefix": "pipeline",
+}
+
+# Feature View refresh intervals
+FEATURE_VIEW_CONFIG = {
+    "customer_features_refresh": "1 hour",
+    "transaction_features_refresh": "1 hour",
+}
+
+# Model Monitor
+MONITOR_CONFIG = {
+    "monitor_name": "FRAUD_DETECTOR_MONITOR",
+    "refresh_interval": "1 day",
+    "aggregation_window": "7 days",
+    "prediction_columns": ["output_feature_1"],
+}
+
+# Scheduled Retraining
+RETRAIN_CONFIG = {
+    "enabled": "true",
+    "schedule": "USING CRON 0 6 * * MON America/Los_Angeles",
+    "stage_only": "true",
+    "notify_github_issue": "true",
 }
 
 # Quality gate thresholds
@@ -613,6 +691,9 @@ MIN_RECALL = 0.30</code></pre>
       <tr><td>Root task can't be resumed</td><td>Tasks without SCHEDULE/AFTER can't be resumed</td><td>Use <code>EXECUTE TASK</code> for root; only resume children</td></tr>
       <tr><td><code>SYSTEM$ML_JOB_SUBMIT</code> doesn't exist</td><td>Not a real Snowflake function</td><td>Use Python SDK <code>DAGTask(definition=@remote_func)</code></td></tr>
       <tr><td>Git tag push fails in CI</td><td><code>git push</code> lacks credentials in GH Actions</td><td>Use <code>gh api repos/.../git/refs</code> instead</td></tr>
+      <tr><td><code>log_metrics()</code> rejects non-numeric values</td><td>ExperimentTracking only accepts int/float metrics</td><td>Filter metrics dict: <code>{k:v for k,v in m.items() if isinstance(v,(int,float))}</code></td></tr>
+      <tr><td>Scheduled cron fires during CI runs</td><td>Root task RESUME enables cron, which creates new executions while CI waits</td><td>Only resume via <code>RESUME_SCHEDULE=true</code> env var in scheduled-retrain workflow</td></tr>
+      <tr><td><code>wait_for_task</code> picks up stale failures</td><td>TASK_HISTORY returns older failed runs before new run completes</td><td>Filter by root task <code>SCHEDULED_TIME</code> to only see current execution</td></tr>
     </tbody>
   </table>
 
