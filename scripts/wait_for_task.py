@@ -38,16 +38,45 @@ def main():
     }
     start = time.time()
 
+    # Get the most recent root task execution time as our baseline
+    # Only look at child tasks scheduled AFTER this time
+    root_rows = session.sql(f"""
+        SELECT SCHEDULED_TIME
+        FROM TABLE(INFORMATION_SCHEMA.TASK_HISTORY(
+            TASK_NAME => 'ML_TRAINING_PIPELINE',
+            RESULT_LIMIT => 1
+        ))
+        WHERE DATABASE_NAME = '{DATABASE}'
+        ORDER BY SCHEDULED_TIME DESC
+    """).collect()
+    if root_rows:
+        execution_start = root_rows[0]["SCHEDULED_TIME"]
+        print(f"  Root task executed at: {execution_start}")
+    else:
+        execution_start = None
+        print("  WARNING: No root task execution found. Looking at last hour.")
+
     while time.time() - start < MAX_WAIT:
-        rows = session.sql(f"""
-            SELECT NAME, STATE, ERROR_MESSAGE
-            FROM TABLE(INFORMATION_SCHEMA.TASK_HISTORY(
-                SCHEDULED_TIME_RANGE_START => DATEADD('hour', -1, CURRENT_TIMESTAMP()),
-                RESULT_LIMIT => 20
-            ))
-            WHERE DATABASE_NAME = '{DATABASE}'
-            ORDER BY SCHEDULED_TIME DESC
-        """).collect()
+        if execution_start:
+            rows = session.sql(f"""
+                SELECT NAME, STATE, ERROR_MESSAGE
+                FROM TABLE(INFORMATION_SCHEMA.TASK_HISTORY(
+                    SCHEDULED_TIME_RANGE_START => '{execution_start}'::TIMESTAMP_LTZ,
+                    RESULT_LIMIT => 20
+                ))
+                WHERE DATABASE_NAME = '{DATABASE}'
+                ORDER BY SCHEDULED_TIME DESC
+            """).collect()
+        else:
+            rows = session.sql(f"""
+                SELECT NAME, STATE, ERROR_MESSAGE
+                FROM TABLE(INFORMATION_SCHEMA.TASK_HISTORY(
+                    SCHEDULED_TIME_RANGE_START => DATEADD('hour', -1, CURRENT_TIMESTAMP()),
+                    RESULT_LIMIT => 20
+                ))
+                WHERE DATABASE_NAME = '{DATABASE}'
+                ORDER BY SCHEDULED_TIME DESC
+            """).collect()
 
         completed = {}
         for row in rows:
