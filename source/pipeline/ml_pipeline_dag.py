@@ -352,9 +352,18 @@ def deploy_dag(env: str):
     # Add schedule for periodic retraining (if enabled)
     dag_schedule = None
     if RETRAIN_CONFIG.get("enabled", "false") == "true":
-        dag_schedule = RETRAIN_CONFIG.get("schedule")
-        if dag_schedule:
-            print(f"  Schedule: {dag_schedule}")
+        schedule_str = RETRAIN_CONFIG.get("schedule", "")
+        if schedule_str:
+            from snowflake.core.task import Cron
+
+            # Parse "USING CRON <expr> <tz>" format
+            parts = schedule_str.replace("USING CRON ", "").strip()
+            # Split: last token is timezone, rest is cron expression
+            tokens = parts.split()
+            tz = tokens[-1]
+            cron_expr = " ".join(tokens[:-1])
+            dag_schedule = Cron(cron_expr, tz)
+            print(f"  Schedule: {cron_expr} ({tz})")
 
     with DAG(DAG_NAME, warehouse=wh, schedule=dag_schedule) as dag:
         # Feature Engineering task
