@@ -20,10 +20,14 @@ from snowpark_session import create_snowpark_session
 def main():
     parser = argparse.ArgumentParser(description="Set up model monitor")
     parser.add_argument("--env", default=os.getenv("ML_ENV", "prod"), choices=["dev", "stage", "prod"])
+    parser.add_argument("--validate-only", action="store_true", help="Create, verify, then drop (for STAGE validation)")
     args = parser.parse_args()
 
     print("=" * 60)
-    print("MODEL MONITOR SETUP")
+    if args.validate_only:
+        print("MODEL MONITOR VALIDATION (create → verify → drop)")
+    else:
+        print("MODEL MONITOR SETUP")
     print("=" * 60)
 
     session = create_snowpark_session()
@@ -39,6 +43,21 @@ def main():
     print(f"  State: {status.get('state', 'UNKNOWN')}")
     print(f"  Model version: {status.get('model_version', 'N/A')}")
     print(f"  Refresh interval: {status.get('refresh_interval', 'N/A')}")
+
+    # Validate-only: drop after verification (STAGE validation)
+    if args.validate_only:
+        from monitoring.model_monitor import get_env_config
+
+        cfg = get_env_config(args.env)
+        db = os.getenv("SNOWFLAKE_DATABASE", cfg["database"])
+        schema = os.getenv("SNOWFLAKE_SCHEMA", "ML")
+        session.sql(f"DROP MODEL MONITOR IF EXISTS {db}.{schema}.{monitor_name}").collect()
+        print("\n  Monitor dropped (validate-only mode).")
+        print("\n" + "=" * 60)
+        print("MODEL MONITOR VALIDATION PASSED")
+        print("=" * 60)
+        session.close()
+        return
 
     # Write to Job Summary
     summary_path = os.getenv("GITHUB_STEP_SUMMARY")
