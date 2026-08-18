@@ -109,7 +109,7 @@ Manual dispatch of the rollback workflow: sets DEFAULT version back, redeploys S
 ### 1. Clone and Install
 
 ```bash
-git clone https://github.com/sfc-gh-trasmith/snowflake-mlops.git
+git clone https://github.com/<your-org>/snowflake-mlops.git
 cd snowflake-mlops
 uv sync
 ```

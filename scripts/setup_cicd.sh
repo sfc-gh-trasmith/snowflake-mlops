@@ -19,10 +19,10 @@ set -e
 # Update these with your GitHub repo details.
 # GitHub enriches OIDC subjects with numeric IDs: owner@<owner_id>/repo@<repo_id>
 # Find yours in the Actions error log on first run, or via GitHub API.
-GITHUB_OWNER="sfc-gh-trasmith"
-GITHUB_OWNER_ID="256389544"
+GITHUB_OWNER="<your-github-username>"
+GITHUB_OWNER_ID="<your-github-owner-id>"
 GITHUB_REPO="snowflake-mlops"
-GITHUB_REPO_ID="1306141664"
+GITHUB_REPO_ID="<your-github-repo-id>"
 
 SUBJECT="repo:${GITHUB_OWNER}@${GITHUB_OWNER_ID}/${GITHUB_REPO}@${GITHUB_REPO_ID}:ref:refs/heads/main"
 STAGE_SUBJECT="repo:${GITHUB_OWNER}@${GITHUB_OWNER_ID}/${GITHUB_REPO}@${GITHUB_REPO_ID}:environment:STAGE"
