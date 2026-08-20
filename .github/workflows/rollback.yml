@@ -38,14 +38,18 @@ jobs:
         run: snow connection test -x
 
       - name: Verify target version exists
+        env:
+          MODEL_VERSION: ${{ inputs.model_version }}
         run: |
           snow sql -q "SHOW VERSIONS IN MODEL SNOW_MLOPS_PROD.ML.MLOPS_FRAUD_DETECTOR" -x
-          echo "Rolling back to version: ${{ inputs.model_version }}"
+          echo "Rolling back to version: $MODEL_VERSION"
 
       - name: Set model default version
+        env:
+          MODEL_VERSION: ${{ inputs.model_version }}
         run: |
-          snow sql -q "ALTER MODEL SNOW_MLOPS_PROD.ML.MLOPS_FRAUD_DETECTOR SET DEFAULT_VERSION = ${{ inputs.model_version }}" -x
-          echo "Model default version set to ${{ inputs.model_version }}"
+          snow sql -q "ALTER MODEL SNOW_MLOPS_PROD.ML.MLOPS_FRAUD_DETECTOR SET DEFAULT_VERSION = $MODEL_VERSION" -x
+          echo "Model default version set to $MODEL_VERSION"
 
       - name: Install uv
         uses: astral-sh/setup-uv@v4
@@ -65,18 +69,24 @@ jobs:
         timeout-minutes: 10
 
       - name: Tag rollback
+        env:
+          MODEL_VERSION: ${{ inputs.model_version }}
+          ROLLBACK_REASON: ${{ inputs.reason }}
         run: |
-          TAG="prod/${{ inputs.model_version }}-rollback-$(date +%Y%m%d-%H%M%S)"
-          git tag "$TAG" -m "ROLLBACK to ${{ inputs.model_version }}: ${{ inputs.reason }}"
+          TAG="prod/${MODEL_VERSION}-rollback-$(date +%Y%m%d-%H%M%S)"
+          git tag "$TAG" -m "ROLLBACK to ${MODEL_VERSION}: ${ROLLBACK_REASON}"
           git push origin "$TAG"
           echo "Tagged: $TAG"
 
       - name: Summary
+        env:
+          MODEL_VERSION: ${{ inputs.model_version }}
+          ROLLBACK_REASON: ${{ inputs.reason }}
         run: |
           echo "## Rollback Complete" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Rolled back to | \`${{ inputs.model_version }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Reason | ${{ inputs.reason }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Rolled back to | \`${MODEL_VERSION}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Reason | ${ROLLBACK_REASON} |" >> $GITHUB_STEP_SUMMARY
           echo "| Triggered by | ${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY

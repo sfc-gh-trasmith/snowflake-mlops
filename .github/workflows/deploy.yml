@@ -19,8 +19,8 @@ on:
 
 permissions:
   id-token: write
-  contents: write
-  issues: write
+  contents: read
+  issues: read
 
 env:
   SNOWFLAKE_ACCOUNT: ${{ vars.SNOWFLAKE_ACCOUNT }}
@@ -143,6 +143,10 @@ jobs:
     if: ${{ always() && (needs.deploy-stage.result == 'success' || (github.event_name == 'workflow_dispatch' && inputs.promote_only)) }}
     runs-on: ubuntu-latest
     environment: PROD
+    permissions:
+      id-token: write
+      contents: write
+      issues: write
     env:
       SNOWFLAKE_DATABASE: ${{ vars.SNOWFLAKE_DATABASE_PROD }}
       SNOWFLAKE_SCHEMA: ${{ vars.SNOWFLAKE_SCHEMA }}

@@ -234,10 +234,10 @@ def build_train_model_remote(cfg: dict):
 
         # Write metrics to results table
         result = {"status": "success", "step": "training", "metrics": metrics}
-        result_json = json.dumps(result).replace("'", "''")
+        result_json = json.dumps(result)
         session.sql(f"""
             INSERT INTO {db}.{schema}.PIPELINE_RESULTS (STEP, STATUS, RESULT, CREATED_AT)
-            SELECT 'training', 'SUCCESS', PARSE_JSON('{result_json}'), CURRENT_TIMESTAMP()
+            SELECT 'training', 'SUCCESS', PARSE_JSON($${result_json}$$), CURRENT_TIMESTAMP()
         """).collect()
 
         return json.dumps(result)
@@ -279,10 +279,10 @@ def build_evaluate_remote(cfg: dict):
         metrics = training_result.get("metrics", {})
 
         result = {"status": "success", "step": "evaluation", "metrics": metrics, "pipeline_status": "READY_FOR_REVIEW"}
-        result_json = json.dumps(result).replace("'", "''")
+        result_json = json.dumps(result)
         session.sql(f"""
             INSERT INTO {db}.{schema}.PIPELINE_RESULTS (STEP, STATUS, RESULT, CREATED_AT)
-            SELECT 'evaluation', 'SUCCESS', PARSE_JSON('{result_json}'), CURRENT_TIMESTAMP()
+            SELECT 'evaluation', 'SUCCESS', PARSE_JSON($${result_json}$$), CURRENT_TIMESTAMP()
         """).collect()
 
         return json.dumps(result)

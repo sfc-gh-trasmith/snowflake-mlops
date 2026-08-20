@@ -263,4 +263,4 @@ Open `docs/docs.html` in a browser for a detailed Level 300 walkthrough covering
 
 ## License
 
-MIT
+Apache-2.0
