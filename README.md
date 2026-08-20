@@ -149,9 +149,27 @@ uv run python source/pipeline/ml_pipeline_dag.py --status --env dev
 bash scripts/setup_cicd.sh
 ```
 
-Then configure GitHub repo:
-- **Variables**: `SNOWFLAKE_ACCOUNT`, `SNOWFLAKE_DATABASE_STAGE`, `SNOWFLAKE_DATABASE_PROD`, `SNOWFLAKE_SCHEMA`, `SNOWFLAKE_USER_STAGE`, `SNOWFLAKE_USER_PROD`, `ENABLE_MODEL_MONITOR`
-- **Environments**: `STAGE` (no rules), `PROD` (required reviewer)
+This creates OIDC service users (`SVC_GITHUB_ACTIONS_STAGE`, `SVC_GITHUB_ACTIONS`) for passwordless CI authentication.
+
+Then configure your GitHub repo (**Settings → Secrets and variables → Actions → Variables tab**):
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `SNOWFLAKE_ACCOUNT` | Your Snowflake account identifier | `MYORG-MYACCOUNT` |
+| `SNOWFLAKE_DATABASE_STAGE` | STAGE database name | `SNOW_MLOPS_STAGE` |
+| `SNOWFLAKE_DATABASE_PROD` | PROD database name | `SNOW_MLOPS_PROD` |
+| `SNOWFLAKE_SCHEMA` | Schema (shared across envs) | `ML` |
+| `SNOWFLAKE_USER_STAGE` | OIDC service user for STAGE | `SVC_GITHUB_ACTIONS_STAGE` |
+| `SNOWFLAKE_USER_PROD` | OIDC service user for PROD | `SVC_GITHUB_ACTIONS` |
+| `SNOWFLAKE_WAREHOUSE_STAGE` | Warehouse for STAGE jobs | `SNOW_MLOPS_STAGE_WH` |
+| `SNOWFLAKE_WAREHOUSE_PROD` | Warehouse for PROD jobs | `SNOW_MLOPS_PROD_WH` |
+| `SNOWFLAKE_COMPUTE_POOL_STAGE` | Compute pool for STAGE ML Jobs | `SNOW_MLOPS_STAGE_POOL` |
+| `SNOWFLAKE_COMPUTE_POOL_PROD` | Compute pool for PROD ML Jobs | `SNOW_MLOPS_PROD_POOL` |
+| `ENABLE_MODEL_MONITOR` | Enable monitoring in PROD (optional) | `true` |
+
+Then create **GitHub Environments** (**Settings → Environments**):
+- **`STAGE`** — no protection rules
+- **`PROD`** — add a required reviewer (this creates the human approval gate)
 
 ### 6. Test End-to-End
 
