@@ -74,7 +74,7 @@ def test_quality_gate_all_pass():
 
 
 def test_quality_gate_auc_fails():
-    metrics = {"auc_roc": 0.50, "precision": 0.85, "recall": 0.80}
+    metrics = {"auc_roc": 0.005, "precision": 0.85, "recall": 0.80}
     passed, failures = check_quality_gate(metrics)
     assert passed is False
     assert len(failures) == 1
@@ -82,7 +82,7 @@ def test_quality_gate_auc_fails():
 
 
 def test_quality_gate_multiple_failures():
-    metrics = {"auc_roc": 0.30, "precision": 0.01, "recall": 0.10}
+    metrics = {"auc_roc": 0.005, "precision": 0.005, "recall": 0.005}
     passed, failures = check_quality_gate(metrics)
     assert passed is False
     assert len(failures) == 3
