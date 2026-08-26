@@ -12,25 +12,26 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "source"))
-from config import MIN_AUC_ROC, MIN_PRECISION, MIN_RECALL, PIPELINE_CONFIG
+from config import MIN_AUC_ROC, MIN_PRECISION, MIN_RECALL, ML_RUNTIME_DEPS, PIPELINE_CONFIG
 from snowpark_session import create_snowpark_session
 
 DATABASE = os.getenv("SNOWFLAKE_DATABASE", "SNOW_MLOPS_STAGE")
 SCHEMA = os.getenv("SNOWFLAKE_SCHEMA", "ML")
 WAREHOUSE = os.getenv("SNOWFLAKE_WAREHOUSE", f"{DATABASE}_WH")
 MODEL_NAME = PIPELINE_CONFIG.get("model_name", "MLOPS_FRAUD_DETECTOR")
-PROD_DATABASE = "SNOW_MLOPS_PROD"
-PROD_SCHEMA = "ML"
 
 
 def check_quality_gate(metrics: dict) -> tuple[bool, list[str]]:
     failures = []
-    if metrics.get("auc_roc", 0) < MIN_AUC_ROC:
-        failures.append(f"AUC-ROC {metrics['auc_roc']:.4f} < {MIN_AUC_ROC}")
-    if metrics.get("precision", 0) < MIN_PRECISION:
-        failures.append(f"Precision {metrics['precision']:.4f} < {MIN_PRECISION}")
-    if metrics.get("recall", 0) < MIN_RECALL:
-        failures.append(f"Recall {metrics['recall']:.4f} < {MIN_RECALL}")
+    auc = metrics.get("auc_roc", 0)
+    precision = metrics.get("precision", 0)
+    recall = metrics.get("recall", 0)
+    if auc < MIN_AUC_ROC:
+        failures.append(f"AUC-ROC {auc:.4f} < {MIN_AUC_ROC}")
+    if precision < MIN_PRECISION:
+        failures.append(f"Precision {precision:.4f} < {MIN_PRECISION}")
+    if recall < MIN_RECALL:
+        failures.append(f"Recall {recall:.4f} < {MIN_RECALL}")
     return len(failures) == 0, failures
 
 
@@ -69,33 +70,13 @@ def register_model(session, metrics: dict):
         model=model,
         model_name=MODEL_NAME,
         version_name=version_name,
-        conda_dependencies=["xgboost==3.3.0", "scikit-learn"],
+        conda_dependencies=ML_RUNTIME_DEPS,
         sample_input_data=sample_input,
         target_platforms=["WAREHOUSE", "SNOWPARK_CONTAINER_SERVICES"],
         comment=f"features:{fv} | AUC={metrics.get('auc_roc', 0):.4f} | git:{git_sha}",
     )
 
     return version_name
-
-
-def replicate_to_prod(session, version: str):
-    """Copy model version from STAGE to PROD."""
-    import importlib
-
-    topology = os.getenv("TOPOLOGY", "single-account")
-    strategy_map = {
-        "single-account": "deploy.strategies.single_account",
-        "multi-account": "deploy.strategies.multi_account",
-        "cross-region": "deploy.strategies.cross_region",
-    }
-
-    project_root = str(Path(__file__).resolve().parent.parent)
-    if project_root not in sys.path:
-        sys.path.insert(0, project_root)
-
-    module_path = strategy_map.get(topology, strategy_map["single-account"])
-    module = importlib.import_module(module_path)
-    module.promote(version=version, session=session)
 
 
 def write_summary(metrics: dict, version: str, passed: bool):
@@ -153,6 +134,12 @@ def main():
     session.sql(f"USE WAREHOUSE {WAREHOUSE}").collect()
     version = register_model(session, metrics)
     print(f"  Registered: {MODEL_NAME}/{version}")
+
+    # Emit blessed version for downstream jobs (GitHub Actions output)
+    gh_output = os.getenv("GITHUB_OUTPUT")
+    if gh_output:
+        with open(gh_output, "a") as fh:
+            fh.write(f"model_version={version}\n")
 
     # Check if stage-only mode (scheduled retrain — skip PROD promotion)
     stage_only = os.getenv("STAGE_ONLY", "false").lower() == "true"

@@ -25,7 +25,7 @@ jobs:
       SNOWFLAKE_DATABASE: ${{ vars.SNOWFLAKE_DATABASE_PROD }}
       SNOWFLAKE_SCHEMA: ${{ vars.SNOWFLAKE_SCHEMA }}
       SNOWFLAKE_USER: ${{ vars.SNOWFLAKE_USER_PROD }}
-      SNOWFLAKE_ROLE: MLOPS_DEPLOY_ROLE
+      SNOWFLAKE_ROLE: MLOPS_PROD_ROLE
     steps:
       - uses: actions/checkout@v4
 

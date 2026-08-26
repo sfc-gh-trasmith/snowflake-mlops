@@ -69,8 +69,6 @@ def _make_sample(
     max_amount=500.0,
     stddev=100.0,
     merchants=10,
-    fraud_count=0,
-    fraud_rate=0.0,
     active_days=30,
     late_night_ratio=0.05,
     credit_score=700,
@@ -86,8 +84,6 @@ def _make_sample(
                 "MAX_TXN_AMOUNT": float(max_amount),
                 "STDDEV_TXN_AMOUNT": float(stddev),
                 "UNIQUE_MERCHANTS": np.int8(merchants),
-                "HISTORICAL_FRAUD_COUNT": np.int8(fraud_count),
-                "HISTORICAL_FRAUD_RATE": float(fraud_rate),
                 "ACTIVE_DAYS": np.int8(active_days),
                 "LATE_NIGHT_TXN_RATIO": float(late_night_ratio),
                 "CREDIT_SCORE": np.int16(credit_score),
@@ -161,8 +157,8 @@ class TestPredictions:
         batch = pd.concat(
             [
                 _make_sample(),
-                _make_sample(txn_count=3, avg_amount=2000, fraud_rate=0.8, credit_score=350),
-                _make_sample(txn_count=50, avg_amount=25, fraud_rate=0.0, credit_score=800),
+                _make_sample(txn_count=3, avg_amount=2000, credit_score=350),
+                _make_sample(txn_count=50, avg_amount=25, credit_score=800),
             ],
             ignore_index=True,
         )
@@ -171,13 +167,11 @@ class TestPredictions:
 
     def test_high_risk_gets_higher_fraud_probability(self, model_version, active_service_name):
         """A suspicious profile should get higher fraud probability than a clean one."""
-        clean = _make_sample(fraud_count=0, fraud_rate=0.0, credit_score=800, late_night_ratio=0.0)
+        clean = _make_sample(credit_score=800, late_night_ratio=0.0)
         suspicious = _make_sample(
             txn_count=3,
             avg_amount=3000,
             max_amount=10000,
-            fraud_count=5,
-            fraud_rate=0.8,
             active_days=5,
             late_night_ratio=0.9,
             credit_score=350,

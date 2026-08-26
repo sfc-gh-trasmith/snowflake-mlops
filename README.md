@@ -57,12 +57,12 @@ This template provides:
    - Model Training (XGBoost with cross-validation, logs to Experiment Tracking)
    - Evaluation (computes metrics, writes to PIPELINE_RESULTS table)
 5. **Quality Gate** — Checks AUC-ROC, precision, and recall against configured thresholds. If any threshold is missed, the workflow fails and the model is NOT registered.
-6. **Register Model** — Only if the quality gate passes. Auto-increments version (V1 → V2 → V3) in the STAGE Model Registry. Does NOT touch PROD yet.
+6. **Register Model** — Only if the quality gate passes. Auto-increments version (V1 → V2 → V3) in the STAGE Model Registry. Emits the blessed version to the workflow for promotion. Does NOT touch PROD yet.
 7. **Batch Inference Validation** — Scores the Feature View table using `model.run()` on the warehouse. Validates predictions are sane (no nulls, probabilities sum to 1.0). Writes results to `BATCH_PREDICTIONS` for monitoring.
 8. **Monitor Validation** — Creates a ModelMonitor in STAGE, verifies it reaches ACTIVE state, then drops it (proves PROD setup will succeed)
 9. **Human Approval** — Workflow pauses. Reviewer sees metrics in the Job Summary and approves PROD deployment.
 10. **PROD Deployment:**
-    - **Promote model** — replicates the validated version from STAGE to PROD, sets as DEFAULT
+    - **Promote model** — replicates the exact gated version from STAGE to PROD (no re-resolution), sets as DEFAULT
     - Registers Feature Views in PROD
     - **Batch inference** — validates `model.run()` works in PROD
     - **Real-time inference** — deploys SPCS container service (blue/green), shifts Gateway traffic to new version
@@ -76,7 +76,7 @@ This template provides:
 3. **STAGE_ONLY mode** — Model is registered in STAGE but NOT promoted to PROD
 4. **GitHub Issue created** — "Model Candidate Ready: V4" with metrics table
 5. **Human reviews** the issue, decides whether to promote
-6. **Manual promote** — Run the deploy workflow with `promote_only=true`, approve PROD deployment
+6. **Manual promote** — Run the deploy workflow with `promote_only=true` and specify the `model_version` (e.g., `V4`), approve PROD deployment
 
 ### Rollback
 
@@ -98,7 +98,7 @@ Manual dispatch of the rollback workflow: sets DEFAULT version back, redeploys S
 
 ## Prerequisites
 
-- Snowflake account with `ACCOUNTADMIN` role (for initial setup; CI uses `MLOPS_DEPLOY_ROLE`)
+- Snowflake account with `ACCOUNTADMIN` role (for initial setup; CI uses `MLOPS_STAGE_ROLE` and `MLOPS_PROD_ROLE`)
 - Python 3.12+ with [uv](https://docs.astral.sh/uv/) installed
 - [Snowflake CLI](https://docs.snowflake.com/en/developer-guide/snowflake-cli/index) (`snow`) installed and configured
 - [GitHub CLI](https://cli.github.com/) (`gh`) installed
@@ -149,7 +149,9 @@ uv run python source/pipeline/ml_pipeline_dag.py --status --env dev
 bash scripts/setup_cicd.sh
 ```
 
-This creates OIDC service users (`SVC_GITHUB_ACTIONS_STAGE`, `SVC_GITHUB_ACTIONS`) for passwordless CI authentication.
+This creates OIDC service users (`SVC_GITHUB_ACTIONS_STAGE`, `SVC_GITHUB_ACTIONS`) for passwordless CI authentication, plus two roles:
+- **`MLOPS_STAGE_ROLE`** — used by STAGE workflows (DEV + STAGE access, read-only on PROD)
+- **`MLOPS_PROD_ROLE`** — used by PROD workflows (PROD access, BIND SERVICE ENDPOINT)
 
 Then configure your GitHub repo (**Settings → Secrets and variables → Actions → Variables tab**):
 
@@ -161,10 +163,7 @@ Then configure your GitHub repo (**Settings → Secrets and variables → Action
 | `SNOWFLAKE_SCHEMA` | Schema (shared across envs) | `ML` |
 | `SNOWFLAKE_USER_STAGE` | OIDC service user for STAGE | `SVC_GITHUB_ACTIONS_STAGE` |
 | `SNOWFLAKE_USER_PROD` | OIDC service user for PROD | `SVC_GITHUB_ACTIONS` |
-| `SNOWFLAKE_WAREHOUSE_STAGE` | Warehouse for STAGE jobs | `SNOW_MLOPS_STAGE_WH` |
-| `SNOWFLAKE_WAREHOUSE_PROD` | Warehouse for PROD jobs | `SNOW_MLOPS_PROD_WH` |
-| `SNOWFLAKE_COMPUTE_POOL_STAGE` | Compute pool for STAGE ML Jobs | `SNOW_MLOPS_STAGE_POOL` |
-| `SNOWFLAKE_COMPUTE_POOL_PROD` | Compute pool for PROD ML Jobs | `SNOW_MLOPS_PROD_POOL` |
+| `TOPOLOGY` | Promotion strategy | `single-account` |
 | `ENABLE_MODEL_MONITOR` | Enable monitoring in PROD (optional) | `true` |
 
 Then create **GitHub Environments** (**Settings → Environments**):
@@ -192,7 +191,7 @@ snowflake-mlops/
 │   ├── deploy.yml                 # Main: train → promote → deploy (with approval)
 │   ├── scheduled-retrain.yml      # Cron: retrain → STAGE candidate → notify
 │   └── rollback.yml               # Manual: revert to previous version
-├── deploy/                        # Promotion strategies (single/multi-account)
+├── deploy/                        # Promotion strategies (single-account)
 ├── scripts/
 │   ├── setup.sh                   # Infrastructure provisioning
 │   ├── setup_cicd.sh              # OIDC users + network policy
@@ -207,6 +206,7 @@ snowflake-mlops/
 │   ├── config.py                  # All configuration (single file)
 │   ├── snowpark_session.py        # Session helper (SSO + OIDC)
 │   ├── features/                  # Feature Store definitions
+│   │   └── feature_views.py      # Feature View registration (canonical schema)
 │   ├── pipeline/
 │   │   └── ml_pipeline_dag.py     # Task DAG + @remote ML Job functions
 │   ├── serving/
@@ -229,14 +229,6 @@ Everything is configurable from `source/config.py`:
 "training_compute": "spcs",
 "evaluation_compute": "spcs",
 
-# Deployment toggles
-"deploy_batch_inference": "true",
-"deploy_realtime_service": "true",
-"enable_model_monitor": "true",
-
-# Task timeout
-"task_timeout_ms": "7200000",  # 2 hours
-
 # Feature View refresh
 "customer_features_refresh": "1 hour",
 
@@ -244,10 +236,26 @@ Everything is configurable from `source/config.py`:
 "schedule": "USING CRON 0 6 * * MON America/Los_Angeles",
 
 # Quality gate thresholds
-MIN_AUC_ROC = 0.60
-MIN_PRECISION = 0.03
-MIN_RECALL = 0.30
+MIN_AUC_ROC = 0.85
+MIN_PRECISION = 0.70
+MIN_RECALL = 0.60
 ```
+
+### ML Runtime Dependencies
+
+Training and serving dependency versions are pinned in `pyproject.toml` under the `[dependency-groups] ml-runtime` group:
+
+```toml
+ml-runtime = ["xgboost==3.3.0", "scikit-learn==1.6.1"]
+```
+
+This ensures the ML Job (training on SPCS) and the Model Registry (serving environment) always use the same library versions. To update:
+
+1. Edit the versions in `pyproject.toml`
+2. Run `uv lock`
+3. Commit — both training and serving automatically pick up the new versions
+
+To install locally for development: `uv sync --group ml-runtime`
 
 ## CI/CD Workflows
 
@@ -272,7 +280,7 @@ MIN_RECALL = 0.30
 3. Adjust quality gate thresholds
 
 **Add multi-account support:**
-1. Implement `deploy/strategies/multi_account.py`
+1. Implement `deploy/strategies/multi_account.py` with a `promote(version, session)` function
 2. Set `TOPOLOGY=multi-account` in GitHub variables
 
 ## Documentation

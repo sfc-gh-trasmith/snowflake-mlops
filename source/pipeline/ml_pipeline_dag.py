@@ -28,8 +28,10 @@ from config import (
     EXPERIMENT_CONFIG,
     FEATURE_VIEW_NAME,
     FEATURE_VIEW_VERSION,
+    ML_RUNTIME_DEPS,
     PIPELINE_CONFIG,
     RETRAIN_CONFIG,
+    TRAINING_PARAMS,
 )
 from snowflake.core import Root
 from snowflake.core._common import CreateMode
@@ -78,6 +80,8 @@ def build_feature_eng_remote(cfg: dict):
     db = cfg["database"]
     schema = cfg["schema"]
     wh = cfg["warehouse"]
+    src_db = cfg["source_database"]
+    src_schema = cfg["source_schema"]
     stage = f"@{db}.{schema}.PIPELINE_STAGE"
 
     @remote(
@@ -88,8 +92,9 @@ def build_feature_eng_remote(cfg: dict):
     def feature_engineering() -> str:
         import json
 
-        from snowflake.ml.feature_store import CreationMode, Entity, FeatureStore
+        from snowflake.ml.feature_store import CreationMode, Entity, FeatureStore, FeatureView
         from snowflake.snowpark import Session as _Session
+        from snowflake.snowpark import functions as F
 
         session = _Session.builder.getOrCreate()
         session.sql(f"USE WAREHOUSE {wh}").collect()
@@ -101,10 +106,56 @@ def build_feature_eng_remote(cfg: dict):
             default_warehouse=wh,
             creation_mode=CreationMode.CREATE_IF_NOT_EXIST,
         )
+
+        # Register entities
         customer_entity = Entity(name="CUSTOMER", join_keys=["CUSTOMER_ID"])
         fs.register_entity(customer_entity)
 
-        return json.dumps({"status": "success", "step": "feature_engineering"})
+        # Build and register CUSTOMER_RISK_FEATURES
+        txn = session.table(f"{src_db}.{src_schema}.RAW_TRANSACTIONS")
+        cust = session.table(f"{src_db}.{src_schema}.CUSTOMER_PROFILES")
+
+        customer_agg = txn.group_by("CUSTOMER_ID").agg(
+            F.count("*").alias("TOTAL_TXN_COUNT"),
+            F.avg("AMOUNT").alias("AVG_TXN_AMOUNT"),
+            F.max("AMOUNT").alias("MAX_TXN_AMOUNT"),
+            F.stddev("AMOUNT").alias("STDDEV_TXN_AMOUNT"),
+            F.count_distinct("MERCHANT_ID").alias("UNIQUE_MERCHANTS"),
+            F.count_distinct(F.dayofyear("TIMESTAMP")).alias("ACTIVE_DAYS"),
+            F.avg(
+                F.when(F.hour("TIMESTAMP") < 6, F.lit(1)).when(F.hour("TIMESTAMP") > 22, F.lit(1)).otherwise(F.lit(0))
+            ).alias("LATE_NIGHT_TXN_RATIO"),
+            F.max("TIMESTAMP").alias("FEATURE_TS"),
+        )
+
+        features_df = customer_agg.join(cust, on="CUSTOMER_ID", how="inner").select(
+            F.col("CUSTOMER_ID"),
+            F.col("TOTAL_TXN_COUNT"),
+            F.col("AVG_TXN_AMOUNT"),
+            F.col("MAX_TXN_AMOUNT"),
+            F.col("STDDEV_TXN_AMOUNT"),
+            F.col("UNIQUE_MERCHANTS"),
+            F.col("ACTIVE_DAYS"),
+            F.col("LATE_NIGHT_TXN_RATIO"),
+            F.col("CREDIT_SCORE"),
+            F.col("ACCOUNT_AGE_DAYS"),
+            F.col("ANNUAL_INCOME"),
+            F.col("FEATURE_TS"),
+        )
+
+        customer_fv = FeatureView(
+            name="CUSTOMER_RISK_FEATURES",
+            entities=[customer_entity],
+            feature_df=features_df,
+            timestamp_col="FEATURE_TS",
+            refresh_freq="1 hour",
+            desc="Customer-level risk signals for fraud detection",
+        )
+        fs.register_feature_view(feature_view=customer_fv, version="V1", overwrite=True)
+
+        return json.dumps(
+            {"status": "success", "step": "feature_engineering", "feature_view": "CUSTOMER_RISK_FEATURES$V1"}
+        )
 
     return feature_engineering
 
@@ -123,11 +174,13 @@ def build_train_model_remote(cfg: dict):
     exp_enabled = EXPERIMENT_CONFIG.get("enabled", "false") == "true"
     exp_name = EXPERIMENT_CONFIG.get("experiment_name", "FRAUD_DETECTION_TRAINING")
     exp_run_prefix = EXPERIMENT_CONFIG.get("run_name_prefix", "pipeline")
+    # Training hyperparameters (captured by closure from config)
+    training_params = dict(TRAINING_PARAMS)
 
     @remote(
         pool,
         stage_name=stage,
-        pip_requirements=["xgboost", "scikit-learn", "snowflake-ml-python"],
+        pip_requirements=ML_RUNTIME_DEPS + ["snowflake-ml-python"],
     )
     def train_model() -> str:
         import json
@@ -135,58 +188,66 @@ def build_train_model_remote(cfg: dict):
         import numpy as np
         import xgboost as xgb
         from sklearn.metrics import average_precision_score, f1_score, precision_score, recall_score, roc_auc_score
-        from sklearn.model_selection import StratifiedKFold, train_test_split
+        from sklearn.model_selection import StratifiedGroupKFold
+        from snowflake.ml.feature_store import CreationMode, FeatureStore
         from snowflake.snowpark import Session as _Session
+        from snowflake.snowpark import functions as F
 
         session = _Session.builder.getOrCreate()
         session.sql(f"USE WAREHOUSE {wh}").collect()
 
-        fv_table = f'"{fv}"'
-        df = session.sql(f"""
-            SELECT c.CUSTOMER_ID, c.TOTAL_TXN_COUNT, c.AVG_TXN_AMOUNT, c.MAX_TXN_AMOUNT,
-                c.STDDEV_TXN_AMOUNT, c.UNIQUE_MERCHANTS, c.HISTORICAL_FRAUD_COUNT,
-                c.HISTORICAL_FRAUD_RATE, c.ACTIVE_DAYS, c.LATE_NIGHT_TXN_RATIO,
-                c.CREDIT_SCORE, c.ACCOUNT_AGE_DAYS, c.ANNUAL_INCOME, t.IS_FRAUD
-            FROM {db}.{schema}.{fv_table} c
-            JOIN {src_db}.{src_schema}.RAW_TRANSACTIONS t ON c.CUSTOMER_ID = t.CUSTOMER_ID
-        """).to_pandas()
+        # Use Feature Store for point-in-time correct dataset generation
+        fs = FeatureStore(
+            session=session,
+            database=db,
+            name=schema,
+            default_warehouse=wh,
+            creation_mode=CreationMode.FAIL_IF_NOT_EXIST,
+        )
+        cust_fv = fs.get_feature_view(fv.split("$")[0], fv.split("$")[1])
 
-        feature_cols = [
-            "TOTAL_TXN_COUNT",
-            "AVG_TXN_AMOUNT",
-            "MAX_TXN_AMOUNT",
-            "STDDEV_TXN_AMOUNT",
-            "UNIQUE_MERCHANTS",
-            "HISTORICAL_FRAUD_COUNT",
-            "HISTORICAL_FRAUD_RATE",
-            "ACTIVE_DAYS",
-            "LATE_NIGHT_TXN_RATIO",
-            "CREDIT_SCORE",
-            "ACCOUNT_AGE_DAYS",
-            "ANNUAL_INCOME",
-        ]
+        # Build spine: entity keys + timestamp + label from source
+        spine = session.table(f"{src_db}.{src_schema}.RAW_TRANSACTIONS").select(
+            F.col("CUSTOMER_ID"),
+            F.col("TIMESTAMP"),
+            F.col("IS_FRAUD"),
+        )
+
+        # Generate dataset with point-in-time correctness
+        dataset = fs.generate_dataset(
+            name="FRAUD_TRAINING_DATA",
+            version="V1",
+            spine_df=spine,
+            features=[cust_fv],
+            spine_timestamp_col="TIMESTAMP",
+            spine_label_cols=["IS_FRAUD"],
+            desc="Training dataset for fraud detection model",
+        )
+
+        df = dataset.read.to_pandas()
+
+        feature_cols = [c for c in df.columns if c not in ("CUSTOMER_ID", "TIMESTAMP", "IS_FRAUD")]
         X = df[feature_cols].fillna(0)
         y = df["IS_FRAUD"].astype(int)
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, stratify=y, random_state=42)
+        groups = df["CUSTOMER_ID"]
 
-        params = {
-            "n_estimators": 200,
-            "learning_rate": 0.1,
-            "max_depth": 6,
-            "scale_pos_weight": 33,
-            "objective": "binary:logistic",
-            "eval_metric": "aucpr",
-            "random_state": 42,
-        }
+        # Split by customer (group-aware) to avoid entity leakage
+        # Use stratified group k-fold to get train/test indices
+        sgkf = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=42)
+        train_idx, test_idx = next(sgkf.split(X, y, groups))
+        X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+        y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
 
-        # Cross-validation
-        cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+        params = training_params
+
+        # Cross-validation (group-aware)
+        cv = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=42)
         cv_scores = []
-        for _, (train_idx, val_idx) in enumerate(cv.split(X_train, y_train)):
+        for train_cv_idx, val_cv_idx in cv.split(X_train, y_train, groups.iloc[train_idx]):
             fold_model = xgb.XGBClassifier(**params)
-            fold_model.fit(X_train.iloc[train_idx], y_train.iloc[train_idx], verbose=False)
-            fold_proba = fold_model.predict_proba(X_train.iloc[val_idx])[:, 1]
-            cv_scores.append(roc_auc_score(y_train.iloc[val_idx], fold_proba))
+            fold_model.fit(X_train.iloc[train_cv_idx], y_train.iloc[train_cv_idx], verbose=False)
+            fold_proba = fold_model.predict_proba(X_train.iloc[val_cv_idx])[:, 1]
+            cv_scores.append(roc_auc_score(y_train.iloc[val_cv_idx], fold_proba))
 
         # Final model
         model = xgb.XGBClassifier(**params)
@@ -273,7 +334,7 @@ def build_evaluate_remote(cfg: dict):
         """).collect()
 
         if not rows:
-            return json.dumps({"status": "error", "message": "No training results found"})
+            raise RuntimeError("EVALUATE failed: no training results found in PIPELINE_RESULTS")
 
         training_result = json.loads(rows[0]["RESULT"])
         metrics = training_result.get("metrics", {})
@@ -302,8 +363,11 @@ def feature_eng_warehouse(session: Session) -> str:
 
 
 def train_model_warehouse(session: Session) -> str:
-    """Placeholder — training on warehouse (limited, no custom packages)."""
-    raise NotImplementedError("Training requires SPCS compute pool for custom packages (xgboost, sklearn)")
+    """Training on warehouse is not supported — requires SPCS for custom packages."""
+    raise NotImplementedError(
+        "Training requires SPCS compute pool for custom packages (xgboost, sklearn). "
+        "Set training_compute='spcs' in PIPELINE_CONFIG."
+    )
 
 
 def evaluate_warehouse(session: Session) -> str:
@@ -315,7 +379,7 @@ def evaluate_warehouse(session: Session) -> str:
     """).collect()
     if rows:
         return "evaluation_complete"
-    return "evaluation_error_no_training_results"
+    raise RuntimeError("EVALUATE failed: no training results found in PIPELINE_RESULTS")
 
 
 # ─── DAG Deployment ──────────────────────────────────────────────────────────
@@ -327,7 +391,6 @@ def deploy_dag(env: str):
     db = cfg["database"]
     schema = cfg["schema"]
     wh = cfg["warehouse"]
-    cfg["compute_pool"]
 
     fe_compute = PIPELINE_CONFIG.get("feature_engineering_compute", "warehouse")
     train_compute = PIPELINE_CONFIG.get("training_compute", "spcs")
@@ -438,10 +501,7 @@ def execute_dag(env: str):
     session = create_snowpark_session()
     session.sql(f"USE WAREHOUSE {wh}").collect()
 
-    # Clear previous results
-    session.sql(f"DELETE FROM {db}.{schema}.PIPELINE_RESULTS").collect()
-
-    # Execute the root task
+    # Execute the root task (no longer deletes PIPELINE_RESULTS — history is preserved)
     root = Root(session)
     task_res = root.databases[db].schemas[schema].tasks[DAG_NAME]
     task_res.execute()
