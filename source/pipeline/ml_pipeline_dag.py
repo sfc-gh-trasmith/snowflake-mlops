@@ -378,6 +378,8 @@ def evaluate_warehouse(session: Session) -> str:
     """Evaluation on warehouse — reads training metrics and writes evaluation row."""
     import json
 
+    from snowflake.snowpark.functions import col, current_timestamp, parse_json
+
     rows = session.sql("""
         SELECT RESULT FROM PIPELINE_RESULTS
         WHERE STEP = 'training' AND STATUS = 'SUCCESS'
@@ -390,10 +392,19 @@ def evaluate_warehouse(session: Session) -> str:
     metrics = training_result.get("metrics", {})
     result = {"status": "success", "step": "evaluation", "metrics": metrics, "pipeline_status": "READY_FOR_REVIEW"}
     result_json = json.dumps(result)
-    session.sql(f"""
-        INSERT INTO PIPELINE_RESULTS (STEP, STATUS, RESULT, CREATED_AT)
-        SELECT 'evaluation', 'SUCCESS', PARSE_JSON($${result_json}$$), CURRENT_TIMESTAMP()
-    """).collect()
+
+    # Write evaluation row using Snowpark DataFrame API (avoids SQL escaping issues)
+    from snowflake.snowpark import Row
+
+    eval_df = session.create_dataframe(
+        [Row(STEP="evaluation", STATUS="SUCCESS", RESULT=result_json)],
+    )
+    eval_df.select(
+        col("STEP"),
+        col("STATUS"),
+        parse_json(col("RESULT")).alias("RESULT"),
+        current_timestamp().alias("CREATED_AT"),
+    ).write.mode("append").save_as_table("PIPELINE_RESULTS")
     return "evaluation_complete"
 
 
