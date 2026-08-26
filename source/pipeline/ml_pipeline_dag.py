@@ -214,7 +214,11 @@ def build_train_model_remote(cfg: dict):
         )
 
         # Generate dataset with point-in-time correctness
-        # Version mirrors feature view version — reuse if already exists
+        # Version mirrors feature view version:
+        #   - Same FV version → reuse existing dataset (fast, no regeneration)
+        #   - New FV version → new dataset version auto-created
+        from snowflake.ml import dataset as snow_dataset
+
         dataset_version = fv.split("$")[1]  # e.g. "V1" from "CUSTOMER_RISK_FEATURES$V1"
         try:
             dataset = fs.generate_dataset(
@@ -228,7 +232,7 @@ def build_train_model_remote(cfg: dict):
             )
         except Exception as e:
             if "already exists" in str(e):
-                dataset = fs.load_dataset(name="FRAUD_TRAINING_DATA", version=dataset_version)
+                dataset = snow_dataset.load_dataset(session, "FRAUD_TRAINING_DATA", dataset_version)
             else:
                 raise
 
