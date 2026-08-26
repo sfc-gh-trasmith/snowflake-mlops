@@ -61,7 +61,7 @@ ENV_CONFIG = {
     },
 }
 
-DAG_NAME = "ML_TRAINING_PIPELINE"
+DAG_NAME = "MLOPS_DEMO_TASK"
 
 
 def get_env_config(env: str) -> dict:
@@ -214,15 +214,23 @@ def build_train_model_remote(cfg: dict):
         )
 
         # Generate dataset with point-in-time correctness
-        dataset = fs.generate_dataset(
-            name="FRAUD_TRAINING_DATA",
-            version="V1",
-            spine_df=spine,
-            features=[cust_fv],
-            spine_timestamp_col="TIMESTAMP",
-            spine_label_cols=["IS_FRAUD"],
-            desc="Training dataset for fraud detection model",
-        )
+        # Version mirrors feature view version — reuse if already exists
+        dataset_version = fv.split("$")[1]  # e.g. "V1" from "CUSTOMER_RISK_FEATURES$V1"
+        try:
+            dataset = fs.generate_dataset(
+                name="FRAUD_TRAINING_DATA",
+                version=dataset_version,
+                spine_df=spine,
+                features=[cust_fv],
+                spine_timestamp_col="TIMESTAMP",
+                spine_label_cols=["IS_FRAUD"],
+                desc="Training dataset for fraud detection model",
+            )
+        except Exception as e:
+            if "already exists" in str(e):
+                dataset = fs.load_dataset(name="FRAUD_TRAINING_DATA", version=dataset_version)
+            else:
+                raise
 
         df = dataset.read.to_pandas()
 
