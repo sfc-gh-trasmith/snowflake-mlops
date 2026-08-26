@@ -14,20 +14,21 @@ Flow:
 """
 
 import json
+import os
 import sys
 import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "source"))
+from config import MODEL_NAME
 from snowpark_session import create_snowpark_session
 
-PROD_DATABASE = "SNOW_MLOPS_PROD"
-PROD_SCHEMA = "ML"
-PROD_WAREHOUSE = "SNOW_MLOPS_PROD_WH"
-PROD_COMPUTE_POOL = "SNOW_MLOPS_PROD_POOL"
-MODEL_NAME = "MLOPS_FRAUD_DETECTOR"
+PROD_DATABASE = os.getenv("SNOWFLAKE_DATABASE", "SNOW_MLOPS_PROD")
+PROD_SCHEMA = os.getenv("SNOWFLAKE_SCHEMA", "ML")
+PROD_WAREHOUSE = os.getenv("SNOWFLAKE_WAREHOUSE", "SNOW_MLOPS_PROD_WH")
+PROD_COMPUTE_POOL = os.getenv("SNOWFLAKE_COMPUTE_POOL", "SNOW_MLOPS_PROD_POOL")
 GATEWAY_NAME = "FRAUD_DETECTOR_GATEWAY"
-SERVICE_PREFIX = "MLOPS_FRAUD_DETECTOR_SERVICE"
+SERVICE_PREFIX = f"{MODEL_NAME}_SERVICE"
 
 READY_TIMEOUT_SECONDS = 600  # 10 minutes
 READY_POLL_INTERVAL = 15
@@ -112,8 +113,6 @@ def health_check(session, service_name, model_version_name):
                 "MAX_TXN_AMOUNT": 500.0,
                 "STDDEV_TXN_AMOUNT": 100.0,
                 "UNIQUE_MERCHANTS": np.int8(10),
-                "HISTORICAL_FRAUD_COUNT": np.int8(0),
-                "HISTORICAL_FRAUD_RATE": 0.0,
                 "ACTIVE_DAYS": np.int8(30),
                 "LATE_NIGHT_TXN_RATIO": 0.05,
                 "CREDIT_SCORE": np.int16(700),

@@ -3,14 +3,10 @@
 Routes model promotion to the correct strategy based on the TOPOLOGY
 environment variable (or --strategy CLI arg).
 
-Supported topologies:
-  - single-account (default): Cross-database replication within one account
-  - multi-account: Cross-account model sharing (same region)
-  - cross-region: Cross-account + cross-region replication
+Currently only single-account (cross-database replication) is supported.
 
 Usage:
   python deploy/promote.py --version V3
-  python deploy/promote.py --version V3 --strategy multi-account
   TOPOLOGY=single-account python deploy/promote.py --version V3
 """
 
@@ -18,11 +14,8 @@ import argparse
 import os
 import sys
 
-
 STRATEGIES = {
     "single-account": "deploy.strategies.single_account",
-    "multi-account": "deploy.strategies.multi_account",
-    "cross-region": "deploy.strategies.cross_region",
 }
 
 DEFAULT_TOPOLOGY = "single-account"
@@ -36,7 +29,6 @@ def get_strategy(topology: str):
         sys.exit(1)
 
     module_path = STRATEGIES[topology]
-    # Import the module
     import importlib
 
     module = importlib.import_module(module_path)

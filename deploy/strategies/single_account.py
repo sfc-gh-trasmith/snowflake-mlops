@@ -14,7 +14,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "source"))
 from snowpark_session import create_snowpark_session
 
-
 STAGE_DATABASE = "SNOW_MLOPS_STAGE"
 STAGE_SCHEMA = "ML"
 PROD_DATABASE = "SNOW_MLOPS_PROD"

@@ -66,29 +66,30 @@ def run_batch_inference(
 
 def validate_predictions(session, output_table: str) -> dict:
     """Validate batch predictions are sane (no nulls, probabilities sum to ~1)."""
+    from snowflake.snowpark.functions import abs as sf_abs
+    from snowflake.snowpark.functions import avg, col, count, when
+    from snowflake.snowpark.functions import max as sf_max
+
     df = session.table(output_table)
-    total = df.count()
 
     # Column names from model.run() are lowercase quoted identifiers
     col_0 = '"output_feature_0"'
     col_1 = '"output_feature_1"'
 
-    # Check for null predictions
-    null_count = df.filter(f"{col_0} IS NULL OR {col_1} IS NULL").count()
-
-    # Check probability sums (should be ~1.0)
-    stats = df.select(col_0, col_1).to_pandas()
-
-    prob_sums = stats["output_feature_0"] + stats["output_feature_1"]
-    avg_sum = prob_sums.mean()
-    max_deviation = (prob_sums - 1.0).abs().max()
+    # Push all validation into Snowflake — no client-side data pull
+    stats = df.select(
+        count("*").alias("TOTAL"),
+        count(when(col(col_0).is_null() | col(col_1).is_null(), 1)).alias("NULLS"),
+        avg(col(col_0) + col(col_1)).alias("AVG_SUM"),
+        sf_max(sf_abs(col(col_0) + col(col_1) - 1.0)).alias("MAX_DEV"),
+    ).collect()[0]
 
     validation = {
-        "total_rows": total,
-        "null_predictions": null_count,
-        "avg_probability_sum": float(avg_sum),
-        "max_deviation_from_1": float(max_deviation),
-        "passed": null_count == 0 and max_deviation < 0.01,
+        "total_rows": stats["TOTAL"],
+        "null_predictions": stats["NULLS"],
+        "avg_probability_sum": float(stats["AVG_SUM"]),
+        "max_deviation_from_1": float(stats["MAX_DEV"]),
+        "passed": stats["NULLS"] == 0 and float(stats["MAX_DEV"]) < 0.01,
     }
 
     return validation

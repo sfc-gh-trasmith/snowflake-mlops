@@ -28,8 +28,6 @@ def create_customer_features_df(session: Session):
         F.max("AMOUNT").alias("MAX_TXN_AMOUNT"),
         F.stddev("AMOUNT").alias("STDDEV_TXN_AMOUNT"),
         F.count_distinct("MERCHANT_ID").alias("UNIQUE_MERCHANTS"),
-        F.sum(F.when(F.col("IS_FRAUD") == 1, F.lit(1)).otherwise(F.lit(0))).alias("HISTORICAL_FRAUD_COUNT"),
-        F.avg(F.col("IS_FRAUD").cast("float")).alias("HISTORICAL_FRAUD_RATE"),
         F.count_distinct(F.dayofyear("TIMESTAMP")).alias("ACTIVE_DAYS"),
         F.avg(
             F.when(F.hour("TIMESTAMP") < 6, F.lit(1)).when(F.hour("TIMESTAMP") > 22, F.lit(1)).otherwise(F.lit(0))
@@ -45,8 +43,6 @@ def create_customer_features_df(session: Session):
         F.col("MAX_TXN_AMOUNT"),
         F.col("STDDEV_TXN_AMOUNT"),
         F.col("UNIQUE_MERCHANTS"),
-        F.col("HISTORICAL_FRAUD_COUNT"),
-        F.col("HISTORICAL_FRAUD_RATE"),
         F.col("ACTIVE_DAYS"),
         F.col("LATE_NIGHT_TXN_RATIO"),
         F.col("CREDIT_SCORE"),

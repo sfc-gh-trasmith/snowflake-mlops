@@ -17,7 +17,7 @@ from config import MODEL_NAME
 
 DATABASE = os.getenv("SNOWFLAKE_DATABASE", "SNOW_MLOPS_STAGE")
 SCHEMA = os.getenv("SNOWFLAKE_SCHEMA", "ML")
-REPO = os.getenv("GITHUB_REPOSITORY", "sfc-gh-trasmith/snowflake-mlops")
+REPO = os.getenv("GITHUB_REPOSITORY", "<your-org>/snowflake-mlops")
 
 
 def create_github_issue(version: str, metrics: dict):

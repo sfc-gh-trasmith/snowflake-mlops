@@ -20,7 +20,7 @@
       { "id": "experiment-tracking", "title": "Experiment Tracking", "producerNotes": "ExperimentTracking API, log_params, log_metrics, run management" },
       { "id": "cicd", "title": "CI/CD Pipeline", "producerNotes": "deploy.yml stages, pr-checks, OIDC, approval gate, release tagging" },
       { "id": "rollback", "title": "Rollback", "producerNotes": "Manual workflow, version revert, service redeploy" },
-      { "id": "rbac", "title": "RBAC & Security", "producerNotes": "MLOPS_DEPLOY_ROLE, service users, network policy, branch protection" },
+      { "id": "rbac", "title": "RBAC & Security", "producerNotes": "MLOPS_STAGE_ROLE, MLOPS_PROD_ROLE, service users, network policy, branch protection" },
       { "id": "config", "title": "Configuration", "producerNotes": "config.py structure, compute mode, thresholds, deployment toggles" }
     ]
   }
@@ -470,8 +470,6 @@ python source/pipeline/ml_pipeline_dag.py --status --env stage</code></pre>
       <tr><td>MAX_TXN_AMOUNT</td><td>FLOAT</td><td>Maximum transaction amount</td></tr>
       <tr><td>STDDEV_TXN_AMOUNT</td><td>FLOAT</td><td>Standard deviation of amounts</td></tr>
       <tr><td>UNIQUE_MERCHANTS</td><td>INT</td><td>Number of unique merchants</td></tr>
-      <tr><td>HISTORICAL_FRAUD_COUNT</td><td>INT</td><td>Past fraud incidents</td></tr>
-      <tr><td>HISTORICAL_FRAUD_RATE</td><td>FLOAT</td><td>Historical fraud rate</td></tr>
       <tr><td>ACTIVE_DAYS</td><td>INT</td><td>Days with activity</td></tr>
       <tr><td>LATE_NIGHT_TXN_RATIO</td><td>FLOAT</td><td>Ratio of late-night transactions</td></tr>
       <tr><td>CREDIT_SCORE</td><td>INT</td><td>Customer credit score</td></tr>
@@ -571,9 +569,9 @@ SELECT 'training', 'SUCCESS', PARSE_JSON('{"metrics": {...}}'), CURRENT_TIMESTAM
   <table>
     <thead><tr><th>Metric</th><th>Threshold</th><th>Purpose</th></tr></thead>
     <tbody>
-      <tr><td>AUC-ROC</td><td>&ge; 0.60</td><td>Discriminative power</td></tr>
-      <tr><td>Precision</td><td>&ge; 0.03</td><td>False positive control</td></tr>
-      <tr><td>Recall</td><td>&ge; 0.30</td><td>Fraud detection coverage</td></tr>
+      <tr><td>AUC-ROC</td><td>&ge; 0.85</td><td>Discriminative power</td></tr>
+      <tr><td>Precision</td><td>&ge; 0.70</td><td>False positive control</td></tr>
+      <tr><td>Recall</td><td>&ge; 0.60</td><td>Fraud detection coverage</td></tr>
     </tbody>
   </table>
 
@@ -900,12 +898,19 @@ DESC GATEWAY SNOW_MLOPS_PROD.ML.FRAUD_DETECTOR_GATEWAY
 
   <h3>Role Hierarchy</h3>
   <pre><code class="language-plaintext">ACCOUNTADMIN
-  └── MLOPS_DEPLOY_ROLE
-        ├── USAGE on SNOW_MLOPS_DEV / STAGE / PROD
-        ├── USAGE on compute pools and warehouses
-        ├── CREATE MODEL, CREATE SERVICE, CREATE TASK
-        ├── OPERATE on tasks
-        └── Owns: models, services, gateways, stages</code></pre>
+  ├── MLOPS_STAGE_ROLE (CI: STAGE + DEV)
+  │     ├── USAGE on SNOW_MLOPS_DEV / STAGE databases
+  │     ├── SELECT on SNOW_MLOPS_PROD.ML (read-only)
+  │     ├── USAGE on DEV + STAGE warehouses and compute pools
+  │     ├── OWNERSHIP on models in DEV.ML and STAGE.ML
+  │     └── EXECUTE TASK, EXECUTE MANAGED TASK
+  │
+  └── MLOPS_PROD_ROLE (CI: PROD)
+        ├── ALL on SNOW_MLOPS_PROD.ML (schema, tables, stages)
+        ├── OWNERSHIP on models in PROD.ML
+        ├── USAGE on PROD warehouse and compute pool
+        ├── BIND SERVICE ENDPOINT
+        └── EXECUTE TASK, EXECUTE MANAGED TASK</code></pre>
 
   <h3>Branch Protection</h3>
   <ul>
@@ -1063,9 +1068,9 @@ RETRAIN_CONFIG = {
 }
 
 # Quality gate thresholds
-MIN_AUC_ROC = 0.60
-MIN_PRECISION = 0.03
-MIN_RECALL = 0.30</code></pre>
+MIN_AUC_ROC = 0.85
+MIN_PRECISION = 0.70
+MIN_RECALL = 0.60</code></pre>
 
   <h3>Environment Overrides</h3>
   <p>The CI workflow overrides database/warehouse/pool per environment via environment variables. The <code>ml_pipeline_dag.py</code> script reads <code>--env stage</code> to select the correct config:</p>

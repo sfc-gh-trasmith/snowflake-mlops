@@ -13,14 +13,22 @@ on:
         description: 'Skip training, promote existing STAGE candidate to PROD'
         type: boolean
         default: false
+      model_version:
+        description: 'Specific model version to promote (required when promote_only=true, e.g. V3)'
+        type: string
+        required: false
       reason:
         description: 'Reason for manual trigger (e.g., promote candidate, fresh data retrain)'
         required: false
 
 permissions:
   id-token: write
-  contents: write
-  issues: write
+  contents: read
+  issues: read
+
+concurrency:
+  group: ml-pipeline
+  cancel-in-progress: false
 
 env:
   SNOWFLAKE_ACCOUNT: ${{ vars.SNOWFLAKE_ACCOUNT }}
@@ -78,11 +86,13 @@ jobs:
     if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.promote_only) }}
     runs-on: ubuntu-latest
     environment: STAGE
+    outputs:
+      model_version: ${{ steps.quality_gate.outputs.model_version }}
     env:
       SNOWFLAKE_DATABASE: ${{ vars.SNOWFLAKE_DATABASE_STAGE }}
       SNOWFLAKE_SCHEMA: ${{ vars.SNOWFLAKE_SCHEMA }}
       SNOWFLAKE_USER: ${{ vars.SNOWFLAKE_USER_STAGE }}
-      SNOWFLAKE_ROLE: MLOPS_DEPLOY_ROLE
+      SNOWFLAKE_ROLE: MLOPS_STAGE_ROLE
       TOPOLOGY: ${{ vars.TOPOLOGY || 'single-account' }}
     steps:
       - uses: actions/checkout@v4
@@ -119,6 +129,7 @@ jobs:
           METRICS_FILE: ${{ runner.temp }}/pipeline_metrics.json
 
       - name: "Quality gate: evaluate metrics"
+        id: quality_gate
         run: uv run python scripts/quality_gate_and_register.py
         timeout-minutes: 10
         env:
@@ -143,11 +154,15 @@ jobs:
     if: ${{ always() && (needs.deploy-stage.result == 'success' || (github.event_name == 'workflow_dispatch' && inputs.promote_only)) }}
     runs-on: ubuntu-latest
     environment: PROD
+    permissions:
+      id-token: write
+      contents: write
+      issues: write
     env:
       SNOWFLAKE_DATABASE: ${{ vars.SNOWFLAKE_DATABASE_PROD }}
       SNOWFLAKE_SCHEMA: ${{ vars.SNOWFLAKE_SCHEMA }}
       SNOWFLAKE_USER: ${{ vars.SNOWFLAKE_USER_PROD }}
-      SNOWFLAKE_ROLE: MLOPS_DEPLOY_ROLE
+      SNOWFLAKE_ROLE: MLOPS_PROD_ROLE
       TOPOLOGY: ${{ vars.TOPOLOGY || 'single-account' }}
     steps:
       - uses: actions/checkout@v4
@@ -171,6 +186,10 @@ jobs:
 
       - name: "Promote model to PROD (replicate from STAGE)"
         run: |
+          if [ -z "$BLESSED_VERSION" ]; then
+            echo "::error::No model version provided. Either deploy-stage must pass the quality gate, or specify model_version input for promote_only."
+            exit 1
+          fi
           uv run python -c "
           import sys; sys.path.insert(0, 'source')
           from snowpark_session import create_snowpark_session
@@ -178,18 +197,18 @@ jobs:
           import os, importlib
           session = create_snowpark_session()
           session.sql('USE WAREHOUSE SNOW_MLOPS_PROD_WH').collect()
-          # Get latest version from STAGE
-          rows = session.sql(\"SHOW VERSIONS IN MODEL SNOW_MLOPS_STAGE.ML.\" + MODEL_NAME).collect()
-          versions = [r['name'] for r in rows if r['name'].startswith('V') and r['name'][1:].isdigit()]
-          latest = f'V{max(int(v[1:]) for v in versions)}'
-          print(f'Promoting {MODEL_NAME}/{latest} from STAGE to PROD...')
+          # Use the exact version blessed by the quality gate
+          version = os.environ['BLESSED_VERSION']
+          print(f'Promoting {MODEL_NAME}/{version} from STAGE to PROD...')
           sys.path.insert(0, '.')
           topology = os.getenv('TOPOLOGY', 'single-account')
           module = importlib.import_module(f'deploy.strategies.{topology.replace(\"-\", \"_\")}')
-          module.promote(version=latest, session=session)
-          print(f'Model {MODEL_NAME}/{latest} replicated to PROD.')
+          module.promote(version=version, session=session)
+          print(f'Model {MODEL_NAME}/{version} replicated to PROD.')
           session.close()
           "
+        env:
+          BLESSED_VERSION: ${{ needs.deploy-stage.outputs.model_version || inputs.model_version }}
         timeout-minutes: 5
 
       - name: Register Feature Views in PROD

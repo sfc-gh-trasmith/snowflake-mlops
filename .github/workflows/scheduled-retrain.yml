@@ -14,6 +14,10 @@ permissions:
   contents: read
   issues: write
 
+concurrency:
+  group: ml-pipeline
+  cancel-in-progress: false
+
 env:
   SNOWFLAKE_ACCOUNT: ${{ vars.SNOWFLAKE_ACCOUNT }}
 
@@ -25,7 +29,7 @@ jobs:
       SNOWFLAKE_DATABASE: ${{ vars.SNOWFLAKE_DATABASE_STAGE }}
       SNOWFLAKE_SCHEMA: ${{ vars.SNOWFLAKE_SCHEMA }}
       SNOWFLAKE_USER: ${{ vars.SNOWFLAKE_USER_STAGE }}
-      SNOWFLAKE_ROLE: MLOPS_DEPLOY_ROLE
+      SNOWFLAKE_ROLE: MLOPS_STAGE_ROLE
       STAGE_ONLY: 'true'
     steps:
       - uses: actions/checkout@v4
