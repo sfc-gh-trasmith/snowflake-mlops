@@ -7,6 +7,12 @@ on:
       - '*.md'
       - 'docs/**'
       - 'LICENSE'
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - '*.md'
+      - 'docs/**'
+      - 'LICENSE'
   workflow_dispatch:
     inputs:
       promote_only:
@@ -35,9 +41,10 @@ env:
 
 jobs:
   # ──────────────────────────────────────────────────────────────────────
-  # LINT: Code quality checks (runs in parallel with tests)
+  # CODE QUALITY: Lint + unit tests
   # ──────────────────────────────────────────────────────────────────────
-  lint:
+  code-quality:
+    name: Code Quality
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -57,23 +64,6 @@ jobs:
       - name: Format check (ruff)
         run: uv run ruff format --check source/ scripts/
 
-  # ──────────────────────────────────────────────────────────────────────
-  # TEST: Unit tests (runs in parallel with lint)
-  # ──────────────────────────────────────────────────────────────────────
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v4
-
-      - name: Set up Python
-        run: uv python install 3.12
-
-      - name: Install dependencies
-        run: uv sync
-
       - name: Run unit tests
         run: uv run pytest tests/ -v --ignore=tests/test_endpoint.py
 
@@ -82,8 +72,8 @@ jobs:
   # Skipped when promote_only=true (candidate already in STAGE)
   # ──────────────────────────────────────────────────────────────────────
   deploy-stage:
-    needs: [lint, test]
-    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.promote_only) }}
+    needs: [code-quality]
+    if: ${{ github.event_name != 'pull_request' && !(github.event_name == 'workflow_dispatch' && inputs.promote_only) }}
     runs-on: ubuntu-latest
     environment: STAGE
     outputs:

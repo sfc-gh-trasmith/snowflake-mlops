@@ -32,9 +32,9 @@ def main():
     session.sql(f"USE WAREHOUSE {WAREHOUSE}").collect()
 
     expected_tasks = {
-        "ML_TRAINING_PIPELINE$FEATURE_ENG",
-        "ML_TRAINING_PIPELINE$TRAIN_MODEL",
-        "ML_TRAINING_PIPELINE$EVALUATE",
+        "MLOPS_DEMO_TASK$FEATURE_ENG",
+        "MLOPS_DEMO_TASK$TRAIN_MODEL",
+        "MLOPS_DEMO_TASK$EVALUATE",
     }
     start = time.time()
 
@@ -43,7 +43,7 @@ def main():
     root_rows = session.sql(f"""
         SELECT SCHEDULED_TIME
         FROM TABLE(INFORMATION_SCHEMA.TASK_HISTORY(
-            TASK_NAME => 'ML_TRAINING_PIPELINE',
+            TASK_NAME => 'MLOPS_DEMO_TASK',
             RESULT_LIMIT => 1
         ))
         WHERE DATABASE_NAME = '{DATABASE}'

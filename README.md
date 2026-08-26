@@ -280,7 +280,7 @@ To install locally for development: `uv sync --group ml-runtime`
 3. Adjust quality gate thresholds
 
 **Add multi-account support:**
-1. Implement `deploy/strategies/multi_account.py` with a `promote(version, session)` function
+1. Create `deploy/strategies/multi_account.py` with a `promote(version, session)` function
 2. Set `TOPOLOGY=multi-account` in GitHub variables
 
 ## Documentation

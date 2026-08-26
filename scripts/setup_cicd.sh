@@ -173,7 +173,7 @@ gh api "repos/${GITHUB_OWNER}/${GITHUB_REPO}/branches/main/protection" -X PUT --
 {
   "required_status_checks": {
     "strict": true,
-    "contexts": ["lint", "test"]
+    "contexts": ["Code Quality"]
   },
   "enforce_admins": true,
   "required_pull_request_reviews": {
@@ -193,7 +193,7 @@ gh api "repos/${GITHUB_OWNER}/${GITHUB_REPO}/environments/PROD" -X PUT --input -
 echo ""
 echo "=== Branch protection configured ==="
 echo "  - PRs required to merge to main (no direct pushes, admins included)"
-echo "  - Status checks 'lint' and 'test' must pass"
+echo "  - Status check 'Code Quality' must pass"
 echo "  - 1 approving review required"
 echo "  - Stale reviews dismissed on new pushes"
 echo "  - Force pushes and branch deletion blocked"

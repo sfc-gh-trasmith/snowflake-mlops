@@ -232,7 +232,7 @@
       <div class="wf-card">
         <div class="wf-num">02</div>
         <div class="wf-title">Generate Dataset</div>
-        <div class="wf-desc">Create a versioned training dataset from the Feature View, with automatic point-in-time correctness.</div>
+        <div class="wf-desc">Create a versioned training dataset from the Feature View. Version mirrors the Feature View version (V1, V2, ...) &mdash; reuses existing on reruns, creates new on schema changes.</div>
       </div>
       <div class="wf-arrow">&rarr;</div>
       <div class="wf-card">
@@ -326,9 +326,7 @@
 │   └── rollback.yml               # Manual: rollback to previous model version
 ├── deploy/                        # Promotion strategies (topology-aware)
 │   └── strategies/
-│       ├── single_account.py      # Default: cross-DB replication
-│       ├── multi_account.py       # Future: cross-account
-│       └── cross_region.py        # Future: cross-region
+│       └── single_account.py      # Default: cross-DB replication
 ├── scripts/
 │   ├── setup.sh                   # Infrastructure provisioning
 │   ├── setup_cicd.sh              # OIDC users + network policy
@@ -364,7 +362,7 @@
     <div class="wf-row">
       <div class="wf-card" style="flex: 0.7 1 0;">
         <div class="wf-num">R</div>
-        <div class="wf-title">ML_TRAINING_PIPELINE</div>
+        <div class="wf-title">MLOPS_DEMO_TASK</div>
         <div class="wf-desc">Root task. Orchestrates the DAG. Cron schedule (configurable) or triggered via <code>EXECUTE TASK</code> from CI.</div>
       </div>
       <div class="wf-arrow">&rarr;</div>
@@ -428,7 +426,7 @@ train_func = build_train_model_remote(cfg)
 eval_func = build_evaluate_remote(cfg)
 
 # Define DAG with dependency chain
-with DAG("ML_TRAINING_PIPELINE", warehouse=wh) as dag:
+with DAG("MLOPS_DEMO_TASK", warehouse=wh) as dag:
     fe_task = DAGTask("FEATURE_ENG", definition=fe_func)
     train_task = DAGTask("TRAIN_MODEL", definition=train_func)
     eval_task = DAGTask("EVALUATE", definition=eval_func)
@@ -442,8 +440,8 @@ dag_op.deploy(dag, mode=CreateMode.or_replace)</code></pre>
   <h3>Task Naming Convention</h3>
   <p>The Python SDK prefixes child task names with the DAG name:</p>
   <ul>
-    <li>Root: <code>ML_TRAINING_PIPELINE</code></li>
-    <li>Children: <code>ML_TRAINING_PIPELINE$FEATURE_ENG</code>, <code>ML_TRAINING_PIPELINE$TRAIN_MODEL</code>, <code>ML_TRAINING_PIPELINE$EVALUATE</code></li>
+    <li>Root: <code>MLOPS_DEMO_TASK</code></li>
+    <li>Children: <code>MLOPS_DEMO_TASK$FEATURE_ENG</code>, <code>MLOPS_DEMO_TASK$TRAIN_MODEL</code>, <code>MLOPS_DEMO_TASK$EVALUATE</code></li>
   </ul>
 
   <h3>CLI Usage</h3>
@@ -510,11 +508,39 @@ python source/pipeline/ml_pipeline_dag.py --status --env stage</code></pre>
 
   <p>Training runs as an <strong>ML Job</strong> on a compute pool using the <code>@remote</code> decorator from <code>snowflake.ml.jobs</code>. The function is serialized via <code>cloudpickle</code> and executed in an isolated container.</p>
 
+  <h3>ML Runtime Dependency Management</h3>
+  <p>Training and serving dependencies are pinned in <code>pyproject.toml</code> under the <code>[dependency-groups] ml-runtime</code> group:</p>
+  <pre><code class="language-toml">[dependency-groups]
+ml-runtime = ["xgboost==3.3.0", "scikit-learn==1.6.1"]</code></pre>
+  <p><code>config.py</code> reads this group at import time via <code>tomllib</code>, producing <code>ML_RUNTIME_DEPS</code>. This single source of truth feeds both:</p>
+  <ul>
+    <li><strong>Training (ML Job):</strong> <code>pip_requirements=ML_RUNTIME_DEPS + ["snowflake-ml-python"]</code></li>
+    <li><strong>Serving (Model Registry):</strong> <code>conda_dependencies=ML_RUNTIME_DEPS</code></li>
+  </ul>
+  <p>To update versions: edit <code>pyproject.toml</code>, run <code>uv lock</code>, commit. Both train and serve environments update automatically. Use <code>uv sync --group ml-runtime</code> for local dev parity.</p>
+
+  <h3>Dataset Versioning</h3>
+  <p>The training dataset version is tied to the Feature View version:</p>
+  <pre><code class="language-python"># Version mirrors Feature View: "V1" from "CUSTOMER_RISK_FEATURES$V1"
+dataset_version = fv.split("$")[1]
+try:
+    dataset = fs.generate_dataset(name="FRAUD_TRAINING_DATA", version=dataset_version, ...)
+except Exception as e:
+    if "already exists" in str(e):
+        dataset = snow_dataset.load_dataset(session, "FRAUD_TRAINING_DATA", dataset_version)
+    else:
+        raise</code></pre>
+  <ul>
+    <li><strong>Same FV version (reruns):</strong> Reuses existing dataset &mdash; fast, no regeneration</li>
+    <li><strong>New FV version (schema change):</strong> Creates new dataset version automatically</li>
+    <li><strong>Lineage:</strong> Model V3 &rarr; Dataset V1 &rarr; Feature View V1 (traceable end-to-end)</li>
+  </ul>
+
   <h3>Training Function Pattern</h3>
   <pre><code class="language-python">@remote(
     pool_name,
     stage_name="@DB.SCHEMA.PIPELINE_STAGE",
-    pip_requirements=["xgboost", "scikit-learn", "snowflake-ml-python"],
+    pip_requirements=ML_RUNTIME_DEPS + ["snowflake-ml-python"],
 )
 def train_model() -> str:
     import json                          # MUST be inside for cloudpickle
@@ -1027,15 +1053,7 @@ PIPELINE_CONFIG = {
     # Compute mode per step: "warehouse" or "spcs"
     "feature_engineering_compute": "spcs",
     "training_compute": "spcs",
-    "evaluation_compute": "spcs",
-
-    # Task timeout (max: 86400000 = 24h)
-    "task_timeout_ms": "7200000",  # 2 hours
-
-    # Deployment toggles
-    "deploy_batch_inference": "true",
-    "deploy_realtime_service": "true",
-    "enable_model_monitor": "true",
+    "evaluation_compute": "warehouse",
 }
 
 # Experiment Tracking
