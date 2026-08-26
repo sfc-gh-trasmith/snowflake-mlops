@@ -358,7 +358,11 @@ def feature_eng_warehouse(session: Session) -> str:
     """Feature engineering on warehouse — registers Feature Views."""
     from features.feature_views import register_feature_views
 
-    register_feature_views(session=session)
+    # Use session's current context (set by the Task's database/schema/warehouse)
+    db = session.get_current_database().replace('"', "")
+    schema = session.get_current_schema().replace('"', "")
+    wh = session.get_current_warehouse().replace('"', "")
+    register_feature_views(session=session, database=db, schema=schema, warehouse=wh)
     return "feature_engineering_complete"
 
 
@@ -371,15 +375,26 @@ def train_model_warehouse(session: Session) -> str:
 
 
 def evaluate_warehouse(session: Session) -> str:
-    """Evaluation on warehouse — reads metrics from results table."""
+    """Evaluation on warehouse — reads training metrics and writes evaluation row."""
+    import json
+
     rows = session.sql("""
         SELECT RESULT FROM PIPELINE_RESULTS
         WHERE STEP = 'training' AND STATUS = 'SUCCESS'
         ORDER BY CREATED_AT DESC LIMIT 1
     """).collect()
-    if rows:
-        return "evaluation_complete"
-    raise RuntimeError("EVALUATE failed: no training results found in PIPELINE_RESULTS")
+    if not rows:
+        raise RuntimeError("EVALUATE failed: no training results found in PIPELINE_RESULTS")
+
+    training_result = json.loads(rows[0]["RESULT"])
+    metrics = training_result.get("metrics", {})
+    result = {"status": "success", "step": "evaluation", "metrics": metrics, "pipeline_status": "READY_FOR_REVIEW"}
+    result_json = json.dumps(result)
+    session.sql(f"""
+        INSERT INTO PIPELINE_RESULTS (STEP, STATUS, RESULT, CREATED_AT)
+        SELECT 'evaluation', 'SUCCESS', PARSE_JSON($${result_json}$$), CURRENT_TIMESTAMP()
+    """).collect()
+    return "evaluation_complete"
 
 
 # ─── DAG Deployment ──────────────────────────────────────────────────────────
