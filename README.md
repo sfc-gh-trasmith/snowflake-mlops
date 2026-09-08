@@ -183,7 +183,7 @@ What the script configures:
 | Dismiss stale reviews on new pushes | Yes |
 | Required status checks | `Code Quality` (must pass before merge) |
 | Require branches to be up to date | Yes |
-| Enforce for administrators | Yes |
+| Enforce for administrators | No (admins can bypass for testing; enable for stricter governance) |
 | Allow force pushes | No |
 | Allow branch deletion | No |
 
