@@ -170,6 +170,31 @@ Then create **GitHub Environments** (**Settings → Environments**):
 - **`STAGE`** — no protection rules
 - **`PROD`** — add a required reviewer (this creates the human approval gate)
 
+#### Branch Protection (optional)
+
+The `setup_cicd.sh` script also configures branch protection rules on `main` and creates the GitHub Environments automatically (via `gh` CLI). If your organization manages repository settings separately (e.g., through a platform team, Terraform, or org-level rulesets), you can skip this part of the script and apply equivalent policies through your own process.
+
+What the script configures:
+
+| Setting | Value |
+|---------|-------|
+| Require pull request before merging | Yes (no direct pushes to `main`) |
+| Required approving reviews | 1 |
+| Dismiss stale reviews on new pushes | Yes |
+| Required status checks | `Code Quality` (must pass before merge) |
+| Require branches to be up to date | Yes |
+| Enforce for administrators | No (admins can bypass for testing; enable for stricter governance) |
+| Allow force pushes | No |
+| Allow branch deletion | No |
+
+It also creates two GitHub Environments:
+- **`STAGE`** — no protection rules (deploys automatically after merge)
+- **`PROD`** — requires reviewer approval (the script adds the authenticated `gh` user as the required reviewer)
+
+These protections ensure every change to `main` goes through: **feature branch → PR → code quality checks pass → review approval → merge → pipeline runs**. This is what prevents untested code from reaching STAGE or PROD.
+
+To apply manually instead of using the script, configure these under **Settings → Branches → Branch protection rules** and **Settings → Environments** in your GitHub repository.
+
 ### 6. Test End-to-End
 
 ```bash

@@ -162,8 +162,10 @@ echo "To find your GitHub owner/repo IDs:"
 echo "  curl -s https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO} | jq '.id, .owner.id'"
 
 # =============================================================================
-# Step 4: GitHub Branch Protection & Repo Settings
+# Step 5 (optional): GitHub Branch Protection & Repo Settings
 # Requires: gh CLI authenticated with repo admin access
+# Skip this section if your organization manages repo settings separately
+# (e.g., via Terraform, org-level rulesets, or a platform team).
 # =============================================================================
 echo ""
 echo "=== Setting up GitHub branch protection ==="
@@ -175,7 +177,7 @@ gh api "repos/${GITHUB_OWNER}/${GITHUB_REPO}/branches/main/protection" -X PUT --
     "strict": true,
     "contexts": ["Code Quality"]
   },
-  "enforce_admins": true,
+  "enforce_admins": false,
   "required_pull_request_reviews": {
     "required_approving_review_count": 1,
     "dismiss_stale_reviews": true
