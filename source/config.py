@@ -24,7 +24,7 @@ MIN_RECALL = 0.01
 
 # Training hyperparameters (read by the training closure)
 TRAINING_PARAMS = {
-    "n_estimators": 200,
+    "n_estimators": 100,
     "learning_rate": 0.1,
     "max_depth": 6,
     "scale_pos_weight": 33,
