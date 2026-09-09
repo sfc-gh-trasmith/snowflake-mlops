@@ -1,0 +1,48 @@
+name: Traffic Shift
+
+on:
+  push:
+    branches: [main]
+    paths: ['gateway-config.yml']
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: gateway-traffic
+  cancel-in-progress: false
+
+env:
+  SNOWFLAKE_ACCOUNT: ${{ vars.SNOWFLAKE_ACCOUNT }}
+
+jobs:
+  shift-traffic:
+    runs-on: ubuntu-latest
+    environment: PROD
+    env:
+      SNOWFLAKE_DATABASE: ${{ vars.SNOWFLAKE_DATABASE_PROD }}
+      SNOWFLAKE_SCHEMA: ${{ vars.SNOWFLAKE_SCHEMA }}
+      SNOWFLAKE_USER: ${{ vars.SNOWFLAKE_USER_PROD }}
+      SNOWFLAKE_ROLE: MLOPS_PROD_ROLE
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Snowflake CLI
+        uses: snowflakedb/snowflake-actions@v3
+        with:
+          use-oidc: true
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --group snow --no-default-groups
+
+      - name: Apply gateway traffic configuration
+        run: uv run python scripts/apply_gateway_config.py
+        timeout-minutes: 5

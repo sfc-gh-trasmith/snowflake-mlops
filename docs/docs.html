@@ -821,22 +821,21 @@ predictions_df.write.mode("overwrite").save_as_table("BATCH_PREDICTIONS")</code>
       <div class="wf-arrow">&rarr;</div>
       <div class="wf-card">
         <div class="wf-num" style="background: #249EDB;">4</div>
-        <div class="wf-title">Gateway Traffic Shift</div>
-        <div class="wf-desc"><code>ALTER GATEWAY</code> shifts 100% traffic to new service. Drop old service. Zero-downtime rollout.</div>
+        <div class="wf-title">Canary Traffic Split</div>
+        <div class="wf-desc">Updates <code>gateway-config.yml</code> with 80/20 canary split. <code>traffic-shift.yml</code> applies <code>ALTER GATEWAY</code>.</div>
       </div>
     </div>
   </div>
 
-  <h4>Blue/Green Deployment Flow (6 steps)</h4>
+  <h4>Canary Deployment Flow (5 steps)</h4>
   <table>
     <thead><tr><th>Step</th><th>Action</th><th>Detail</th></tr></thead>
     <tbody>
       <tr><td>1</td><td>Get latest model version</td><td><code>SHOW MODELS</code> &rarr; reads <code>default_version_name</code> (e.g., V12)</td></tr>
       <tr><td>2</td><td>Determine service names</td><td>New: <code>MLOPS_FRAUD_DETECTOR_SERVICE_V12</code>, Old: <code>..._V11</code></td></tr>
       <tr><td>3</td><td>Create new versioned service</td><td><code>mv.create_service()</code> &mdash; builds container image on compute pool</td></tr>
-      <tr><td>4</td><td>Wait for READY</td><td>Polls <code>SYSTEM$GET_SERVICE_STATUS()</code> every 15s, up to 10 min</td></tr>
-      <tr><td>5</td><td>Health check</td><td>Test prediction via <code>mv.run(sample, service_name=...)</code></td></tr>
-      <tr><td>6</td><td>Shift traffic + cleanup</td><td><code>ALTER GATEWAY</code> &rarr; 100% to new service, then <code>DROP SERVICE</code> old</td></tr>
+      <tr><td>4</td><td>Wait for READY + health check</td><td>Polls <code>SYSTEM$GET_SERVICE_STATUS()</code>, then test prediction via <code>mv.run()</code></td></tr>
+      <tr><td>5</td><td>Update gateway-config.yml</td><td>Writes 80/20 canary split. <code>traffic-shift.yml</code> applies the gateway change.</td></tr>
     </tbody>
   </table>
 
@@ -864,17 +863,25 @@ result = mv.run(sample_df, function_name="predict_proba",
 # - output_feature_0 and output_feature_1 columns exist
 # - Probabilities sum to ~1.0 (within 0.01 tolerance)</code></pre>
 
-  <h4>Gateway Traffic Shift</h4>
-  <pre><code class="language-sql">ALTER GATEWAY SNOW_MLOPS_PROD.ML.FRAUD_DETECTOR_GATEWAY
-FROM SPECIFICATION $$
-  spec:
-    type: traffic_split
-    split_type: custom
-    targets:
-      - type: endpoint
-        value: SNOW_MLOPS_PROD.ML.MLOPS_FRAUD_DETECTOR_SERVICE_V12!inference
-        weight: 100
-$$</code></pre>
+  <h4>Gateway Traffic Management</h4>
+  <p>Traffic state lives in <code>gateway-config.yml</code> &mdash; the single source of truth. The deploy script writes the canary split; the engineer edits it to complete the cutover.</p>
+  <pre><code class="language-yaml"># gateway-config.yml (after deploy creates V12 service)
+gateway: FRAUD_DETECTOR_GATEWAY
+database: SNOW_MLOPS_PROD
+schema: ML
+initial_canary_weight: 20
+
+targets:
+  - service: MLOPS_FRAUD_DETECTOR_SERVICE_V11
+    weight: 80
+  - service: MLOPS_FRAUD_DETECTOR_SERVICE_V12
+    weight: 20</code></pre>
+  <p><strong>To complete cutover:</strong> edit <code>gateway-config.yml</code> to set V12 at 100%, remove V11, merge to main. The <code>traffic-shift.yml</code> workflow applies the gateway change and drops V11.</p>
+  <pre><code class="language-yaml"># After cutover (engineer edits and merges)
+targets:
+  - service: MLOPS_FRAUD_DETECTOR_SERVICE_V12
+    weight: 100</code></pre>
+  <p>Set <code>initial_canary_weight: 100</code> to skip the canary period and get instant cutover (same as a traditional blue/green deploy).</p>
 
   <h4>Gateway Access</h4>
   <pre><code class="language-sql">-- Get the gateway URL
@@ -889,8 +896,10 @@ DESC GATEWAY SNOW_MLOPS_PROD.ML.FRAUD_DETECTOR_GATEWAY
       <tr><td>Service naming</td><td><code>MLOPS_FRAUD_DETECTOR_SERVICE_{VERSION}</code></td></tr>
       <tr><td>Container build time</td><td>~2-5 min (image built on compute pool)</td></tr>
       <tr><td>Max instances</td><td>2 (auto-scales)</td></tr>
-      <tr><td>Zero downtime</td><td>Old service stays live until new is READY + health-checked</td></tr>
-      <tr><td>Cleanup</td><td>Old service dropped after gateway traffic shifts</td></tr>
+      <tr><td>Zero downtime</td><td>Old service stays live during canary period. Dropped only when removed from <code>gateway-config.yml</code></td></tr>
+      <tr><td>Canary default</td><td>80/20 split (configurable via <code>initial_canary_weight</code>)</td></tr>
+      <tr><td>Traffic config</td><td><code>gateway-config.yml</code> (single source of truth)</td></tr>
+      <tr><td>Cleanup</td><td>Services removed from <code>gateway-config.yml</code> are dropped by <code>traffic-shift.yml</code></td></tr>
       <tr><td>READY timeout</td><td>10 minutes (configurable)</td></tr>
       <tr><td>File</td><td><code>scripts/deploy_prod_service.py</code></td></tr>
     </tbody>

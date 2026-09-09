@@ -1,16 +1,18 @@
-"""Blue/Green PROD deployment with Snowflake Gateway traffic routing.
+"""PROD service deployment: create, validate, and set canary traffic split.
 
-This script is called by the deploy-prod.yml GitHub Actions workflow.
+This script is called by the deploy-prod GitHub Actions workflow.
 It deploys a NEW service for the latest model version, validates it,
-then shifts 100% gateway traffic to the new service and cleans up the old one.
+then updates gateway-config.yml with a canary split (default 80/20).
+
+The traffic-shift workflow reads gateway-config.yml and applies the
+ALTER GATEWAY. The engineer later edits the YAML to shift to 100%.
 
 Flow:
   1. Get latest model version from registry
-  2. Create versioned service (e.g. MLOPS_FRAUD_DETECTOR_SERVICE_V3)
+  2. Create versioned service (e.g. MLOPS_FRAUD_DETECTOR_SERVICE_V7)
   3. Wait for READY state
   4. Health check the new service
-  5. ALTER GATEWAY to route 100% traffic to new service
-  6. Drop old service
+  5. Update gateway-config.yml with canary split
 """
 
 import json
@@ -149,28 +151,52 @@ def health_check(session, service_name, model_version_name):
     return result
 
 
-def shift_gateway_traffic(session, new_service_name):
-    """ALTER GATEWAY to route 100% traffic to the new service."""
-    fqn = f"{PROD_DATABASE}.{PROD_SCHEMA}.{new_service_name}!inference"
-    session.sql(f"""
-        ALTER GATEWAY {PROD_DATABASE}.{PROD_SCHEMA}.{GATEWAY_NAME}
-        FROM SPECIFICATION $$
-          spec:
-            type: traffic_split
-            split_type: custom
-            targets:
-              - type: endpoint
-                value: {fqn}
-                weight: 100
-        $$
-    """).collect()
+def update_gateway_config(new_service_name, old_service_name):
+    """Update gateway-config.yml with a canary split. Does NOT apply — traffic-shift workflow does that."""
+    from apply_gateway_config import load_config
 
+    config_path = Path(__file__).resolve().parent.parent / "gateway-config.yml"
+    config = load_config(config_path)
+    canary_weight = config.get("initial_canary_weight", 20)
 
-def cleanup_old_service(session, old_service_name, new_service_name):
-    """Drop the old service after traffic has been shifted."""
     if old_service_name and old_service_name != new_service_name:
-        print(f"  Dropping old service: {old_service_name}")
-        session.sql(f"DROP SERVICE IF EXISTS {PROD_DATABASE}.{PROD_SCHEMA}.{old_service_name}").collect()
+        # Canary: new service gets canary_weight, old keeps the rest
+        targets = [
+            {"service": old_service_name, "weight": 100 - canary_weight},
+            {"service": new_service_name, "weight": canary_weight},
+        ]
+    else:
+        # First deployment or same service — 100% to new
+        targets = [{"service": new_service_name, "weight": 100}]
+
+    # Write updated YAML
+    lines = [
+        "# Gateway traffic configuration — single source of truth.",
+        "# Edit weights and merge to main to shift traffic.",
+        "# The traffic-shift workflow reads this file and applies ALTER GATEWAY.",
+        "#",
+        "# Services removed from this file (or set to weight 0) are dropped automatically.",
+        "# Weights must sum to 100.",
+        "",
+        f"gateway: {config['gateway']}",
+        f"database: {config['database']}",
+        f"schema: {config['schema']}",
+        "",
+        "# Default canary weight for new deployments (used by deploy_prod_service.py).",
+        "# Set to 100 for instant cutover (no canary period).",
+        f"initial_canary_weight: {canary_weight}",
+        "",
+        "targets:",
+    ]
+    for t in targets:
+        lines.append(f"  - service: {t['service']}")
+        lines.append(f"    weight: {t['weight']}")
+
+    config_path.write_text("\n".join(lines) + "\n")
+    print("  Updated gateway-config.yml:")
+    for t in targets:
+        print(f"    {t['service']}: {t['weight']}%")
+    return targets
 
 
 def main():
@@ -182,7 +208,7 @@ def main():
     session.sql(f"USE WAREHOUSE {PROD_WAREHOUSE}").collect()
 
     # Step 1: Get the latest model version
-    print("\n[1/6] Getting latest model version...")
+    print("\n[1/5] Getting latest model version...")
     models = session.sql(f"SHOW MODELS LIKE '{MODEL_NAME}' IN {PROD_DATABASE}.{PROD_SCHEMA}").collect()
     if not models:
         raise RuntimeError(f"Model {MODEL_NAME} not found in {PROD_DATABASE}.{PROD_SCHEMA}")
@@ -191,7 +217,7 @@ def main():
     print(f"  Model: {MODEL_NAME}, Default version: {default_version}")
 
     # Step 2: Determine service names
-    print("\n[2/6] Determining service names...")
+    print("\n[2/5] Determining service names...")
     new_service_name = f"{SERVICE_PREFIX}_{default_version}"
     old_service_name = get_current_gateway_target(session)
     print(f"  New service: {new_service_name}")
@@ -204,7 +230,7 @@ def main():
         return
 
     # Step 3: Create the new versioned service
-    print(f"\n[3/6] Creating service: {new_service_name}...")
+    print(f"\n[3/5] Creating service: {new_service_name}...")
     from snowflake.ml.registry import Registry
 
     reg = Registry(session=session, database_name=PROD_DATABASE, schema_name=PROD_SCHEMA)
@@ -229,37 +255,32 @@ def main():
             raise
 
     # Step 4: Wait for READY
-    print("\n[4/6] Waiting for service to become READY...")
+    print("\n[4/5] Waiting for service to become READY...")
     ready = wait_for_service_ready(session, new_service_name)
     if not ready:
         raise RuntimeError(f"Service {new_service_name} did not become READY within {READY_TIMEOUT_SECONDS}s")
     print("  Service is READY!")
 
     # Step 5: Health check
-    print(f"\n[5/6] Running health check against {new_service_name}...")
+    # Health check
+    print(f"\n  Running health check against {new_service_name}...")
     result = health_check(session, new_service_name, default_version)
     fraud_prob = result["output_feature_1"].iloc[0]
     print(f"  Health check PASSED (fraud_prob={fraud_prob:.4f})")
 
-    # Step 6: Shift gateway traffic + cleanup
-    print(f"\n[6/6] Shifting gateway traffic to {new_service_name}...")
-    ensure_gateway_exists(session, new_service_name)
-    shift_gateway_traffic(session, new_service_name)
-    print("  Gateway updated! 100% traffic now routes to new service.")
-
-    # Cleanup old service
-    cleanup_old_service(session, old_service_name, new_service_name)
-
-    # Show gateway endpoint
-    gw = session.sql(f"DESC GATEWAY {PROD_DATABASE}.{PROD_SCHEMA}.{GATEWAY_NAME}").collect()
-    gateway_url = gw[0]["ingress_url"] if gw else "provisioning..."
-    print(f"\n  Gateway URL: https://{gateway_url}")
+    # Step 5: Update gateway config (traffic-shift workflow applies it)
+    print("\n[5/5] Updating gateway-config.yml with canary split...")
+    targets = update_gateway_config(new_service_name, old_service_name)
 
     print("\n" + "=" * 60)
-    print("PROD DEPLOYMENT COMPLETE (Blue/Green)")
+    print("PROD SERVICE DEPLOYED (canary)")
     print(f"  Model: {MODEL_NAME} ({default_version})")
     print(f"  Service: {new_service_name}")
-    print(f"  Gateway: {GATEWAY_NAME}")
+    print("  Traffic split:")
+    for t in targets:
+        print(f"    {t['service']}: {t['weight']}%")
+    print("\n  Next: traffic-shift workflow applies the gateway change.")
+    print("  To complete cutover: edit gateway-config.yml to 100% and merge.")
     print("=" * 60)
     session.close()
 

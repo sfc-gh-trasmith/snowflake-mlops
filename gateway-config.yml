@@ -1,0 +1,18 @@
+# Gateway traffic configuration — single source of truth.
+# Edit weights and merge to main to shift traffic.
+# The traffic-shift workflow reads this file and applies ALTER GATEWAY.
+#
+# Services removed from this file (or set to weight 0) are dropped automatically.
+# Weights must sum to 100.
+
+gateway: FRAUD_DETECTOR_GATEWAY
+database: SNOW_MLOPS_PROD
+schema: ML
+
+# Default canary weight for new deployments (used by deploy_prod_service.py).
+# Set to 100 for instant cutover (no canary period).
+initial_canary_weight: 20
+
+targets:
+  - service: MLOPS_FRAUD_DETECTOR_SERVICE_V6
+    weight: 100
