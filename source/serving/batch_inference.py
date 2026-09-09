@@ -71,10 +71,13 @@ def run_batch_inference(
 
     predictions_df = mv.run(input_df, function_name="predict_proba")
 
-    # Add timestamp for model monitoring
+    # Add timestamp for model monitoring (TIMESTAMP_NTZ required by MODEL MONITOR)
     from snowflake.snowpark.functions import current_timestamp
+    from snowflake.snowpark.types import TimestampType
 
-    predictions_df = predictions_df.with_column("PREDICTION_TS", current_timestamp())
+    predictions_df = predictions_df.with_column(
+        "PREDICTION_TS", current_timestamp().cast(TimestampType(TimestampType.NTZ))
+    )
 
     predictions_df.write.mode("overwrite").save_as_table(output_table)
     print(f"  Output written to: {output_table}")
