@@ -10,7 +10,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import snowflake.snowpark.functions as F
-from config import DATABASE, FEATURE_VIEW_CONFIG, SCHEMA, SOURCE_DATABASE, SOURCE_SCHEMA, WAREHOUSE
+from config import (
+    DATABASE,
+    FEATURE_VIEW_CONFIG,
+    FEATURE_VIEW_VERSION,
+    SCHEMA,
+    SOURCE_DATABASE,
+    SOURCE_SCHEMA,
+    WAREHOUSE,
+)
 from snowflake.ml.feature_store import CreationMode, Entity, FeatureStore, FeatureView
 from snowflake.snowpark import Session
 from snowpark_session import create_snowpark_session
@@ -121,9 +129,9 @@ def register_feature_views(session=None, database=None, schema=None, warehouse=N
         refresh_freq=FEATURE_VIEW_CONFIG.get("customer_features_refresh", "1 hour"),
         desc="Customer-level risk signals for fraud detection",
     )
-    customer_fv = fs.register_feature_view(feature_view=customer_fv, version="V1", overwrite=True)
+    customer_fv = fs.register_feature_view(feature_view=customer_fv, version=FEATURE_VIEW_VERSION, overwrite=True)
     print(
-        f"  Registered: CUSTOMER_RISK_FEATURES/V1 (refresh={FEATURE_VIEW_CONFIG.get('customer_features_refresh', '1 hour')})"
+        f"  Registered: CUSTOMER_RISK_FEATURES/{FEATURE_VIEW_VERSION} (refresh={FEATURE_VIEW_CONFIG.get('customer_features_refresh', '1 hour')})"
     )
 
     # Transaction context features
@@ -137,9 +145,9 @@ def register_feature_views(session=None, database=None, schema=None, warehouse=N
         refresh_freq=FEATURE_VIEW_CONFIG.get("transaction_features_refresh", "1 hour"),
         desc="Per-transaction contextual signals for fraud detection",
     )
-    txn_fv = fs.register_feature_view(feature_view=txn_fv, version="V1", overwrite=True)
+    txn_fv = fs.register_feature_view(feature_view=txn_fv, version=FEATURE_VIEW_VERSION, overwrite=True)
     print(
-        f"  Registered: TRANSACTION_CONTEXT_FEATURES/V1 (refresh={FEATURE_VIEW_CONFIG.get('transaction_features_refresh', '1 hour')})"
+        f"  Registered: TRANSACTION_CONTEXT_FEATURES/{FEATURE_VIEW_VERSION} (refresh={FEATURE_VIEW_CONFIG.get('transaction_features_refresh', '1 hour')})"
     )
 
     if close_session:
