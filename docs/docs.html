@@ -7,21 +7,23 @@
   <title>MLOps on Snowflake | End-to-End ML Operations Framework</title>
   <script type="application/json" id="snowflake-report-metadata">
   {
-    "generated": "2026-08-10",
-    "intent": "Production-ready MLOps framework documentation — covers what MLOps is, Snowflake ML capabilities, Task DAG orchestration (Python SDK), ML Jobs (@remote), Feature Store, Model Registry, batch and real-time inference, Gateway deployment, CI/CD pipeline, model monitoring, rollback, and RBAC",
+    "generated": "2026-09-09",
+    "intent": "Production-ready MLOps framework documentation — covers what MLOps is, Snowflake ML capabilities, Task DAG orchestration (Python SDK), ML Jobs (@remote), Feature Store, Model Training, Model Registry, batch and real-time inference, Gateway deployment, model monitoring, experiment tracking, CI/CD pipeline, rollback, RBAC, required GitHub variables, interactive notebooks, testing, and configuration",
     "sections": [
-      { "id": "overview", "title": "Overview", "producerNotes": "What is MLOps, Snowflake ML capabilities table, framework positioning, pipeline flow diagram, environment layout" },
-      { "id": "task-dag", "title": "Task DAG Orchestration", "producerNotes": "Python SDK DAG, configurable compute per step, ML Jobs vs warehouse" },
-      { "id": "feature-store", "title": "Feature Store", "producerNotes": "Dynamic Tables, entity registration, versioning, refresh strategies" },
-      { "id": "model-training", "title": "Model Training", "producerNotes": "ML Jobs with @remote, cloudpickle, XGBoost, cross-validation" },
-      { "id": "model-registry", "title": "Model Registry", "producerNotes": "Auto-versioning, quality gate, registration, conda deps" },
-      { "id": "inference", "title": "Inference", "producerNotes": "Warehouse-based batch, SPCS services, Gateway blue/green" },
-      { "id": "monitoring", "title": "Model Monitoring", "producerNotes": "ML Observability, CREATE MODEL MONITOR, data flow, drift detection, lifecycle" },
+      { "id": "overview", "title": "Overview", "producerNotes": "What is MLOps, Snowflake ML capabilities table, framework positioning, pipeline flow diagram, environment layout, project structure" },
+      { "id": "task-dag", "title": "Task DAG Orchestration", "producerNotes": "Python SDK DAG, configurable compute per step (SPCS vs warehouse), ML Jobs vs warehouse, PIPELINE_STAGE note, flow diagram" },
+      { "id": "feature-store", "title": "Feature Store", "producerNotes": "Dynamic Tables, entity registration, CUSTOMER_RISK_FEATURES + TRANSACTION_CONTEXT_FEATURES, versioning, refresh strategies, note on which FV is used in training" },
+      { "id": "model-training", "title": "Model Training", "producerNotes": "ML Jobs with @remote, cloudpickle, XGBoost, cross-validation, ML_RUNTIME_DEPS single source of truth, dataset versioning" },
+      { "id": "model-registry", "title": "Model Registry", "producerNotes": "Auto-versioning, quality gate (template defaults 0.01), dual-platform registration, conda deps" },
+      { "id": "inference", "title": "Inference", "producerNotes": "Warehouse-based batch, SPCS services, Gateway blue/green, autocapture" },
+      { "id": "monitoring", "title": "Model Monitoring", "producerNotes": "ML Observability, CREATE MODEL MONITOR, data flow, drift detection, lifecycle, ENABLE_MODEL_MONITOR" },
       { "id": "experiment-tracking", "title": "Experiment Tracking", "producerNotes": "ExperimentTracking API, log_params, log_metrics, run management" },
-      { "id": "cicd", "title": "CI/CD Pipeline", "producerNotes": "deploy.yml stages, pr-checks, OIDC, approval gate, release tagging" },
-      { "id": "rollback", "title": "Rollback", "producerNotes": "Manual workflow, version revert, service redeploy" },
-      { "id": "rbac", "title": "RBAC & Security", "producerNotes": "MLOPS_STAGE_ROLE, MLOPS_PROD_ROLE, service users, network policy, branch protection" },
-      { "id": "config", "title": "Configuration", "producerNotes": "config.py structure, compute mode, thresholds, deployment toggles" }
+      { "id": "cicd", "title": "CI/CD Pipeline", "producerNotes": "deploy.yml jobs, two promotion paths, promote_only dispatch, scheduled retraining, notification channels, OIDC auth, release tagging" },
+      { "id": "rollback", "title": "Rollback", "producerNotes": "Manual workflow, version revert, service redeploy via blue/green gateway" },
+      { "id": "rbac", "title": "RBAC & Security", "producerNotes": "MLOPS_STAGE_ROLE, MLOPS_PROD_ROLE, service users, network policy, branch protection, required GitHub variables table" },
+      { "id": "notebooks", "title": "Interactive Notebooks", "producerNotes": "Five notebooks (01-05), purpose of each, prerequisite chain, notebooks vs CI pipeline" },
+      { "id": "testing", "title": "Testing", "producerNotes": "test_config.py unit tests (no Snowflake), test_endpoint.py integration tests (live PROD), how to run each" },
+      { "id": "config", "title": "Configuration", "producerNotes": "config.py structure, compute mode, threshold defaults, deployment toggles, environment overrides, adding new pipeline steps" }
     ]
   }
   </script>
@@ -169,6 +171,8 @@
       <li><a href="#cicd">CI/CD Pipeline</a></li>
       <li><a href="#rollback">Rollback</a></li>
       <li><a href="#rbac">RBAC &amp; Security</a></li>
+      <li><a href="#notebooks">Notebooks</a></li>
+      <li><a href="#testing">Testing</a></li>
       <li><a href="#config">Configuration</a></li>
     </ul>
   </nav>
@@ -274,7 +278,7 @@
       <div class="wf-card">
         <div class="wf-num">05</div>
         <div class="wf-title">Quality Gate</div>
-        <div class="wf-desc">Metrics must exceed thresholds (AUC &ge; 0.85, F1 &ge; 0.70). Fails the pipeline if not met.</div>
+        <div class="wf-desc">Metrics must meet thresholds (configurable in <code>config.py</code>). Fails the pipeline if not met — model stays unregistered.</div>
       </div>
     </div>
 
@@ -321,8 +325,8 @@
   <h3>Project Structure</h3>
   <pre><code class="language-plaintext">snowflake-mlops/
 ├── .github/workflows/
-│   ├── pr-checks.yml              # PR: lint + format + tests
-│   ├── deploy.yml                 # Main: lint → test → deploy-stage → deploy-prod
+│   ├── deploy.yml                 # Main: code-quality → deploy-stage → deploy-prod (also runs on PRs)
+│   ├── scheduled-retrain.yml      # Cron (Mon 6AM PT): retrain → register candidate → notify
 │   └── rollback.yml               # Manual: rollback to previous model version
 ├── deploy/                        # Promotion strategies (topology-aware)
 │   └── strategies/
@@ -351,6 +355,41 @@
 │   ├── test_config.py             # Unit tests
 │   └── test_endpoint.py           # Integration tests
 └── notebooks/                     # Educational Jupyter notebooks (01-05)</code></pre>
+
+  <h3>One-Time Setup</h3>
+  <p>Before the CI pipeline can run, three setup steps must be completed <strong>once</strong> by an account admin:</p>
+  <table>
+    <thead><tr><th>Step</th><th>Script</th><th>What It Does</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>1. Infrastructure</td>
+        <td><code>bash scripts/setup.sh</code></td>
+        <td>Creates DEV / STAGE / PROD databases, schemas, warehouses (<code>MEDIUM</code>, auto-suspend 120s), compute pools (<code>CPU_X64_M</code>, 1–3 nodes), and three general-purpose stages per environment: <code>ML_ARTIFACTS</code>, <code>DAG_STAGE</code>, <code>JOB_STAGE</code>. Also grants <code>EXECUTE TASK</code>, <code>EXECUTE MANAGED TASK</code>, and <code>BIND SERVICE ENDPOINT</code> at the account level.</td>
+      </tr>
+      <tr>
+        <td>2. Synthetic data</td>
+        <td><code>uv run python scripts/generate_dataset.py</code></td>
+        <td>Generates synthetic fraud data in <code>SNOW_MLOPS_PROD.ML</code> (and a mirror in DEV): <strong>5,000 customers</strong>, <strong>500 merchants</strong> across 12 risk-weighted categories, <strong>100,000 transactions</strong> over 90 days at <strong>~3% fraud rate</strong>. Fraud is injected with correlated signals (high amounts, late-night hours, high-risk merchants). Seeds are fixed (42/43/44) for reproducibility. Creates tables: <code>CUSTOMER_PROFILES</code>, <code>MERCHANT_DATA</code>, <code>RAW_TRANSACTIONS</code>.</td>
+      </tr>
+      <tr>
+        <td>3. CI/CD users &amp; OIDC</td>
+        <td><code>bash scripts/setup_cicd.sh</code></td>
+        <td>Creates OIDC service users (<code>SVC_GITHUB_ACTIONS_STAGE</code>, <code>SVC_GITHUB_ACTIONS</code>), attaches roles, sets up a network policy for GitHub Actions IP ranges, and configures branch protection. <strong>Edit the script first</strong> — it contains <code>&lt;your-github-...&gt;</code> placeholders for your org and repo. The script self-checks and exits with an error if any placeholder is still present.</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>After these three steps: set the required GitHub variables (see <a href="#rbac">RBAC &amp; Security</a>), push to <code>main</code>, and the first CI run will proceed automatically.</p>
+
+  <h3>Source Table Schemas</h3>
+  <p>All pipeline source data lives in <code>SNOW_MLOPS_PROD.ML</code>. These tables are created by <code>generate_dataset.py</code>; adapt them to your own data when customizing the template:</p>
+  <table>
+    <thead><tr><th>Table</th><th>Key Columns</th><th>Notes</th></tr></thead>
+    <tbody>
+      <tr><td><code>RAW_TRANSACTIONS</code></td><td><code>TXN_ID</code>, <code>CUSTOMER_ID</code>, <code>MERCHANT_ID</code>, <code>AMOUNT</code>, <code>TIMESTAMP</code>, <code>DEVICE_TYPE</code>, <code>IS_FRAUD</code> (label)</td><td>~100K rows; used as the Feature Store spine and provides labels for training</td></tr>
+      <tr><td><code>CUSTOMER_PROFILES</code></td><td><code>CUSTOMER_ID</code>, <code>CREDIT_SCORE</code>, <code>ACCOUNT_AGE_DAYS</code>, <code>ANNUAL_INCOME</code></td><td>One row per customer; joined in feature engineering for profile enrichment</td></tr>
+      <tr><td><code>MERCHANT_DATA</code></td><td><code>MERCHANT_ID</code>, <code>CATEGORY</code>, <code>RISK_SCORE</code></td><td>One row per merchant; joined to derive <code>IS_HIGH_RISK_MERCHANT</code> and <code>MERCHANT_RISK_SCORE</code></td></tr>
+    </tbody>
+  </table>
 
 
   <h2 id="task-dag">Task DAG Orchestration</h2>
@@ -389,6 +428,11 @@
     <strong>Key insight:</strong> The <code>@remote</code> decorator does not run the function locally. It serializes the function body + closure variables and uploads the payload to an internal stage. When the Snowflake Task fires, it submits that payload as an <strong>ML Job</strong> to the compute pool. The container starts, installs <code>pip_requirements</code>, deserializes the function, and executes it.
   </div>
 
+  <div class="note">
+    <strong><code>PIPELINE_STAGE</code> vs <code>setup.sh</code> stages</strong>
+    <code>scripts/setup.sh</code> creates three stages for general use: <code>ML_ARTIFACTS</code>, <code>DAG_STAGE</code>, and <code>JOB_STAGE</code>. The pipeline uses a separate stage called <code>PIPELINE_STAGE</code>, which is <strong>created automatically</strong> by <code>ml_pipeline_dag.py --deploy</code> at CI time. You do not need to create <code>PIPELINE_STAGE</code> manually — it is provisioned idempotently on every deploy run.
+  </div>
+
   <h3>Alternative: submit_file vs @remote</h3>
   <table>
     <thead><tr><th>Approach</th><th>How code reaches Snowflake</th><th>Best for</th></tr></thead>
@@ -423,7 +467,7 @@
       <div class="wf-card">
         <div class="wf-num">3</div>
         <div class="wf-title">EVALUATE</div>
-        <div class="wf-desc">Reads metrics from <code>PIPELINE_RESULTS</code>. Marks pipeline as <code>READY_FOR_REVIEW</code>. Quality gate runs downstream in CI (not inside the DAG). <span class="badge badge-spcs">SPCS</span></div>
+        <div class="wf-desc">Reads metrics from <code>PIPELINE_RESULTS</code>. Marks pipeline as <code>READY_FOR_REVIEW</code>. Quality gate runs downstream in CI (not inside the DAG). <span class="badge badge-wh">WH</span></div>
       </div>
     </div>
   </div>
@@ -446,7 +490,7 @@
   <pre><code class="language-python">PIPELINE_CONFIG = {
     "feature_engineering_compute": "spcs",   # "warehouse" or "spcs"
     "training_compute": "spcs",
-    "evaluation_compute": "spcs",
+    "evaluation_compute": "warehouse",        # lightweight eval runs on warehouse
     ...
 }</code></pre>
 
@@ -536,6 +580,11 @@ python source/pipeline/ml_pipeline_dag.py --status --env stage</code></pre>
   </table>
 
   <p>Join key: <code>TXN_ID</code> (entity: <code>TRANSACTION</code>). Provides per-transaction context features that complement the customer-level aggregates above.</p>
+
+  <div class="note">
+    <strong>Which feature view is used in training?</strong>
+    Both feature views are registered by <code>source/features/feature_views.py</code>, but the pipeline DAG currently trains on <strong><code>CUSTOMER_RISK_FEATURES</code> only</strong>. <code>TRANSACTION_CONTEXT_FEATURES</code> is registered and kept fresh, but not yet wired into the training spine. To include it: add the <code>TRANSACTION</code> entity to the Feature Store spine in <code>build_train_model_remote()</code> and join both feature views via <code>fs.generate_dataset(..., features=[cust_fv, txn_fv], ...)</code>.
+  </div>
 
   <h3>Refresh Strategy</h3>
   <p>Both feature views use configurable refresh intervals via <code>FEATURE_VIEW_CONFIG</code>:</p>
@@ -634,16 +683,33 @@ SELECT 'training', 'SUCCESS', PARSE_JSON('{"metrics": {...}}'), CURRENT_TIMESTAM
   </div>
 
   <h3>Quality Gate Thresholds</h3>
+
+  <div class="note">
+    <strong>Template defaults are intentionally low</strong>
+    <code>MIN_AUC_ROC</code>, <code>MIN_PRECISION</code>, and <code>MIN_RECALL</code> are all set to <code>0.01</code> in the template so the pipeline succeeds end-to-end with synthetic data out of the box. Set these to meaningful values before using this template in production.
+  </div>
+
   <table>
-    <thead><tr><th>Metric</th><th>Threshold</th><th>Purpose</th></tr></thead>
+    <thead><tr><th>Metric</th><th>Template Default</th><th>Suggested Production Value</th><th>Purpose</th></tr></thead>
     <tbody>
-      <tr><td>AUC-ROC</td><td>&ge; 0.85</td><td>Discriminative power</td></tr>
-      <tr><td>Precision</td><td>&ge; 0.70</td><td>False positive control</td></tr>
-      <tr><td>Recall</td><td>&ge; 0.60</td><td>Fraud detection coverage</td></tr>
+      <tr><td>AUC-ROC</td><td><code>0.01</code></td><td>&ge; 0.85</td><td>Discriminative power</td></tr>
+      <tr><td>Precision</td><td><code>0.01</code></td><td>&ge; 0.70</td><td>False positive control</td></tr>
+      <tr><td>Recall</td><td><code>0.01</code></td><td>&ge; 0.60</td><td>Fraud detection coverage</td></tr>
     </tbody>
   </table>
 
-  <p>If any threshold fails, the workflow exits with code 1 and the model is not registered.</p>
+  <p>To update thresholds: edit <code>MIN_AUC_ROC</code>, <code>MIN_PRECISION</code>, <code>MIN_RECALL</code> in <code>source/config.py</code>. The quality gate in <code>scripts/quality_gate_and_register.py</code> reads them at runtime — no other changes needed. If any threshold fails, the workflow exits with code 1 and the model is not registered.</p>
+
+  <h3>Dual-Platform Registration</h3>
+  <p>Models are registered with <code>target_platforms=["WAREHOUSE", "SNOWPARK_CONTAINER_SERVICES"]</code>. This tells Snowflake to prepare the model for both serving modes:</p>
+  <table>
+    <thead><tr><th>Platform</th><th>How Used</th></tr></thead>
+    <tbody>
+      <tr><td><code>WAREHOUSE</code></td><td>Enables <code>mv.run()</code> for batch SQL inference — runs as a vectorized UDF inside the warehouse</td></tr>
+      <tr><td><code>SNOWPARK_CONTAINER_SERVICES</code></td><td>Enables <code>mv.create_service()</code> for real-time SPCS deployment</td></tr>
+    </tbody>
+  </table>
+  <p>Both platforms are prepared at registration time, so the same model version can serve both batch and real-time workloads without re-registration.</p>
 
 
   <h2 id="inference">Inference</h2>
@@ -845,8 +911,7 @@ DESC GATEWAY SNOW_MLOPS_PROD.ML.FRAUD_DETECTOR_GATEWAY
   <table>
     <thead><tr><th>Workflow</th><th>Trigger</th><th>Purpose</th></tr></thead>
     <tbody>
-      <tr><td><code>pr-checks.yml</code></td><td>PR to <code>main</code></td><td>Lint + unit tests (must pass before merge)</td></tr>
-      <tr><td><code>deploy.yml</code></td><td>Push to <code>main</code> or manual dispatch</td><td>Full pipeline: train &rarr; promote &rarr; deploy to PROD</td></tr>
+      <tr><td><code>deploy.yml</code></td><td>Push to <code>main</code>, PR to <code>main</code>, or manual dispatch</td><td>Code quality (lint+tests) on every PR; full pipeline on push to main: train &rarr; promote &rarr; deploy to PROD</td></tr>
       <tr><td><code>scheduled-retrain.yml</code></td><td>Weekly cron (Mon 6AM PT) or manual dispatch</td><td>Retrain on fresh data, register candidate in STAGE only</td></tr>
       <tr><td><code>rollback.yml</code></td><td>Manual dispatch</td><td>Revert PROD to a previous model version</td></tr>
     </tbody>
@@ -1003,6 +1068,22 @@ DESC GATEWAY SNOW_MLOPS_PROD.ML.FRAUD_DETECTOR_GATEWAY
   <h3>Network Policy</h3>
   <p>Service users are restricted to GitHub Actions IP ranges via a Snowflake network policy attached at the user level.</p>
 
+  <h3>Required GitHub Variables</h3>
+  <p>These repository-level variables (not secrets) must be set before the first CI run. Set them at <strong>Settings &rarr; Secrets and variables &rarr; Actions &rarr; Variables</strong>:</p>
+  <table>
+    <thead><tr><th>Variable</th><th>Example</th><th>Notes</th></tr></thead>
+    <tbody>
+      <tr><td><code>SNOWFLAKE_ACCOUNT</code></td><td><code>myorg-myaccount</code></td><td>Used by all three workflows</td></tr>
+      <tr><td><code>SNOWFLAKE_DATABASE_STAGE</code></td><td><code>SNOW_MLOPS_STAGE</code></td><td>STAGE environment target DB</td></tr>
+      <tr><td><code>SNOWFLAKE_DATABASE_PROD</code></td><td><code>SNOW_MLOPS_PROD</code></td><td>PROD environment target DB</td></tr>
+      <tr><td><code>SNOWFLAKE_SCHEMA</code></td><td><code>ML</code></td><td>Shared schema name across environments</td></tr>
+      <tr><td><code>SNOWFLAKE_USER_STAGE</code></td><td><code>SVC_GITHUB_ACTIONS_STAGE</code></td><td>OIDC service user for STAGE jobs</td></tr>
+      <tr><td><code>SNOWFLAKE_USER_PROD</code></td><td><code>SVC_GITHUB_ACTIONS</code></td><td>OIDC service user for PROD jobs</td></tr>
+      <tr><td><code>TOPOLOGY</code></td><td><code>single-account</code></td><td>Promotion strategy; only <code>single-account</code> is implemented</td></tr>
+      <tr><td><code>ENABLE_MODEL_MONITOR</code></td><td><code>true</code></td><td>Set to <code>true</code> to create a Model Monitor during deployment; omit or set <code>false</code> to skip (useful while iterating)</td></tr>
+    </tbody>
+  </table>
+
 
   <h2 id="monitoring">Model Monitoring</h2>
 
@@ -1014,19 +1095,25 @@ DESC GATEWAY SNOW_MLOPS_PROD.ML.FRAUD_DETECTOR_GATEWAY
       <div class="wf-card">
         <div class="wf-num">1</div>
         <div class="wf-title">Batch Inference</div>
-        <div class="wf-desc">Scores production data. Writes predictions + <code>PREDICTION_TS</code> timestamp to <code>BATCH_PREDICTIONS</code> table.</div>
+        <div class="wf-desc">Scores production data. Writes predictions + <code>PREDICTION_TS</code> (TIMESTAMP_NTZ) to <code>BATCH_PREDICTIONS</code>.</div>
       </div>
       <div class="wf-arrow">&rarr;</div>
       <div class="wf-card">
         <div class="wf-num">2</div>
         <div class="wf-title">Model Monitor</div>
-        <div class="wf-desc">Reads <code>BATCH_PREDICTIONS</code> on a daily refresh. Aggregates over a 7-day sliding window using <code>PREDICTION_TS</code>.</div>
+        <div class="wf-desc">Reads <code>BATCH_PREDICTIONS</code> on a daily refresh. Aggregates over a 7-day sliding window.</div>
       </div>
       <div class="wf-arrow">&rarr;</div>
       <div class="wf-card">
         <div class="wf-num">3</div>
-        <div class="wf-title">Drift Metrics</div>
-        <div class="wf-desc">Produces distribution statistics for prediction columns. Detects shifts vs. baseline training distribution.</div>
+        <div class="wf-title">Baseline (optional)</div>
+        <div class="wf-desc">If configured, a snapshot table is embedded in the monitor for drift comparison.</div>
+      </div>
+      <div class="wf-arrow">&rarr;</div>
+      <div class="wf-card">
+        <div class="wf-num">4</div>
+        <div class="wf-title">Drift Alert</div>
+        <div class="wf-desc">A Snowflake Alert fires when the drift metric (e.g., PSI) exceeds the configured threshold.</div>
       </div>
     </div>
   </div>
@@ -1034,27 +1121,130 @@ DESC GATEWAY SNOW_MLOPS_PROD.ML.FRAUD_DETECTOR_GATEWAY
   <h3>Monitor Configuration</h3>
   <pre><code class="language-python">MONITOR_CONFIG = {
     "monitor_name": "FRAUD_DETECTOR_MONITOR",
-    "function_name": "predict_proba",          # Model function being monitored
-    "source_table": "BATCH_PREDICTIONS",       # Table written by batch inference
-    "timestamp_column": "PREDICTION_TS",       # Links to batch inference output
-    "prediction_columns": ["output_feature_1"],# Columns to track drift on
-    "refresh_interval": "1 day",               # How often the monitor refreshes
-    "aggregation_window": "7 days",            # Sliding window for aggregation
+    "function_name": "predict_proba",
+    "source_table": "BATCH_PREDICTIONS",
+    "timestamp_column": "PREDICTION_TS",
+    "prediction_columns": ["output_feature_1"],
+    "refresh_interval": "1 day",
+    "aggregation_window": "7 days",
+
+    # Drift detection (requires baseline)
+    "drift_metric": "POPULATION_STABILITY_INDEX",
+    "drift_column": "output_feature_1",
+    "drift_threshold": 0.25,
+
+    # Baseline table (None = no baseline, drift detection disabled)
+    "baseline_table": None,
+
+    # Snowflake Alert for threshold breaches
+    "alert_name": "FRAUD_DETECTOR_DRIFT_ALERT",
+    "alert_schedule": "1440 MINUTE",  # Check daily
 }</code></pre>
+
+  <h3>With vs. Without Baseline</h3>
+  <p>The <code>baseline_table</code> setting controls whether drift detection is active:</p>
+  <table>
+    <thead><tr><th>Mode</th><th>Configuration</th><th>What Happens</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Without baseline</strong></td><td><code>"baseline_table": None</code></td><td>Monitor collects prediction statistics (count, mean, stddev, min/max, histograms) over time. No drift metrics, no alerts. Use this for initial deployment before you have enough data for a meaningful baseline.</td></tr>
+      <tr><td><strong>With baseline</strong></td><td><code>"baseline_table": "BATCH_PREDICTIONS_BASELINE"</code></td><td>A snapshot of the baseline table is embedded in the monitor. Drift metrics (PSI, Jensen&ndash;Shannon, etc.) are computed against it. A Snowflake Alert fires when drift exceeds the threshold.</td></tr>
+    </tbody>
+  </table>
+  <p>To enable drift detection later, create a baseline snapshot from your initial PROD predictions:</p>
+  <pre><code class="language-sql">-- Snapshot current predictions as baseline
+CREATE TABLE SNOW_MLOPS_PROD.ML.BATCH_PREDICTIONS_BASELINE AS
+SELECT * FROM SNOW_MLOPS_PROD.ML.BATCH_PREDICTIONS;
+
+-- Then set baseline_table in config.py:
+-- "baseline_table": "BATCH_PREDICTIONS_BASELINE"</code></pre>
+
+  <h3>Drift Metrics</h3>
+  <p>When a baseline is configured, the monitor can compute any of these drift metrics via <code>MODEL_MONITOR_DRIFT_METRIC()</code>:</p>
+  <table>
+    <thead><tr><th>Metric</th><th>What It Measures</th><th>Best For</th></tr></thead>
+    <tbody>
+      <tr><td><strong>POPULATION_STABILITY_INDEX</strong> (PSI)</td><td>Distribution shift between baseline and current predictions (binned comparison)</td><td>Overall prediction drift. Industry standard for credit/fraud. &lt;0.1 = stable, 0.1&ndash;0.25 = investigate, &gt;0.25 = significant shift.</td></tr>
+      <tr><td><strong>JENSEN_SHANNON</strong></td><td>Symmetric divergence between two distributions (0 = identical, 1 = completely different)</td><td>Symmetric comparison. Works well for both continuous and categorical features.</td></tr>
+      <tr><td><strong>WASSERSTEIN</strong></td><td>&ldquo;Earth mover&rsquo;s distance&rdquo; &mdash; minimum cost to transform one distribution into another</td><td>Continuous distributions. Sensitive to shifts in the tails.</td></tr>
+      <tr><td><strong>DIFFERENCE_OF_MEANS</strong></td><td>Simple difference between average prediction values</td><td>Quick sanity check. Large shift in mean prediction is an obvious red flag.</td></tr>
+    </tbody>
+  </table>
+  <p>Set the metric in <code>MONITOR_CONFIG["drift_metric"]</code>. The default is <code>POPULATION_STABILITY_INDEX</code>.</p>
+
+  <h3>Threshold Alerts</h3>
+  <p>When a baseline is configured, the framework creates a <a href="https://docs.snowflake.com/en/sql-reference/sql/create-alert">Snowflake Alert</a> that checks the drift metric daily:</p>
+  <pre><code class="language-sql">-- Alert fires when PSI > 0.25 in the last 24 hours
+CREATE ALERT FRAUD_DETECTOR_DRIFT_ALERT
+    WAREHOUSE = SNOW_MLOPS_PROD_WH
+    SCHEDULE = '1440 MINUTE'
+    IF (EXISTS (
+        SELECT 1 FROM TABLE(MODEL_MONITOR_DRIFT_METRIC(
+            'FRAUD_DETECTOR_MONITOR', 'POPULATION_STABILITY_INDEX',
+            'output_feature_1', '1 DAY'
+        )) WHERE METRIC_VALUE > 0.25
+           AND EVENT_TIMESTAMP > DATEADD('DAY', -1, CURRENT_TIMESTAMP())
+    ))
+    THEN
+        INSERT INTO DRIFT_ALERTS (DRIFT_METRIC, THRESHOLD, STATUS)
+        VALUES ('POPULATION_STABILITY_INDEX', 0.25, 'THRESHOLD_EXCEEDED');</code></pre>
+  <p>Breaches are logged to a <code>DRIFT_ALERTS</code> table. Extend the alert action with a <a href="https://docs.snowflake.com/en/sql-reference/sql/create-notification-integration">notification integration</a> (email, Slack, PagerDuty) for real-time alerting.</p>
 
   <h3>Lifecycle</h3>
   <table>
     <thead><tr><th>Operation</th><th>When</th><th>What Happens</th></tr></thead>
     <tbody>
-      <tr><td>Create</td><td>deploy-prod (if <code>ENABLE_MODEL_MONITOR=true</code>)</td><td><code>CREATE MODEL MONITOR</code> with config above</td></tr>
-      <tr><td>Version tracking</td><td>Each PROD deployment</td><td>If model version changed, drops and recreates the monitor</td></tr>
-      <tr><td>Validate (STAGE)</td><td>deploy-stage</td><td>Creates monitor &rarr; verifies ACTIVE state &rarr; drops it (proves PROD will work)</td></tr>
+      <tr><td>Create</td><td>deploy-prod (if <code>ENABLE_MODEL_MONITOR=true</code>)</td><td><code>CREATE MODEL MONITOR</code> + optionally set baseline + create drift alert</td></tr>
+      <tr><td>Version tracking</td><td>Each PROD deployment</td><td>If model version changed, drops and recreates the monitor (and alert)</td></tr>
+      <tr><td>Validate (STAGE)</td><td>deploy-stage</td><td>Creates monitor &rarr; verifies ACTIVE &rarr; drops (proves PROD will work)</td></tr>
       <tr><td>Suspend / Resume</td><td>Manual</td><td><code>suspend_monitor()</code> / <code>resume_monitor()</code> for cost control</td></tr>
+      <tr><td>Query drift</td><td>Ad-hoc</td><td><code>query_drift(session, env, lookback_days=30)</code> returns drift metrics over time</td></tr>
     </tbody>
   </table>
 
   <h3>Real-Time Inference Monitoring</h3>
   <p>For SPCS services, the <code>autocapture=True</code> parameter on <code>mv.create_service()</code> enables automatic logging of all inference requests and responses. Query captured data with <code>INFERENCE_TABLE()</code>.</p>
+
+  <h3>Custom Metrics</h3>
+  <p>The native <code>MODEL MONITOR</code> handles built-in drift (PSI, Jensen&ndash;Shannon, Wasserstein), performance metrics (ROC_AUC, precision, recall), baseline comparison, segmentation, and the model monitoring dashboard. For a <strong>custom ML metric</strong> &mdash; such as a business score, dollar-weighted fraud loss, or a composite quality metric &mdash; use a different pattern:</p>
+  <ol>
+    <li><strong>Calculate</strong> &mdash; Use a Snowflake Task (scheduled SQL) or ML Job to compute the metric on a schedule.</li>
+    <li><strong>Store</strong> &mdash; Write timestamped results to a table (e.g., <code>CUSTOM_METRICS</code>).</li>
+    <li><strong>Alert</strong> &mdash; Create a Snowflake Alert that checks the latest value against a threshold.</li>
+  </ol>
+  <p>Example:</p>
+  <pre><code class="language-sql">-- 1. Create the metrics table
+CREATE TABLE IF NOT EXISTS CUSTOM_METRICS (
+    METRIC_TS TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+    METRIC_NAME VARCHAR,
+    METRIC_VALUE FLOAT
+);
+
+-- 2. Schedule a task to compute the metric daily
+CREATE OR REPLACE TASK COMPUTE_FRAUD_LOSS_TASK
+    WAREHOUSE = SNOW_MLOPS_PROD_WH
+    SCHEDULE = '1440 MINUTE'
+AS
+    INSERT INTO CUSTOM_METRICS (METRIC_NAME, METRIC_VALUE)
+    SELECT 'FRAUD_LOSS_DOLLARS',
+           SUM(CASE WHEN output_feature_1 > 0.5 AND IS_FRAUD = 1 THEN AMOUNT ELSE 0 END)
+    FROM BATCH_PREDICTIONS bp
+    JOIN RAW_TRANSACTIONS rt ON bp.TXN_ID = rt.TXN_ID
+    WHERE bp.PREDICTION_TS > DATEADD('DAY', -1, CURRENT_TIMESTAMP());
+
+-- 3. Alert when metric crosses a threshold
+CREATE OR REPLACE ALERT FRAUD_LOSS_ALERT
+    WAREHOUSE = SNOW_MLOPS_PROD_WH
+    SCHEDULE = '1440 MINUTE'
+    IF (EXISTS (
+        SELECT 1 FROM CUSTOM_METRICS
+        WHERE METRIC_NAME = 'FRAUD_LOSS_DOLLARS'
+          AND METRIC_VALUE > 50000
+          AND METRIC_TS > DATEADD('DAY', -1, CURRENT_TIMESTAMP())
+    ))
+    THEN
+        INSERT INTO DRIFT_ALERTS (DRIFT_METRIC, THRESHOLD, STATUS)
+        VALUES ('FRAUD_LOSS_DOLLARS', 50000, 'CUSTOM_THRESHOLD_EXCEEDED');</code></pre>
+  <p>This pattern works for any metric that Snowflake&rsquo;s native <code>MODEL MONITOR</code> doesn&rsquo;t cover. Use the native monitor for what it does well (drift, performance, segmentation, dashboard), and custom Tasks + Alerts for business-specific metrics.</p>
 
 
   <h2 id="experiment-tracking">Experiment Tracking</h2>
@@ -1087,6 +1277,63 @@ with exp.start_run(run_name):
     "experiment_name": "FRAUD_DETECTION_TRAINING",
     "run_name_prefix": "pipeline",
 }</code></pre>
+
+
+  <h2 id="notebooks">Interactive Notebooks</h2>
+
+  <p>The <code>notebooks/</code> directory contains five Jupyter notebooks that mirror the pipeline stages. Use them to explore and prototype interactively before committing changes to the CI pipeline.</p>
+
+  <table>
+    <thead><tr><th>Notebook</th><th>What It Covers</th><th>Prerequisite</th></tr></thead>
+    <tbody>
+      <tr><td><code>01_setup_and_data.ipynb</code></td><td>Connect to Snowflake, verify infrastructure, inspect the synthetic dataset created by <code>generate_dataset.py</code></td><td><code>setup.sh</code> + <code>generate_dataset.py</code> must have run</td></tr>
+      <tr><td><code>02_feature_store.ipynb</code></td><td>Register entities and both feature views; inspect Dynamic Table refresh and feature schemas; generate a point-in-time correct training dataset</td><td>Notebook 01</td></tr>
+      <tr><td><code>03_model_training.ipynb</code></td><td>Train XGBoost interactively using the Feature Store dataset; evaluate metrics; save <code>model.ubj</code> and <code>sample_input.json</code> to <code>/tmp/</code></td><td>Notebook 02</td></tr>
+      <tr><td><code>04_registry_and_deploy.ipynb</code></td><td>Register the trained model to the Model Registry; run batch inference on a warehouse; deploy a real-time SPCS service and test it</td><td>Notebook 03</td></tr>
+      <tr><td><code>05_pipeline_orchestration.ipynb</code></td><td>Deploy and execute the full Task DAG end-to-end; monitor task status; inspect experiment tracking results</td><td>Notebooks 01–04</td></tr>
+    </tbody>
+  </table>
+
+  <div class="note">
+    <strong>Notebooks vs CI pipeline</strong>
+    Notebooks are for exploration and development. The CI pipeline (<code>deploy.yml</code>) is the production path. Changes you make in notebooks should eventually be reflected in the corresponding source files under <code>source/</code> so the CI pipeline picks them up.
+  </div>
+
+
+  <h2 id="testing">Testing</h2>
+
+  <p>The project has two test files with different scopes and when they run.</p>
+
+  <h3>Unit Tests: <code>tests/test_config.py</code></h3>
+  <p>Run on every PR and push — no Snowflake connection needed. Tests:</p>
+  <ul>
+    <li>Config values are the right types (strings, numerics)</li>
+    <li>Required keys exist in <code>PIPELINE_CONFIG</code></li>
+    <li><code>ML_RUNTIME_DEPS</code> matches <code>pyproject.toml [dependency-groups] ml-runtime</code> and every dep is pinned with <code>==</code></li>
+    <li>Quality gate thresholds are in range (0, 1.0]</li>
+    <li>Quality gate logic: pass/fail on boundary values, missing keys, multiple failures</li>
+  </ul>
+  <pre><code class="language-bash"># Run unit tests (no Snowflake required)
+uv run pytest tests/ -v --ignore=tests/test_endpoint.py</code></pre>
+
+  <h3>Integration Tests: <code>tests/test_endpoint.py</code></h3>
+  <p>Require a live PROD deployment — run manually after a successful <code>deploy-prod</code> job. Tests:</p>
+  <ul>
+    <li>Gateway exists and has a provisioned ingress URL</li>
+    <li>Active SPCS service behind the gateway is <code>READY</code></li>
+    <li>Service endpoint is publicly accessible</li>
+    <li><code>predict_proba</code> returns two columns (<code>output_feature_0</code>, <code>output_feature_1</code>)</li>
+    <li>Probabilities sum to 1.0 (within 0.01 tolerance)</li>
+    <li>Batch of 3 rows returns 3 results</li>
+    <li>A suspicious profile gets a higher fraud probability than a clean one</li>
+  </ul>
+  <pre><code class="language-bash"># Run integration tests (requires live PROD service)
+SNOWFLAKE_CONNECTION_NAME=your-connection uv run pytest tests/test_endpoint.py -v</code></pre>
+
+  <div class="note">
+    <strong>Integration tests are excluded from CI by default</strong>
+    The CI workflow runs <code>pytest tests/ -v --ignore=tests/test_endpoint.py</code>. Run <code>test_endpoint.py</code> manually after deployment to validate the live service, or add a post-deploy CI step if you want automated smoke testing.
+  </div>
 
 
   <h2 id="config">Configuration</h2>
@@ -1141,9 +1388,9 @@ RETRAIN_CONFIG = {
 }
 
 # Quality gate thresholds
-MIN_AUC_ROC = 0.85
-MIN_PRECISION = 0.70
-MIN_RECALL = 0.60</code></pre>
+MIN_AUC_ROC = 0.01   # Template default — set to e.g. 0.85 for production
+MIN_PRECISION = 0.01  # Template default — set to e.g. 0.70 for production
+MIN_RECALL = 0.01     # Template default — set to e.g. 0.60 for production</code></pre>
 
   <h3>Environment Overrides</h3>
   <p>The CI workflow overrides database/warehouse/pool per environment via environment variables. The <code>ml_pipeline_dag.py</code> script reads <code>--env stage</code> to select the correct config:</p>
