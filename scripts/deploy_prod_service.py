@@ -99,6 +99,7 @@ def health_check(session, service_name, model_version_name):
     """Run a test prediction against the new service to validate it works."""
     import numpy as np
     import pandas as pd
+    from snowflake.ml.model.model_signature import DataType
     from snowflake.ml.registry import Registry
 
     reg = Registry(session=session, database_name=PROD_DATABASE, schema_name=PROD_SCHEMA)
@@ -108,19 +109,37 @@ def health_check(session, service_name, model_version_name):
     sample = pd.DataFrame(
         [
             {
-                "TOTAL_TXN_COUNT": np.int8(20),
+                "TOTAL_TXN_COUNT": 20,
                 "AVG_TXN_AMOUNT": 150.5,
                 "MAX_TXN_AMOUNT": 500.0,
                 "STDDEV_TXN_AMOUNT": 100.0,
-                "UNIQUE_MERCHANTS": np.int8(10),
-                "ACTIVE_DAYS": np.int8(30),
+                "UNIQUE_MERCHANTS": 10,
+                "ACTIVE_DAYS": 30,
                 "LATE_NIGHT_TXN_RATIO": 0.05,
-                "CREDIT_SCORE": np.int16(700),
-                "ACCOUNT_AGE_DAYS": np.int16(365),
-                "ANNUAL_INCOME": np.int32(80000),
+                "CREDIT_SCORE": 700,
+                "ACCOUNT_AGE_DAYS": 365,
+                "ANNUAL_INCOME": 80000,
             }
         ]
     )
+
+    # Cast sample columns to match model signature so health check doesn't fail on type mismatches
+    _DTYPE_MAP = {
+        DataType.INT8: np.int8,
+        DataType.INT16: np.int16,
+        DataType.INT32: np.int32,
+        DataType.INT64: np.int64,
+        DataType.FLOAT: np.float32,
+        DataType.DOUBLE: np.float64,
+    }
+    functions = mv.show_functions()
+    predict_proba = [f for f in functions if f["name"] == "predict_proba"]
+    if predict_proba:
+        for feat in predict_proba[0]["signature"].inputs:
+            if feat.name in sample.columns and feat.as_snowpark_type().__class__.__name__ != "StringType":
+                target_dtype = _DTYPE_MAP.get(feat.type)
+                if target_dtype:
+                    sample[feat.name] = sample[feat.name].astype(target_dtype)
 
     result = mv.run(sample, function_name="predict_proba", service_name=service_name)
     # Validate result structure

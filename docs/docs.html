@@ -286,7 +286,7 @@
       <div class="wf-card wf-card-approval">
         <div class="wf-num">09</div>
         <div class="wf-title">Human Approval</div>
-        <div class="wf-desc">GitHub Environment protection rule requires a reviewer. Scheduled retrain creates a GitHub Issue for notification.</div>
+        <div class="wf-desc">GitHub Environment protection rule requires a reviewer. Scheduled retrain notifies via a configurable channel (GitHub Issue by default; swap for Slack, Teams, email, etc.).</div>
       </div>
       <div class="wf-arrow">&rarr;</div>
       <div class="wf-card wf-card-prod">
@@ -874,7 +874,7 @@ DESC GATEWAY SNOW_MLOPS_PROD.ML.FRAUD_DETECTOR_GATEWAY
       <div class="wf-card" style="border: 2px dashed light-dark(#E8A317, #92700c);">
         <div class="wf-num" style="background: #E8A317;">2</div>
         <div class="wf-title">Waiting for Review</div>
-        <div class="wf-desc">deploy-prod pauses. Reviewer sees metrics in the Job Summary or GitHub Issue. Actions &rarr; Review deployments &rarr; Approve.</div>
+        <div class="wf-desc">deploy-prod pauses. Reviewer sees metrics in the Job Summary or notification (GitHub Issue, Slack, email, etc.). Actions &rarr; Review deployments &rarr; Approve.</div>
       </div>
       <div class="wf-arrow">&rarr;</div>
       <div class="wf-card">
@@ -902,7 +902,7 @@ DESC GATEWAY SNOW_MLOPS_PROD.ML.FRAUD_DETECTOR_GATEWAY
   </ul>
 
   <h3>Workflow: scheduled-retrain.yml (Periodic Retraining)</h3>
-  <p>Trains a new model on fresh data without promoting to PROD. Creates a GitHub Issue so a human can review and approve.</p>
+  <p>Trains a new model on fresh data without promoting to PROD. Notifies a human so they can review metrics and decide whether to promote the candidate.</p>
   <table>
     <thead><tr><th>Step</th><th>Action</th></tr></thead>
     <tbody>
@@ -910,15 +910,28 @@ DESC GATEWAY SNOW_MLOPS_PROD.ML.FRAUD_DETECTOR_GATEWAY
       <tr><td>2</td><td>Trigger pipeline (FEATURE_ENG &rarr; TRAIN &rarr; EVALUATE)</td></tr>
       <tr><td>3</td><td>Wait for ML Jobs to complete</td></tr>
       <tr><td>4</td><td>Quality gate + register (<code>STAGE_ONLY=true</code> &mdash; does NOT promote to PROD)</td></tr>
-      <tr><td>5</td><td>Create GitHub Issue: "Model Candidate Ready: V2" with metrics table</td></tr>
+      <tr><td>5</td><td>Notify: create GitHub Issue with model version and metrics table</td></tr>
     </tbody>
   </table>
   <p><strong>To promote the candidate:</strong></p>
   <ol>
-    <li>Review the GitHub Issue (metrics, version)</li>
+    <li>Review the notification (metrics, version)</li>
     <li>Go to Actions &rarr; Deploy &rarr; Run workflow &rarr; check <code>promote_only: true</code></li>
     <li>Approve the PROD deployment when prompted</li>
   </ol>
+  <h4>Notification Channel</h4>
+  <p>The template ships with <code>scripts/notify_candidate.py</code>, which creates a <strong>GitHub Issue</strong> by default. This is a pluggable step &mdash; swap it out for whatever notification channel your team uses:</p>
+  <table>
+    <thead><tr><th>Channel</th><th>How to Adapt</th></tr></thead>
+    <tbody>
+      <tr><td><strong>GitHub Issue</strong> (default)</td><td>Works out of the box. Uses <code>GITHUB_TOKEN</code> from the workflow.</td></tr>
+      <tr><td><strong>Slack</strong></td><td>Replace with a Slack webhook POST or <a href="https://github.com/slackapi/slack-github-action">slackapi/slack-github-action</a>.</td></tr>
+      <tr><td><strong>Microsoft Teams</strong></td><td>POST to an Incoming Webhook connector URL.</td></tr>
+      <tr><td><strong>Email</strong></td><td>Use <code>sendgrid</code>, <code>ses</code>, or your SMTP relay. Alternatively, use a Snowflake notification integration (<code>CREATE NOTIFICATION INTEGRATION</code>) to send email directly from Snowflake.</td></tr>
+      <tr><td><strong>PagerDuty / Opsgenie</strong></td><td>POST to the Events API for on-call routing.</td></tr>
+    </tbody>
+  </table>
+  <p>The key contract: the notification step receives the metrics file (<code>METRICS_FILE</code> env var) and the model version, and sends a human-readable summary to the right audience. The promotion workflow is the same regardless of notification channel.</p>
 
   <h3>Authentication</h3>
   <p>CI uses <strong>OIDC workload identity</strong> (zero secrets stored in GitHub). The Snowflake CLI action handles token exchange automatically.</p>
