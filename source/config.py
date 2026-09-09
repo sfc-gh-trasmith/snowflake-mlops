@@ -71,6 +71,16 @@ MONITOR_CONFIG = {
     "prediction_columns": ["output_feature_1"],
     "refresh_interval": "1 day",
     "aggregation_window": "7 days",
+    # Drift detection (requires baseline to be set)
+    # Supported: POPULATION_STABILITY_INDEX, JENSEN_SHANNON, WASSERSTEIN, DIFFERENCE_OF_MEANS
+    "drift_metric": "POPULATION_STABILITY_INDEX",
+    "drift_column": "output_feature_1",
+    "drift_threshold": 0.25,
+    # Baseline table for drift comparison (set to None to skip — drift metrics won't compute without it)
+    "baseline_table": None,
+    # Snowflake Alert for threshold breaches
+    "alert_name": "FRAUD_DETECTOR_DRIFT_ALERT",
+    "alert_schedule": "1440 MINUTE",
 }
 
 # Experiment Tracking configuration

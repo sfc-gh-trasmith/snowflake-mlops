@@ -22,9 +22,6 @@ env/
 .DS_Store
 Thumbs.db
 
-# Snowflake
-.snowflake/
-
 # Jupyter
 .ipynb_checkpoints/
 
@@ -43,7 +40,5 @@ Thumbs.db
 .coverage
 htmlcov/
 
-# uv
-uv.lock
 # E2E test trigger
 # E2E test trigger
