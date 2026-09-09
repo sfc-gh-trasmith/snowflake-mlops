@@ -180,23 +180,7 @@ jobs:
             echo "::error::No model version provided. Either deploy-stage must pass the quality gate, or specify model_version input for promote_only."
             exit 1
           fi
-          uv run python -c "
-          import sys; sys.path.insert(0, 'source')
-          from snowpark_session import create_snowpark_session
-          from config import MODEL_NAME
-          import os, importlib
-          session = create_snowpark_session()
-          session.sql('USE WAREHOUSE SNOW_MLOPS_PROD_WH').collect()
-          # Use the exact version blessed by the quality gate
-          version = os.environ['BLESSED_VERSION']
-          print(f'Promoting {MODEL_NAME}/{version} from STAGE to PROD...')
-          sys.path.insert(0, '.')
-          topology = os.getenv('TOPOLOGY', 'single-account')
-          module = importlib.import_module(f'deploy.strategies.{topology.replace(\"-\", \"_\")}')
-          module.promote(version=version, session=session)
-          print(f'Model {MODEL_NAME}/{version} replicated to PROD.')
-          session.close()
-          "
+          uv run python deploy/promote.py --version "$BLESSED_VERSION"
         env:
           BLESSED_VERSION: ${{ needs.deploy-stage.outputs.model_version || inputs.model_version }}
         timeout-minutes: 5

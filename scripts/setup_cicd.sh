@@ -15,6 +15,13 @@
 
 set -e
 
+# Check for unfilled template placeholders
+if grep -q '<your-github' "$0"; then
+  echo "ERROR: setup_cicd.sh contains unfilled placeholders."
+  echo "Edit the file and replace all <your-github-...> values before running."
+  exit 1
+fi
+
 # --- CONFIGURATION ---
 # Update these with your GitHub repo details.
 # GitHub enriches OIDC subjects with numeric IDs: owner@<owner_id>/repo@<repo_id>
