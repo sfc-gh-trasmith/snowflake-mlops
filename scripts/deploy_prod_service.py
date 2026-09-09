@@ -123,7 +123,14 @@ def health_check(session, service_name, model_version_name):
     )
 
     # Cast sample columns to match model signature so health check doesn't fail on type mismatches
-    _NUMPY_DTYPE = {"INT8": np.int8, "INT16": np.int16, "INT32": np.int32, "INT64": np.int64, "FLOAT": np.float32, "DOUBLE": np.float64}
+    _NUMPY_DTYPE = {
+        "INT8": np.int8,
+        "INT16": np.int16,
+        "INT32": np.int32,
+        "INT64": np.int64,
+        "FLOAT": np.float32,
+        "DOUBLE": np.float64,
+    }
     functions = mv.show_functions()
     predict_proba = [f for f in functions if f["name"].upper() == "PREDICT_PROBA"]
     if predict_proba:

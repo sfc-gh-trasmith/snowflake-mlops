@@ -96,7 +96,14 @@ def _make_sample(
 
 def _cast_to_model_signature(df, mv, function_name="predict_proba"):
     """Cast DataFrame columns to match model signature types."""
-    _NUMPY_DTYPE = {"INT8": np.int8, "INT16": np.int16, "INT32": np.int32, "INT64": np.int64, "FLOAT": np.float32, "DOUBLE": np.float64}
+    _NUMPY_DTYPE = {
+        "INT8": np.int8,
+        "INT16": np.int16,
+        "INT32": np.int32,
+        "INT64": np.int64,
+        "FLOAT": np.float32,
+        "DOUBLE": np.float64,
+    }
     functions = mv.show_functions()
     match = [f for f in functions if f["name"].upper() == function_name.upper()]
     if match:
