@@ -96,24 +96,22 @@ def _make_sample(
 
 def _cast_to_model_signature(df, mv, function_name="predict_proba"):
     """Cast DataFrame columns to match model signature types."""
-    from snowflake.ml.model.model_signature import DataType
-
-    dtype_map = {
-        DataType.INT8: np.int8,
-        DataType.INT16: np.int16,
-        DataType.INT32: np.int32,
-        DataType.INT64: np.int64,
-        DataType.FLOAT: np.float32,
-        DataType.DOUBLE: np.float64,
+    _NUMPY_DTYPE = {
+        "INT8": np.int8,
+        "INT16": np.int16,
+        "INT32": np.int32,
+        "INT64": np.int64,
+        "FLOAT": np.float32,
+        "DOUBLE": np.float64,
     }
     functions = mv.show_functions()
-    match = [f for f in functions if f["name"] == function_name]
+    match = [f for f in functions if f["name"].upper() == function_name.upper()]
     if match:
         for feat in match[0]["signature"].inputs:
             if feat.name in df.columns:
-                target = dtype_map.get(feat.type)
-                if target:
-                    df[feat.name] = df[feat.name].astype(target)
+                np_type = _NUMPY_DTYPE.get(str(feat._dtype).split(".")[-1])
+                if np_type:
+                    df[feat.name] = df[feat.name].astype(np_type)
     return df
 
 

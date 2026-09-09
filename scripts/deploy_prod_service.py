@@ -99,7 +99,6 @@ def health_check(session, service_name, model_version_name):
     """Run a test prediction against the new service to validate it works."""
     import numpy as np
     import pandas as pd
-    from snowflake.ml.model.model_signature import DataType
     from snowflake.ml.registry import Registry
 
     reg = Registry(session=session, database_name=PROD_DATABASE, schema_name=PROD_SCHEMA)
@@ -124,22 +123,22 @@ def health_check(session, service_name, model_version_name):
     )
 
     # Cast sample columns to match model signature so health check doesn't fail on type mismatches
-    _DTYPE_MAP = {
-        DataType.INT8: np.int8,
-        DataType.INT16: np.int16,
-        DataType.INT32: np.int32,
-        DataType.INT64: np.int64,
-        DataType.FLOAT: np.float32,
-        DataType.DOUBLE: np.float64,
+    _NUMPY_DTYPE = {
+        "INT8": np.int8,
+        "INT16": np.int16,
+        "INT32": np.int32,
+        "INT64": np.int64,
+        "FLOAT": np.float32,
+        "DOUBLE": np.float64,
     }
     functions = mv.show_functions()
-    predict_proba = [f for f in functions if f["name"] == "predict_proba"]
+    predict_proba = [f for f in functions if f["name"].upper() == "PREDICT_PROBA"]
     if predict_proba:
         for feat in predict_proba[0]["signature"].inputs:
-            if feat.name in sample.columns and feat.as_snowpark_type().__class__.__name__ != "StringType":
-                target_dtype = _DTYPE_MAP.get(feat.type)
-                if target_dtype:
-                    sample[feat.name] = sample[feat.name].astype(target_dtype)
+            if feat.name in sample.columns:
+                np_type = _NUMPY_DTYPE.get(str(feat._dtype).split(".")[-1])
+                if np_type:
+                    sample[feat.name] = sample[feat.name].astype(np_type)
 
     result = mv.run(sample, function_name="predict_proba", service_name=service_name)
     # Validate result structure
