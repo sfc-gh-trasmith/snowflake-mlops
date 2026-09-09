@@ -151,7 +151,7 @@ def build_feature_eng_remote(cfg: dict):
             refresh_freq="1 hour",
             desc="Customer-level risk signals for fraud detection",
         )
-        fs.register_feature_view(feature_view=customer_fv, version="V1", overwrite=True)
+        fs.register_feature_view(feature_view=customer_fv, version=FEATURE_VIEW_VERSION, overwrite=True)
 
         return json.dumps(
             {"status": "success", "step": "feature_engineering", "feature_view": "CUSTOMER_RISK_FEATURES$V1"}
