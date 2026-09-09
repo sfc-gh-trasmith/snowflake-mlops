@@ -79,19 +79,42 @@ def _make_sample(
     return pd.DataFrame(
         [
             {
-                "TOTAL_TXN_COUNT": np.int8(txn_count),
-                "AVG_TXN_AMOUNT": float(avg_amount),
-                "MAX_TXN_AMOUNT": float(max_amount),
-                "STDDEV_TXN_AMOUNT": float(stddev),
-                "UNIQUE_MERCHANTS": np.int8(merchants),
-                "ACTIVE_DAYS": np.int8(active_days),
-                "LATE_NIGHT_TXN_RATIO": float(late_night_ratio),
-                "CREDIT_SCORE": np.int16(credit_score),
-                "ACCOUNT_AGE_DAYS": np.int16(account_age),
-                "ANNUAL_INCOME": np.int32(income),
+                "TOTAL_TXN_COUNT": txn_count,
+                "AVG_TXN_AMOUNT": avg_amount,
+                "MAX_TXN_AMOUNT": max_amount,
+                "STDDEV_TXN_AMOUNT": stddev,
+                "UNIQUE_MERCHANTS": merchants,
+                "ACTIVE_DAYS": active_days,
+                "LATE_NIGHT_TXN_RATIO": late_night_ratio,
+                "CREDIT_SCORE": credit_score,
+                "ACCOUNT_AGE_DAYS": account_age,
+                "ANNUAL_INCOME": income,
             }
         ]
     )
+
+
+def _cast_to_model_signature(df, mv, function_name="predict_proba"):
+    """Cast DataFrame columns to match model signature types."""
+    from snowflake.ml.model.model_signature import DataType
+
+    dtype_map = {
+        DataType.INT8: np.int8,
+        DataType.INT16: np.int16,
+        DataType.INT32: np.int32,
+        DataType.INT64: np.int64,
+        DataType.FLOAT: np.float32,
+        DataType.DOUBLE: np.float64,
+    }
+    functions = mv.show_functions()
+    match = [f for f in functions if f["name"] == function_name]
+    if match:
+        for feat in match[0]["signature"].inputs:
+            if feat.name in df.columns:
+                target = dtype_map.get(feat.type)
+                if target:
+                    df[feat.name] = df[feat.name].astype(target)
+    return df
 
 
 class TestGatewayHealth:
@@ -125,21 +148,21 @@ class TestPredictions:
 
     def test_predict_proba_returns_two_columns(self, model_version, active_service_name):
         """predict_proba should return probabilities for both classes."""
-        sample = _make_sample()
+        sample = _cast_to_model_signature(_make_sample(), model_version)
         result = model_version.run(sample, function_name="predict_proba", service_name=active_service_name)
         assert "output_feature_0" in result.columns
         assert "output_feature_1" in result.columns
 
     def test_probabilities_sum_to_one(self, model_version, active_service_name):
         """Class probabilities should sum to approximately 1.0."""
-        sample = _make_sample()
+        sample = _cast_to_model_signature(_make_sample(), model_version)
         result = model_version.run(sample, function_name="predict_proba", service_name=active_service_name)
         prob_sum = result["output_feature_0"].iloc[0] + result["output_feature_1"].iloc[0]
         assert abs(prob_sum - 1.0) < 0.01, f"Probabilities sum to {prob_sum}, not 1.0"
 
     def test_probabilities_in_valid_range(self, model_version, active_service_name):
         """All probabilities should be between 0 and 1."""
-        sample = _make_sample()
+        sample = _cast_to_model_signature(_make_sample(), model_version)
         result = model_version.run(sample, function_name="predict_proba", service_name=active_service_name)
         for col in ["output_feature_0", "output_feature_1"]:
             val = result[col].iloc[0]
@@ -147,7 +170,7 @@ class TestPredictions:
 
     def test_predict_returns_binary(self, model_version, active_service_name):
         """predict should return 0 or 1."""
-        sample = _make_sample()
+        sample = _cast_to_model_signature(_make_sample(), model_version, "predict")
         result = model_version.run(sample, function_name="predict", service_name=active_service_name)
         pred = result["output_feature_0"].iloc[0]
         assert pred in (0, 1), f"Prediction {pred} is not binary"
@@ -162,21 +185,25 @@ class TestPredictions:
             ],
             ignore_index=True,
         )
+        batch = _cast_to_model_signature(batch, model_version)
         result = model_version.run(batch, function_name="predict_proba", service_name=active_service_name)
         assert len(result) == 3, f"Expected 3 rows, got {len(result)}"
 
     def test_high_risk_gets_higher_fraud_probability(self, model_version, active_service_name):
         """A suspicious profile should get higher fraud probability than a clean one."""
-        clean = _make_sample(credit_score=800, late_night_ratio=0.0)
-        suspicious = _make_sample(
-            txn_count=3,
-            avg_amount=3000,
-            max_amount=10000,
-            active_days=5,
-            late_night_ratio=0.9,
-            credit_score=350,
-            account_age=30,
-            income=20000,
+        clean = _cast_to_model_signature(_make_sample(credit_score=800, late_night_ratio=0.0), model_version)
+        suspicious = _cast_to_model_signature(
+            _make_sample(
+                txn_count=3,
+                avg_amount=3000,
+                max_amount=10000,
+                active_days=5,
+                late_night_ratio=0.9,
+                credit_score=350,
+                account_age=30,
+                income=20000,
+            ),
+            model_version,
         )
 
         clean_result = model_version.run(clean, function_name="predict_proba", service_name=active_service_name)
