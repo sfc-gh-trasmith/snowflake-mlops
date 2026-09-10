@@ -223,7 +223,7 @@ snowflake-mlops/
 │   ├── wait_for_task.py           # Poll Task DAG completion
 │   ├── quality_gate_and_register.py  # Metric validation + model registration
 │   ├── run_batch_inference.py     # Batch scoring + validation
-│   ├── deploy_prod_service.py     # Blue/green SPCS deployment
+│   ├── deploy_prod_service.py     # PROD canary SPCS deployment
 │   ├── setup_model_monitor.py     # Model monitoring setup/validation
 │   └── notify_candidate.py        # GitHub Issue notification for candidates
 ├── source/
