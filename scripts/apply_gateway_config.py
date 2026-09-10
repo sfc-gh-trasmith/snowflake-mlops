@@ -127,12 +127,71 @@ def cleanup_removed_services(session, db, schema, old_services, new_targets):
             session.sql(f"DROP SERVICE IF EXISTS {db}.{schema}.{svc}").collect()
 
 
+def parse_targets_arg(targets_str, model_name="MLOPS_FRAUD_DETECTOR"):
+    """Parse 'V6:80,V7:20' into target dicts with full service names."""
+    targets = []
+    for pair in targets_str.split(","):
+        pair = pair.strip()
+        if ":" not in pair:
+            raise ValueError(f"Invalid target '{pair}' — expected 'VERSION:WEIGHT' (e.g., 'V7:100')")
+        version, weight = pair.split(":", 1)
+        version = version.strip().upper()
+        service_name = f"{model_name}_SERVICE_{version}"
+        targets.append({"service": service_name, "weight": int(weight.strip())})
+    return targets
+
+
+def update_config_file(config, targets):
+    """Write updated targets back to gateway-config.yml."""
+    config_path = CONFIG_PATH
+    lines = [
+        "# Gateway traffic configuration — single source of truth.",
+        "# Edit weights and merge to main to shift traffic.",
+        "# The traffic-shift workflow reads this file and applies ALTER GATEWAY.",
+        "#",
+        "# Services removed from this file (or set to weight 0) are dropped automatically.",
+        "# Weights must sum to 100.",
+        "",
+        f"gateway: {config['gateway']}",
+        f"database: {config['database']}",
+        f"schema: {config['schema']}",
+        "",
+        "# Default canary weight for new deployments (used by deploy_prod_service.py).",
+        "# Set to 100 for instant cutover (no canary period).",
+        f"initial_canary_weight: {config.get('initial_canary_weight', 20)}",
+        "",
+        "targets:",
+    ]
+    for t in targets:
+        lines.append(f"  - service: {t['service']}")
+        lines.append(f"    weight: {t['weight']}")
+    config_path.write_text("\n".join(lines) + "\n")
+
+
 def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Apply gateway traffic configuration")
+    parser.add_argument(
+        "--targets",
+        help='Traffic targets as "VERSION:WEIGHT" pairs (e.g., "V6:80,V7:20" or "V7:100")',
+    )
+    args = parser.parse_args()
+
     config = load_config()
     gateway_name = config["gateway"]
     db = config["database"]
     schema = config["schema"]
-    targets = config["targets"]
+
+    # If --targets provided, parse and override
+    if args.targets:
+        from config import MODEL_NAME
+
+        targets = parse_targets_arg(args.targets, MODEL_NAME)
+        update_config_file(config, targets)
+        print(f"  Updated gateway-config.yml from --targets: {args.targets}")
+    else:
+        targets = config["targets"]
 
     # Validate weights sum to 100
     total = sum(t["weight"] for t in targets)

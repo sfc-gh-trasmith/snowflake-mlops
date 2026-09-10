@@ -153,46 +153,21 @@ def health_check(session, service_name, model_version_name):
 
 def update_gateway_config(new_service_name, old_service_name):
     """Update gateway-config.yml with a canary split. Does NOT apply — traffic-shift workflow does that."""
-    from apply_gateway_config import load_config
+    from apply_gateway_config import load_config, update_config_file
 
     config_path = Path(__file__).resolve().parent.parent / "gateway-config.yml"
     config = load_config(config_path)
     canary_weight = config.get("initial_canary_weight", 20)
 
     if old_service_name and old_service_name != new_service_name:
-        # Canary: new service gets canary_weight, old keeps the rest
         targets = [
             {"service": old_service_name, "weight": 100 - canary_weight},
             {"service": new_service_name, "weight": canary_weight},
         ]
     else:
-        # First deployment or same service — 100% to new
         targets = [{"service": new_service_name, "weight": 100}]
 
-    # Write updated YAML
-    lines = [
-        "# Gateway traffic configuration — single source of truth.",
-        "# Edit weights and merge to main to shift traffic.",
-        "# The traffic-shift workflow reads this file and applies ALTER GATEWAY.",
-        "#",
-        "# Services removed from this file (or set to weight 0) are dropped automatically.",
-        "# Weights must sum to 100.",
-        "",
-        f"gateway: {config['gateway']}",
-        f"database: {config['database']}",
-        f"schema: {config['schema']}",
-        "",
-        "# Default canary weight for new deployments (used by deploy_prod_service.py).",
-        "# Set to 100 for instant cutover (no canary period).",
-        f"initial_canary_weight: {canary_weight}",
-        "",
-        "targets:",
-    ]
-    for t in targets:
-        lines.append(f"  - service: {t['service']}")
-        lines.append(f"    weight: {t['weight']}")
-
-    config_path.write_text("\n".join(lines) + "\n")
+    update_config_file(config, targets)
     print("  Updated gateway-config.yml:")
     for t in targets:
         print(f"    {t['service']}: {t['weight']}%")

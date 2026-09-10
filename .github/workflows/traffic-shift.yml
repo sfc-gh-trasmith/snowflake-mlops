@@ -4,11 +4,20 @@ on:
   push:
     branches: [main]
     paths: ['gateway-config.yml']
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      targets:
+        description: 'Traffic targets as "VERSION:WEIGHT" pairs (e.g., "V6:80,V7:20" or "V7:100")'
+        required: true
+        type: string
+      reason:
+        description: 'Reason for traffic shift (e.g., "complete V7 canary cutover")'
+        required: false
+        type: string
 
 permissions:
   id-token: write
-  contents: read
+  contents: write
 
 concurrency:
   group: gateway-traffic
@@ -43,6 +52,28 @@ jobs:
       - name: Install dependencies
         run: uv sync --group snow --no-default-groups
 
-      - name: Apply gateway traffic configuration
+      - name: Update gateway-config.yml from inputs
+        if: inputs.targets != ''
+        run: uv run python scripts/apply_gateway_config.py --targets "${{ inputs.targets }}"
+        timeout-minutes: 5
+
+      - name: Apply gateway-config.yml (push-triggered)
+        if: inputs.targets == ''
         run: uv run python scripts/apply_gateway_config.py
         timeout-minutes: 5
+
+      - name: Commit updated gateway-config.yml
+        if: inputs.targets != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add gateway-config.yml
+          if git diff --cached --quiet; then
+            echo "No changes to gateway-config.yml"
+          else
+            REASON="${{ inputs.reason }}"
+            git commit -m "Traffic shift: ${{ inputs.targets }}${REASON:+ — $REASON}"
+            git push
+          fi
