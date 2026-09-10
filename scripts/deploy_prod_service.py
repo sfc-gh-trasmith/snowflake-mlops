@@ -54,31 +54,6 @@ def get_current_gateway_target(session):
     return None
 
 
-def ensure_gateway_exists(session, service_name):
-    """Create the gateway if it doesn't exist, pointing to the given service."""
-    try:
-        session.sql(f"DESC GATEWAY {PROD_DATABASE}.{PROD_SCHEMA}.{GATEWAY_NAME}").collect()
-        return  # Already exists
-    except Exception:
-        pass
-
-    print(f"  Creating gateway: {GATEWAY_NAME}")
-    fqn = f"{PROD_DATABASE}.{PROD_SCHEMA}.{service_name}!inference"
-    session.sql(f"""
-        CREATE GATEWAY {PROD_DATABASE}.{PROD_SCHEMA}.{GATEWAY_NAME}
-        FROM SPECIFICATION $$
-          spec:
-            type: traffic_split
-            split_type: custom
-            targets:
-              - type: endpoint
-                value: {fqn}
-                weight: 100
-        $$
-    """).collect()
-    print("  Gateway created.")
-
-
 def wait_for_service_ready(session, service_name, timeout=READY_TIMEOUT_SECONDS):
     """Poll service status until READY or timeout."""
     fqn = f"{PROD_DATABASE}.{PROD_SCHEMA}.{service_name}"
@@ -176,7 +151,7 @@ def update_gateway_config(new_service_name, old_service_name):
 
 def main():
     print("=" * 60)
-    print("PROD DEPLOYMENT: Blue/Green with Gateway")
+    print("PROD DEPLOYMENT: Canary with Gateway")
     print("=" * 60)
 
     session = create_snowpark_session()
@@ -236,7 +211,6 @@ def main():
         raise RuntimeError(f"Service {new_service_name} did not become READY within {READY_TIMEOUT_SECONDS}s")
     print("  Service is READY!")
 
-    # Step 5: Health check
     # Health check
     print(f"\n  Running health check against {new_service_name}...")
     result = health_check(session, new_service_name, default_version)

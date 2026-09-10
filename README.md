@@ -14,7 +14,7 @@ Use this template as a bootstrap for your MLOps workflows, or as a baseline to e
 - **CI/CD Workflows** — GitHub Actions with OIDC auth, PR checks, and environment-gated approvals
 - **Model Promotion** — Two paths: code-driven (push to main) and data-driven (scheduled retrain with candidate review)
 - **Batch Inference** — Model Registry `run()` on warehouse with prediction validation
-- **Real-Time Inference** — SPCS containers with blue/green Gateway deployment and zero-downtime rollouts
+- **Real-Time Inference** — SPCS containers with canary Gateway deployment and git-driven traffic management
 - **Model Monitoring** — Snowflake ML Observability tracking prediction drift and feature distribution shifts
 - **Rollback** — One-click revert to any previous model version
 - **Scheduled Retraining** — Weekly cron with GitHub Issue notifications for human review
@@ -65,7 +65,7 @@ This template provides:
     - **Promote model** — replicates the exact gated version from STAGE to PROD (no re-resolution), sets as DEFAULT
     - Registers Feature Views in PROD
     - **Batch inference** — validates `model.run()` works in PROD
-    - **Real-time inference** — deploys SPCS container service (blue/green), shifts Gateway traffic to new version
+    - **Real-time inference** — deploys SPCS container service (canary 80/20 split), engineer shifts Gateway traffic to complete cutover
     - Sets up persistent ModelMonitor (tracks prediction drift daily)
     - Tags release: `prod/V3-20260812-...`
 

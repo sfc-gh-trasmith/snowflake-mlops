@@ -15,11 +15,11 @@
       { "id": "feature-store", "title": "Feature Store", "producerNotes": "Dynamic Tables, entity registration, CUSTOMER_RISK_FEATURES + TRANSACTION_CONTEXT_FEATURES, versioning, refresh strategies, note on which FV is used in training" },
       { "id": "model-training", "title": "Model Training", "producerNotes": "ML Jobs with @remote, cloudpickle, XGBoost, cross-validation, ML_RUNTIME_DEPS single source of truth, dataset versioning" },
       { "id": "model-registry", "title": "Model Registry", "producerNotes": "Auto-versioning, quality gate (template defaults 0.01), dual-platform registration, conda deps" },
-      { "id": "inference", "title": "Inference", "producerNotes": "Warehouse-based batch, SPCS services, Gateway blue/green, autocapture" },
+      { "id": "inference", "title": "Inference", "producerNotes": "Warehouse-based batch, SPCS services, Gateway canary deployment, autocapture" },
       { "id": "monitoring", "title": "Model Monitoring", "producerNotes": "ML Observability, CREATE MODEL MONITOR, data flow, drift detection, lifecycle, ENABLE_MODEL_MONITOR" },
       { "id": "experiment-tracking", "title": "Experiment Tracking", "producerNotes": "ExperimentTracking API, log_params, log_metrics, run management" },
       { "id": "cicd", "title": "CI/CD Pipeline", "producerNotes": "deploy.yml jobs, two promotion paths, promote_only dispatch, scheduled retraining, notification channels, OIDC auth, release tagging" },
-      { "id": "rollback", "title": "Rollback", "producerNotes": "Manual workflow, version revert, service redeploy via blue/green gateway" },
+      { "id": "rollback", "title": "Rollback", "producerNotes": "Manual workflow, version revert, service redeploy via gateway-config.yml" },
       { "id": "rbac", "title": "RBAC & Security", "producerNotes": "MLOPS_STAGE_ROLE, MLOPS_PROD_ROLE, service users, network policy, branch protection, required GitHub variables table" },
       { "id": "notebooks", "title": "Interactive Notebooks", "producerNotes": "Five notebooks (01-05), purpose of each, prerequisite chain, notebooks vs CI pipeline" },
       { "id": "testing", "title": "Testing", "producerNotes": "test_config.py unit tests (no Snowflake), test_endpoint.py integration tests (live PROD), how to run each" },
@@ -206,7 +206,7 @@
       <tr><td>Experiment Tracking</td><td><a href="https://docs.snowflake.com/developer-guide/snowflake-ml/experiments">Experiments</a></td><td>Log parameters, metrics, and artifacts for every training run</td></tr>
       <tr><td>Model Management</td><td><a href="https://docs.snowflake.com/developer-guide/snowflake-ml/model-registry/overview">Model Registry</a></td><td>Versioned model storage with conda dependencies, cross-environment replication</td></tr>
       <tr><td>Batch Inference</td><td>Model Registry <code>run()</code></td><td>Score datasets at warehouse scale using registered models</td></tr>
-      <tr><td>Real-Time Inference</td><td><a href="https://docs.snowflake.com/en/developer-guide/snowpark-container-services/overview">SPCS</a> + Gateway</td><td>Container services with blue/green deployment and zero-downtime rollouts</td></tr>
+      <tr><td>Real-Time Inference</td><td><a href="https://docs.snowflake.com/en/developer-guide/snowpark-container-services/overview">SPCS</a> + Gateway</td><td>Container services with canary deployment and git-driven traffic management</td></tr>
       <tr><td>Monitoring</td><td><a href="https://docs.snowflake.com/developer-guide/snowflake-ml/model-registry/model-observability">ML Observability</a></td><td>Prediction drift, feature distribution shift, automated alerting</td></tr>
       <tr><td>Lineage</td><td><a href="https://docs.snowflake.com/developer-guide/snowflake-ml/ml-lineage">ML Lineage</a></td><td>Trace data &rarr; features &rarr; datasets &rarr; models for reproducibility and compliance</td></tr>
     </tbody>
@@ -338,7 +338,7 @@
 │   ├── wait_for_task.py           # Poll task DAG completion
 │   ├── quality_gate_and_register.py  # Validate + register model
 │   ├── run_batch_inference.py     # Batch inference validation
-│   ├── deploy_prod_service.py     # PROD blue/green gateway deploy
+│   ├── deploy_prod_service.py     # PROD canary gateway deploy
 │   ├── setup_model_monitor.py     # Create/validate model monitor
 │   └── notify_candidate.py        # GitHub Issue for retrain candidates
 ├── source/
@@ -796,7 +796,7 @@ predictions_df.write.mode("overwrite").save_as_table("BATCH_PREDICTIONS")</code>
   </table>
 
   <h3>Real-Time Inference (SPCS + Gateway)</h3>
-  <p>The latest model version is deployed as a <strong>containerized SPCS service</strong> behind a <strong>Snowflake Gateway</strong> for HTTP access. Uses a <strong>blue/green deployment</strong> strategy for zero-downtime rollouts.</p>
+  <p>The latest model version is deployed as a <strong>containerized SPCS service</strong> behind a <strong>Snowflake Gateway</strong> for HTTP access. Uses a <strong>canary deployment</strong> strategy with git-driven traffic management via <code>gateway-config.yml</code>.</p>
 
   <h4>Architecture</h4>
   <div class="workflow-diagram">
@@ -954,7 +954,7 @@ DESC GATEWAY SNOW_MLOPS_PROD.ML.FRAUD_DETECTOR_GATEWAY
       <div class="wf-card">
         <div class="wf-num" style="background: #11567F;">3</div>
         <div class="wf-title">deploy-prod runs</div>
-        <div class="wf-desc">Replicate model &rarr; Feature Views &rarr; Batch inference &rarr; SPCS blue/green &rarr; Gateway shift &rarr; Monitor setup &rarr; Git tag.</div>
+        <div class="wf-desc">Replicate model &rarr; Feature Views &rarr; Batch inference &rarr; SPCS canary deploy &rarr; Gateway split &rarr; Monitor setup &rarr; Git tag.</div>
       </div>
     </div>
   </div>
