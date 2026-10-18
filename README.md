@@ -168,12 +168,17 @@ uv run python source/evaluate/entrypoint.py
 ### 5. Set Up CI/CD
 
 ```bash
-bash scripts/setup_cicd.sh
+# Your repo's numeric IDs: gh api repos/<owner>/<repo> --jq '.id, .owner.id'
+GITHUB_OWNER=<owner> GITHUB_OWNER_ID=<owner_id> GITHUB_REPO=<repo> GITHUB_REPO_ID=<repo_id> \
+  bash scripts/setup_cicd.sh
 ```
 
-This creates OIDC service users (`SVC_GITHUB_ACTIONS_STAGE`, `SVC_GITHUB_ACTIONS`) for passwordless CI authentication, plus two roles:
+The IDs form the OIDC subject (`repo:<owner>@<owner_id>/<repo>@<repo_id>:environment:<ENV>`) that each service user trusts. The script is idempotent; re-run it after changing grants.
+
+This creates OIDC service users (`SVC_GITHUB_ACTIONS_STAGE`, `SVC_GITHUB_ACTIONS`) for passwordless CI authentication, plus these roles:
 - **`MLOPS_STAGE_ROLE`** — used by STAGE workflows (DEV + STAGE access; read-only on PROD source data and PROD models, for the champion comparison)
 - **`MLOPS_PROD_ROLE`** — used by PROD workflows (PROD access, BIND SERVICE ENDPOINT)
+- **`MLOPS_STAGE_MODEL_OWNER`** — owns the STAGE registry models and is granted to both roles above. Promotion copies a version with `CREATE/ALTER MODEL ... FROM MODEL`, which requires OWNERSHIP on the source model (USAGE only allows inference). This role gives PROD exactly that without inheriting the rest of `MLOPS_STAGE_ROLE`.
 
 Then configure your GitHub repo (**Settings → Secrets and variables → Actions → Variables tab**):
 
@@ -186,7 +191,7 @@ Then configure your GitHub repo (**Settings → Secrets and variables → Action
 | `SNOWFLAKE_USER_STAGE` | OIDC service user for STAGE | `SVC_GITHUB_ACTIONS_STAGE` |
 | `SNOWFLAKE_USER_PROD` | OIDC service user for PROD | `SVC_GITHUB_ACTIONS` |
 | `TOPOLOGY` | Promotion strategy | `single-account` |
-| `ENABLE_MODEL_MONITOR` | Enable monitoring in PROD (optional) | `true` |
+| `ENABLE_MODEL_MONITOR` | Set up model monitoring (STAGE validates, PROD creates) | `true` |
 
 Then create **GitHub Environments** (**Settings → Environments**):
 - **`STAGE`** — no protection rules
@@ -362,6 +367,18 @@ To update:
 3. Commit — training and serving both pick up the new versions
 
 To install locally for development: `uv sync --group ml-runtime`
+
+### Versioning
+
+Every artifact the pipeline produces is versioned, and each model version links back to the exact data and code that produced it.
+
+| Artifact | Version scheme | Behavior |
+|----------|----------------|----------|
+| Feature view | `feature_store.view_version` (`V1`, `V2`, ...) | Immutable. A rerun with the same definition reuses the existing version (no rebuild). If the feature columns change and the version wasn't bumped, the run fails with a message to bump `view_version`. Bump it for any change to the feature SQL, including logic-only changes that keep the same columns. |
+| Training Dataset | `<view_version>_<UTC timestamp>` (e.g. `V1_20261018_225022`) | A new point-in-time snapshot per training run, so retrains see fresh data. |
+| Model | `V1`, `V2`, ... per environment | Incremented on each run that passes the gate; rejected candidates are dropped. PROD receives the same version name as the STAGE candidate it promotes. |
+
+Each model version records the Dataset version and feature view in its lineage and comment, plus the git commit it was trained from (`git:<sha>`).
 
 ## Serving
 

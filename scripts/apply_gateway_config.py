@@ -89,8 +89,13 @@ def validate_services(session, db, schema, targets):
             raise RuntimeError(f"Service {svc} not found or not accessible: {e}")
 
 
+def gateway_exists(session, db, schema, gateway_name) -> bool:
+    rows = session.sql(f"SHOW GATEWAYS LIKE '{gateway_name}' IN SCHEMA {db}.{schema}").collect()
+    return len(rows) > 0
+
+
 def apply_gateway(session, db, schema, gateway_name, targets):
-    """ALTER GATEWAY with the declared traffic split."""
+    """Create the gateway on first deploy, otherwise ALTER it to the declared split."""
     spec_targets = ""
     for t in targets:
         fqn = f"{db}.{schema}.{t['service']}!inference"
@@ -99,8 +104,10 @@ def apply_gateway(session, db, schema, gateway_name, targets):
                 value: {fqn}
                 weight: {t["weight"]}"""
 
+    verb = "ALTER" if gateway_exists(session, db, schema, gateway_name) else "CREATE"
+    print(f"  {verb} GATEWAY {db}.{schema}.{gateway_name}")
     session.sql(f"""
-        ALTER GATEWAY {db}.{schema}.{gateway_name}
+        {verb} GATEWAY {db}.{schema}.{gateway_name}
         FROM SPECIFICATION $$
           spec:
             type: traffic_split
