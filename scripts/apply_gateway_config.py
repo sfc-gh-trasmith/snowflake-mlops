@@ -15,51 +15,43 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "source"))
 
-try:
-    import yaml
-except ImportError:
-    # PyYAML not available — use a minimal parser for the simple gateway config
-    yaml = None
-
+import yaml
+from config import MODEL_NAME, REALTIME_CONFIG, SCHEMA, env_database, env_setting
 from snowpark_session import create_snowpark_session
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "gateway-config.yml"
+GATEWAY_NAME = REALTIME_CONFIG.get("gateway_name", f"{MODEL_NAME}_GATEWAY")
+PROD_DATABASE = os.getenv("SNOWFLAKE_DATABASE", env_database("prod"))
+PROD_SCHEMA = os.getenv("SNOWFLAKE_SCHEMA", SCHEMA)
 
 
-def load_config(path=None):
-    """Load gateway-config.yml. Uses PyYAML if available, falls back to simple parser."""
+def service_name(version: str) -> str:
+    """Naming convention for per-version inference services."""
+    return f"{MODEL_NAME}_SERVICE_{version.strip().upper()}"
+
+
+def load_config(path=None) -> dict:
+    """Load gateway-config.yml ({"targets": [{"service", "weight"}, ...]})."""
     p = Path(path) if path else CONFIG_PATH
-    text = p.read_text()
-    if yaml:
-        return yaml.safe_load(text)
-    return _parse_simple_yaml(text)
-
-
-def _parse_simple_yaml(text):
-    """Minimal parser for the gateway-config.yml structure (no PyYAML dependency)."""
-    config = {}
-    current_target = None
-    targets = []
-
-    for line in text.split("\n"):
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        if stripped.startswith("- service:"):
-            current_target = {"service": stripped.split(":", 1)[1].strip()}
-            targets.append(current_target)
-        elif stripped.startswith("weight:") and current_target is not None:
-            current_target["weight"] = int(stripped.split(":", 1)[1].strip())
-        elif ":" in stripped and not stripped.startswith("-"):
-            key, val = stripped.split(":", 1)
-            key = key.strip()
-            val = val.strip()
-            if val.isdigit():
-                val = int(val)
-            config[key] = val
-
-    config["targets"] = targets
+    config = yaml.safe_load(p.read_text()) or {}
+    config.setdefault("targets", [])
     return config
+
+
+def validate_weights(targets: list[dict]) -> list[str]:
+    """Return problems with a target list (empty = valid)."""
+    problems = []
+    if not targets:
+        problems.append("no targets")
+    total = sum(int(t.get("weight", 0)) for t in targets)
+    if total != 100:
+        problems.append(f"weights sum to {total}, must be 100")
+    if any(int(t.get("weight", 0)) < 0 for t in targets):
+        problems.append("negative weight")
+    names = [t.get("service") for t in targets]
+    if len(set(names)) != len(names):
+        problems.append("duplicate services")
+    return problems
 
 
 def get_current_gateway_services(session, db, schema, gateway_name):
@@ -127,7 +119,7 @@ def cleanup_removed_services(session, db, schema, old_services, new_targets):
             session.sql(f"DROP SERVICE IF EXISTS {db}.{schema}.{svc}").collect()
 
 
-def parse_targets_arg(targets_str, model_name="MLOPS_FRAUD_DETECTOR"):
+def parse_targets_arg(targets_str):
     """Parse 'V6:80,V7:20' into target dicts with full service names."""
     targets = []
     for pair in targets_str.split(","):
@@ -135,37 +127,18 @@ def parse_targets_arg(targets_str, model_name="MLOPS_FRAUD_DETECTOR"):
         if ":" not in pair:
             raise ValueError(f"Invalid target '{pair}' — expected 'VERSION:WEIGHT' (e.g., 'V7:100')")
         version, weight = pair.split(":", 1)
-        version = version.strip().upper()
-        service_name = f"{model_name}_SERVICE_{version}"
-        targets.append({"service": service_name, "weight": int(weight.strip())})
+        targets.append({"service": service_name(version), "weight": int(weight.strip())})
     return targets
 
 
-def update_config_file(config, targets):
-    """Write updated targets back to gateway-config.yml."""
-    config_path = CONFIG_PATH
-    lines = [
-        "# Gateway traffic configuration — single source of truth.",
-        "# Edit weights and merge to main to shift traffic.",
-        "# The traffic-shift workflow reads this file and applies ALTER GATEWAY.",
-        "#",
-        "# Services removed from this file (or set to weight 0) are dropped automatically.",
-        "# Weights must sum to 100.",
-        "",
-        f"gateway: {config['gateway']}",
-        f"database: {config['database']}",
-        f"schema: {config['schema']}",
-        "",
-        "# Default canary weight for new deployments (used by deploy_prod_service.py).",
-        "# Set to 100 for instant cutover (no canary period).",
-        f"initial_canary_weight: {config.get('initial_canary_weight', 20)}",
-        "",
-        "targets:",
-    ]
+def update_config_file(targets, path=None):
+    """Write targets back to gateway-config.yml, preserving the header comment."""
+    p = Path(path) if path else CONFIG_PATH
+    header = [line for line in (p.read_text().splitlines() if p.exists() else []) if line.startswith("#")]
+    lines = header + ["", "targets:"]
     for t in targets:
-        lines.append(f"  - service: {t['service']}")
-        lines.append(f"    weight: {t['weight']}")
-    config_path.write_text("\n".join(lines) + "\n")
+        lines += [f"  - service: {t['service']}", f"    weight: {t['weight']}"]
+    p.write_text("\n".join(lines) + "\n")
 
 
 def main():
@@ -178,25 +151,18 @@ def main():
     )
     args = parser.parse_args()
 
-    config = load_config()
-    gateway_name = config["gateway"]
-    db = config["database"]
-    schema = config["schema"]
+    gateway_name, db, schema = GATEWAY_NAME, PROD_DATABASE, PROD_SCHEMA
 
-    # If --targets provided, parse and override
     if args.targets:
-        from config import MODEL_NAME
-
-        targets = parse_targets_arg(args.targets, MODEL_NAME)
-        update_config_file(config, targets)
+        targets = parse_targets_arg(args.targets)
+        update_config_file(targets)
         print(f"  Updated gateway-config.yml from --targets: {args.targets}")
     else:
-        targets = config["targets"]
+        targets = load_config()["targets"]
 
-    # Validate weights sum to 100
-    total = sum(t["weight"] for t in targets)
-    if total != 100:
-        print(f"ERROR: Weights sum to {total}, must be 100.")
+    problems = validate_weights(targets)
+    if problems:
+        print(f"ERROR: invalid gateway-config.yml: {'; '.join(problems)}")
         sys.exit(1)
 
     print("=" * 60)
@@ -207,7 +173,7 @@ def main():
         print(f"    {t['service']}: {t['weight']}%")
 
     session = create_snowpark_session()
-    wh = os.getenv("SNOWFLAKE_WAREHOUSE", "SNOW_MLOPS_PROD_WH")
+    wh = os.getenv("SNOWFLAKE_WAREHOUSE", env_setting("prod", "warehouse"))
     session.sql(f"USE WAREHOUSE {wh}").collect()
 
     # Get current state

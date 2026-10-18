@@ -54,7 +54,9 @@ jobs:
 
       - name: Update gateway-config.yml from inputs
         if: inputs.targets != ''
-        run: uv run python scripts/apply_gateway_config.py --targets "${{ inputs.targets }}"
+        env:
+          TARGETS: ${{ inputs.targets }}
+        run: uv run python scripts/apply_gateway_config.py --targets "$TARGETS"
         timeout-minutes: 5
 
       - name: Apply gateway-config.yml (push-triggered)
@@ -64,8 +66,11 @@ jobs:
 
       - name: Commit updated gateway-config.yml
         if: inputs.targets != ''
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
+          SHIFT_TARGETS: ${{ inputs.targets }}
+          SHIFT_REASON: ${{ inputs.reason }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -73,7 +78,6 @@ jobs:
           if git diff --cached --quiet; then
             echo "No changes to gateway-config.yml"
           else
-            REASON="${{ inputs.reason }}"
-            git commit -m "Traffic shift: ${{ inputs.targets }}${REASON:+ — $REASON}"
-            git push
+            git commit -m "Traffic shift: ${SHIFT_TARGETS}${SHIFT_REASON:+ — $SHIFT_REASON}"
+            git push || echo "::warning::Could not push gateway-config.yml (branch protection)."
           fi

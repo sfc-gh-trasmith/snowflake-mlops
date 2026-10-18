@@ -1,0 +1,197 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Snowflake MLOps Template — pipeline configuration
+#
+# This is the single source of truth for pipeline settings. Values here are
+# loaded by source/config.py, which re-exports them as Python constants.
+#
+# Infrastructure names (database/schema/warehouse/compute_pool) can be
+# overridden per-environment below, or by environment variables in CI.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ─── Target environment (where the pipeline WRITES) ──────────────────────────
+database: SNOW_MLOPS_DEV
+schema: ML
+warehouse: SNOW_MLOPS_DEV_WH
+compute_pool: SNOW_MLOPS_DEV_POOL
+
+# ─── Source environment (where raw data LIVES — always PROD) ─────────────────
+source_database: SNOW_MLOPS_PROD
+source_schema: ML
+
+
+# ─── Model identity and contract ─────────────────────────────────────────────
+# The serving, validation, and monitoring code reads these instead of assuming
+# a particular model. Change them when you bring your own model.
+model:
+  name: MLOPS_FRAUD_DETECTOR
+  # binary_classification | multiclass | regression
+  task_type: binary_classification
+  # Registry function used by batch scoring, real-time health checks, and the
+  # monitor: predict_proba for classifiers, predict for regressors.
+  predict_function: predict_proba
+  # Entity key(s) carried through to predictions (for joins and actuals)
+  id_columns: [CUSTOMER_ID]
+  label_column: IS_FRAUD
+
+# ─── Feature Store ───────────────────────────────────────────────────────────
+feature_store:
+  view_name: CUSTOMER_RISK_FEATURES
+  view_version: V1 # Bump when feature SQL changes
+  customer_features_refresh: "1 hour"
+  transaction_features_refresh: "1 hour"
+
+# ─── Quality gate (evaluated in the EVALUATE step) ────────────────────────────
+# metrics: absolute bars, {metric_name: {min: x} | {max: x}}. Metric names must
+#   match those produced for the task_type (see model_training/metrics.py).
+# champion: the candidate must also beat the current default model version on
+#   the same holdout. Skipped automatically when no default version exists.
+#
+# NOTE: The absolute bars are intentionally low so the pipeline succeeds
+# end-to-end with the synthetic demo dataset. Set them to your real business
+# bar before using this template in production.
+quality_gate:
+  metrics:
+    auc_roc: {min: 0.01}
+    precision: {min: 0.01}
+    recall: {min: 0.01}
+  champion:
+    enabled: true
+    # Environment whose default model version is the champion. prod = "beat
+    # what is serving today". Requires read access to that registry.
+    source_env: prod
+    metric: auc_roc
+    higher_is_better: true
+    # Candidate must beat the champion by at least this much. A small negative
+    # value tolerates noise when retraining on similar data.
+    min_improvement: -0.01
+
+# ─── Training hyperparameters ────────────────────────────────────────────────
+training_params:
+  n_estimators: 100
+  learning_rate: 0.1
+  max_depth: 6
+  scale_pos_weight: 33
+  objective: "binary:logistic"
+  eval_metric: aucpr
+  random_state: 42
+
+# ─── Per-step compute selection ──────────────────────────────────────────────
+# Each pipeline step independently chooses its compute:
+#   warehouse — anonymous stored procedure on a virtual warehouse.
+#               Fast start, no image to manage. Good for SQL-heavy work.
+#   spcs      — ML Job on a container compute pool. Arbitrary pip deps, GPU
+#               options, longer runtimes. Good for training.
+#
+# Both modes execute the same run(session) function in each step's logic
+# module, so switching is a config change only.
+#
+# NOTE: SPCS mode requires the deploying environment's Python version to be
+# supported by the compute pool runtime image (3.11 or 3.12).
+pipeline_steps:
+  feature_eng:
+    compute: spcs
+  train_model:
+    compute: spcs
+  evaluate:
+    compute: warehouse
+
+# ─── Serving ─────────────────────────────────────────────────────────────────────────
+# Enable batch, real-time, or both. CI skips the steps for disabled modes, so a
+# batch-only use case never provisions an inference service.
+serving:
+  batch:
+    enabled: true
+    # Schedule for the PROD batch scoring Task (pipeline/batch_inference_dag.py)
+    schedule: "USING CRON 0 7 * * * America/Los_Angeles"
+    # Table to score. null = the training feature view table.
+    input_table: null
+    # Predictions are APPENDED here with MODEL_VERSION and SCORED_AT columns.
+    output_table: BATCH_PREDICTIONS
+  realtime:
+    enabled: true
+    gateway_name: FRAUD_DETECTOR_GATEWAY
+    min_instances: 1
+    max_instances: 2
+    # Initial traffic % for a new version; raise it in gateway-config.yml
+    canary_weight: 20
+    # Rows from the batch input table used for the pre-canary health check
+    health_check_rows: 20
+
+# ─── Data checks (run before feature engineering) ──────────────────────────────
+# Fail the pipeline early on bad upstream data. Keys are tables in the source
+# database/schema. All rules are optional.
+#   min_rows:         minimum row count
+#   max_null_pct:     {column: max % of NULLs, 0-100}
+#   freshness_column: timestamp column; with max_age_hours, fails if the newest
+#                     row is older than that
+data_checks:
+  RAW_TRANSACTIONS:
+    min_rows: 1000
+    max_null_pct: {CUSTOMER_ID: 0, IS_FRAUD: 0}
+    freshness_column: TIMESTAMP
+    max_age_hours: null # synthetic data is static; set e.g. 26 for daily loads
+  CUSTOMER_PROFILES:
+    min_rows: 100
+    max_null_pct: {CUSTOMER_ID: 0}
+
+# ─── Environment overrides ───────────────────────────────────────────────────
+# Selected via --env on the DAG and step entrypoints. Source data always
+# resides in PROD; DEV and STAGE read from it but write artifacts locally.
+environments:
+  dev:
+    database: SNOW_MLOPS_DEV
+    warehouse: SNOW_MLOPS_DEV_WH
+    compute_pool: SNOW_MLOPS_DEV_POOL
+  stage:
+    database: SNOW_MLOPS_STAGE
+    warehouse: SNOW_MLOPS_STAGE_WH
+    compute_pool: SNOW_MLOPS_STAGE_POOL
+  prod:
+    database: SNOW_MLOPS_PROD
+    warehouse: SNOW_MLOPS_PROD_WH
+    compute_pool: SNOW_MLOPS_PROD_POOL
+
+# ─── Experiment Tracking ─────────────────────────────────────────────────────
+experiment:
+  enabled: true
+  experiment_name: FRAUD_DETECTION_TRAINING
+  run_name_prefix: pipeline
+
+# ─── Model Monitor ───────────────────────────────────────────────────────────
+# Reads serving.batch.output_table. The monitored function is
+# model.predict_function.
+monitor:
+  monitor_name: FRAUD_DETECTOR_MONITOR
+  timestamp_column: SCORED_AT
+  # Score column to monitor and to compute drift on. For predict_proba this is
+  # the positive-class probability.
+  prediction_column: output_feature_1
+  refresh_interval: "1 day"
+  aggregation_window: "7 days"
+  # Ground truth. When table is set, the monitor reads a view joining
+  # predictions to labels, which enables performance metrics (AUC, precision,
+  # RMSE, ...) in addition to drift. label_sql is an expression evaluated over
+  # the labels table grouped by join_keys.
+  actuals:
+    table: RAW_TRANSACTIONS # in the source database/schema
+    join_keys: [CUSTOMER_ID]
+    label_sql: "MAX(IS_FRAUD::INT)"
+  # Drift baseline. auto = snapshot of the promotion-time validation scoring;
+  # or a table name; or null to disable drift metrics.
+  baseline: auto
+  # Drift detection. Supported metrics:
+  #   POPULATION_STABILITY_INDEX, JENSEN_SHANNON, WASSERSTEIN, DIFFERENCE_OF_MEANS
+  drift_metric: POPULATION_STABILITY_INDEX
+  drift_threshold: 0.25
+  alert_name: FRAUD_DETECTOR_DRIFT_ALERT
+  alert_schedule: "1440 MINUTE"
+  # Optional: email on drift. Requires an EMAIL notification integration.
+  notification_integration: null
+  notification_recipients: []
+
+# ─── Scheduled retraining ────────────────────────────────────────────────────
+retrain:
+  enabled: true
+  schedule: "USING CRON 0 6 * * MON America/Los_Angeles"
+  stage_only: true
+  notify_github_issue: true

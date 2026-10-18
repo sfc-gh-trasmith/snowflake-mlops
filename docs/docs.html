@@ -13,7 +13,7 @@
       { "id": "overview", "title": "Overview", "producerNotes": "What is MLOps, Snowflake ML capabilities table, framework positioning, pipeline flow diagram, environment layout, project structure" },
       { "id": "task-dag", "title": "Task DAG Orchestration", "producerNotes": "Python SDK DAG, configurable compute per step (SPCS vs warehouse), ML Jobs vs warehouse, PIPELINE_STAGE note, flow diagram" },
       { "id": "feature-store", "title": "Feature Store", "producerNotes": "Dynamic Tables, entity registration, CUSTOMER_RISK_FEATURES + TRANSACTION_CONTEXT_FEATURES, versioning, refresh strategies, note on which FV is used in training" },
-      { "id": "model-training", "title": "Model Training", "producerNotes": "ML Jobs with @remote, cloudpickle, XGBoost, cross-validation, ML_RUNTIME_DEPS single source of truth, dataset versioning" },
+      { "id": "model-training", "title": "Model Training", "producerNotes": "ML Jobs with @remote, cloudpickle, XGBoost, grouped holdout, champion scoring, in-step registration, ML_RUNTIME_DEPS single source of truth, dataset versioning" },
       { "id": "model-registry", "title": "Model Registry", "producerNotes": "Auto-versioning, quality gate (template defaults 0.01), dual-platform registration, conda deps" },
       { "id": "inference", "title": "Inference", "producerNotes": "Warehouse-based batch, SPCS services, Gateway canary deployment, autocapture" },
       { "id": "monitoring", "title": "Model Monitoring", "producerNotes": "ML Observability, CREATE MODEL MONITOR, data flow, drift detection, lifecycle, ENABLE_MODEL_MONITOR" },
@@ -327,32 +327,55 @@
 ├── .github/workflows/
 │   ├── deploy.yml                 # Main: code-quality → deploy-stage → deploy-prod (also runs on PRs)
 │   ├── scheduled-retrain.yml      # Cron (Mon 6AM PT): retrain → register candidate → notify
+│   ├── traffic-shift.yml          # Gateway traffic allocation (gateway-config.yml or dispatch)
 │   └── rollback.yml               # Manual: rollback to previous model version
-├── deploy/                        # Promotion strategies (topology-aware)
+├── deploy/                        # Promotion (single-account) + rollback helper
+│   ├── promote.py
+│   ├── set_default_version.py     # Set model DEFAULT version (rollback)
 │   └── strategies/
-│       └── single_account.py      # Default: cross-DB replication
+│       └── single_account.py      # Cross-DB replication STAGE → PROD
+├── gateway-config.yml             # Real-time gateway traffic targets
 ├── scripts/
 │   ├── setup.sh                   # Infrastructure provisioning
 │   ├── setup_cicd.sh              # OIDC users + network policy
 │   ├── generate_dataset.py        # Synthetic fraud data
-│   ├── wait_for_task.py           # Poll task DAG completion
-│   ├── quality_gate_and_register.py  # Validate + register model
-│   ├── run_batch_inference.py     # Batch inference validation
-│   ├── deploy_prod_service.py     # PROD canary gateway deploy
-│   ├── setup_model_monitor.py     # Create/validate model monitor
-│   └── notify_candidate.py        # GitHub Issue for retrain candidates
+│   ├── apply_gateway_config.py    # Gateway traffic allocation
+│   └── deploy_prod_service.py     # PROD canary gateway deploy
 ├── source/
-│   ├── config.py                  # Centralized configuration
+│   ├── configs/config.yml         # Pipeline configuration (YAML, single source of truth)
+│   ├── config.py                  # YAML loader + resolve_env_config() / step_compute()
 │   ├── snowpark_session.py        # Session helper (SSO + OIDC)
-│   ├── features/                  # Feature Store definitions
+│   ├── feature_engineering/       # Step package: feature engineering
+│   │   ├── entrypoint.py          # CLI: calls feature_engineering.run(session)
+│   │   ├── feature_engineering.py # run(session) -> dict
+│   │   ├── data_checks.py         # Upstream data checks (run first)
+│   │   └── feature_views.py       # Feature View definitions (canonical schema)
+│   ├── model_training/            # Step package: model training + registration
+│   │   ├── entrypoint.py
+│   │   ├── training.py            # build_dataset / train_model / register
+│   │   └── metrics.py             # Metrics per task_type
+│   ├── evaluate/                  # Step package: evaluation + quality gate
+│   │   ├── entrypoint.py
+│   │   ├── evaluation.py
+│   │   └── gate.py                # Absolute rules + champion comparison
 │   ├── pipeline/
-│   │   └── ml_pipeline_dag.py     # Task DAG + ML Job functions
+│   │   ├── train_dag.py           # Training Task DAG (per-step warehouse/SPCS)
+│   │   └── batch_inference_dag.py # Scheduled batch scoring Task + CI validation
 │   ├── monitoring/
 │   │   └── model_monitor.py       # Model Monitor lifecycle management
-│   └── serving/
-│       └── batch_inference.py     # Batch inference utilities
+│   ├── serving/
+│   │   ├── batch_inference.py     # Batch inference utilities
+│   │   └── signature.py           # Signature-driven casting + output validation
+│   └── utils/                     # CI helpers
+│       ├── wait_for_task.py           # Poll task DAG completion, export evaluation result
+│       ├── read_candidate.py          # Gate result -> Job Summary + model_version
+│       ├── serving_flags.py           # batch/realtime/monitor flags for CI
+│       ├── setup_model_monitor.py     # Create/validate model monitor
+│       └── notify_candidate.py        # GitHub Issue for retrain candidates
 ├── tests/
-│   ├── test_config.py             # Unit tests
+│   ├── test_config.py             # Config + quality gate / champion tests
+│   ├── test_pipeline_steps.py     # DAG wiring / step contract tests
+│   ├── test_gap_fillers.py        # Metrics, validation, data checks, serving, gateway, monitor
 │   └── test_endpoint.py           # Integration tests
 └── notebooks/                     # Educational Jupyter notebooks (01-05)</code></pre>
 
@@ -402,42 +425,56 @@
 ─────────────────────────                    ─────────────────────────────────
 1. Checkout repo code
 2. Connect to Snowflake (OIDC)
-3. Run: ml_pipeline_dag.py --deploy
-   ├─ @remote decorator serializes        ──▶  Uploads payload to @PIPELINE_STAGE
-   │  each function via cloudpickle
-   └─ DAG SDK creates tasks               ──▶  CREATE OR REPLACE TASK (references staged payload)
+3. Run: train_dag.py --deploy
+   ├─ resolve_env_config(env) picks the
+   │  target DB / schema / WH / pool
+   ├─ Zips step packages + config.py    ──▶  PUT source.zip to @PIPELINE_STAGE
+   │  + configs/config.yml                   (imported by both compute modes)
+   └─ DAG SDK creates tasks             ──▶  CREATE OR REPLACE TASK per step
+      (one wrapper per step, chosen by       (@remote ML Job payload, or an
+       pipeline_steps.&lt;step&gt;.compute)         anonymous stored procedure)
 
-4. Run: ml_pipeline_dag.py --execute
+4. Run: train_dag.py --execute
    └─ dag_op.run(dag)                     ──▶  EXECUTE TASK MLOPS_DEMO_TASK
 
-5. Poll: wait_for_task.py                 ◀──  Reads TASK_HISTORY every 30s
-   (blocks until all 3 tasks complete)
+5. Poll: utils/wait_for_task.py           ◀──  Reads TASK_HISTORY every 30s
+   (blocks until all 3 tasks complete,
+    exports the evaluation result)
 
                                                Snowflake Task Scheduler fires:
-                                               ├─ FEATURE_ENG: submits ML Job to compute pool
-                                               │   (reads serialized function from stage, runs on SPCS)
-                                               ├─ TRAIN_MODEL: submits ML Job to compute pool
-                                               │   (installs pip_requirements, runs training on SPCS)
-                                               └─ EVALUATE: runs StoredProcedureCall on warehouse
-                                                   (reads PIPELINE_RESULTS, writes evaluation row)
+                                               ├─ FEATURE_ENG: ML Job on compute pool
+                                               │   → feature_engineering.run(session)
+                                               ├─ TRAIN_MODEL: ML Job on compute pool
+                                               │   → model_training.training.run(session)
+                                               │     (trains, scores champion, registers)
+                                               └─ EVALUATE: anonymous sproc on warehouse
+                                                   (IMPORTS=('@PIPELINE_STAGE/source.zip'))
+                                                   → evaluate.evaluation.run(session)
+                                                     (quality gate; drops version on fail)
 
-6. Run: quality_gate_and_register.py      ──▶  Reads metrics, registers model in Registry
-7. Run: run_batch_inference.py            ──▶  mv.run() scores on warehouse</code></pre>
+6. Run: utils/read_candidate.py           ◀──  Gate result → Job Summary, model_version
+7. Run: pipeline/batch_inference_dag.py   ──▶  mv.run() scores on warehouse
+        --validate --env stage</code></pre>
 
   <div class="note">
-    <strong>Key insight:</strong> The <code>@remote</code> decorator does not run the function locally. It serializes the function body + closure variables and uploads the payload to an internal stage. When the Snowflake Task fires, it submits that payload as an <strong>ML Job</strong> to the compute pool. The container starts, installs <code>pip_requirements</code>, deserializes the function, and executes it.
+    <strong>Key insight:</strong> The ML logic does not live in the DAG file. Each step is a package under <code>source/</code> whose logic module exposes one function, <code>run(session)</code>. The DAG builds a thin wrapper around it whose only job is to import the step module, call <code>run()</code>, and return JSON. For <strong>SPCS</strong>, that wrapper is an <code>@remote</code> ML Job; <code>cloudpickle</code> serializes only the wrapper, so <code>source.zip</code> is mounted into the container explicitly via <code>imports=</code>. For <strong>warehouse</strong>, the wrapper is an anonymous stored procedure whose <code>IMPORTS</code> clause points at the same staged <code>source.zip</code>.
+  </div>
+
+  <div class="note">
+    <strong>The same config ships with the code</strong>
+    <code>source.zip</code> contains <code>config.py</code> and <code>configs/config.yml</code>, so step modules import settings at module level exactly as they do locally (<code>from config import MODEL_NAME, TRAINING_PARAMS</code>). <code>config.py</code> reads the YAML through the module loader, which works whether it is on disk or inside a zip import. The one thing that differs per run is the target environment: each wrapper sets <code>SNOWFLAKE_DATABASE</code> / <code>SCHEMA</code> / <code>WAREHOUSE</code> / <code>COMPUTE_POOL</code> from <code>resolve_env_config(env)</code> <em>before</em> importing the step. This matters on SPCS, where the container sets its own <code>SNOWFLAKE_DATABASE</code> to the ML Job stage's database.
   </div>
 
   <div class="note">
     <strong><code>PIPELINE_STAGE</code> vs <code>setup.sh</code> stages</strong>
-    <code>scripts/setup.sh</code> creates three stages for general use: <code>ML_ARTIFACTS</code>, <code>DAG_STAGE</code>, and <code>JOB_STAGE</code>. The pipeline uses a separate stage called <code>PIPELINE_STAGE</code>, which is <strong>created automatically</strong> by <code>ml_pipeline_dag.py --deploy</code> at CI time. You do not need to create <code>PIPELINE_STAGE</code> manually — it is provisioned idempotently on every deploy run.
+    <code>scripts/setup.sh</code> creates three stages for general use: <code>ML_ARTIFACTS</code>, <code>DAG_STAGE</code>, and <code>JOB_STAGE</code>. The pipeline uses a separate stage called <code>PIPELINE_STAGE</code>, which is <strong>created automatically</strong> by <code>train_dag.py --deploy</code> at CI time. You do not need to create <code>PIPELINE_STAGE</code> manually — it is provisioned idempotently on every deploy run.
   </div>
 
   <h3>Alternative: submit_file vs @remote</h3>
   <table>
     <thead><tr><th>Approach</th><th>How code reaches Snowflake</th><th>Best for</th></tr></thead>
     <tbody>
-      <tr><td><code>@remote</code> (this template)</td><td>Cloudpickle serializes function + closure &rarr; uploads to stage</td><td>Inline functions in a DAG, closures with captured config</td></tr>
+      <tr><td><code>@remote</code> (this template, SPCS steps)</td><td>Cloudpickle serializes the step wrapper; <code>source.zip</code> mounted via <code>imports=</code></td><td>Uniform step contract, per-step pip deps, GPU options</td></tr>
       <tr><td><code>submit_file("train.py")</code></td><td>Uploads raw .py file to stage</td><td>Standalone scripts, simpler debugging</td></tr>
       <tr><td><code>submit_directory("src/")</code></td><td>Uploads entire directory + requirements.txt</td><td>Complex multi-file projects with cross-imports</td></tr>
     </tbody>
@@ -455,19 +492,19 @@
       <div class="wf-card">
         <div class="wf-num">1</div>
         <div class="wf-title">FEATURE_ENG</div>
-        <div class="wf-desc">Registers Feature Views in the Feature Store. Creates <code>CUSTOMER</code> entity with join key <code>CUSTOMER_ID</code>. Configurable refresh intervals via Dynamic Tables. <span class="badge badge-spcs">SPCS</span></div>
+        <div class="wf-desc">Registers both Feature Views in the Feature Store via <code>source/feature_engineering/feature_views.py</code>. Creates the <code>CUSTOMER</code> entity with join key <code>CUSTOMER_ID</code>. Refresh intervals come from config. <span class="badge badge-spcs">SPCS</span></div>
       </div>
       <div class="wf-arrow">&rarr;</div>
       <div class="wf-card">
         <div class="wf-num">2</div>
         <div class="wf-title">TRAIN_MODEL</div>
-        <div class="wf-desc">Joins Feature View with <code>RAW_TRANSACTIONS</code> for labels. Trains XGBClassifier (200 trees, 5-fold CV). Logs to Experiment Tracking. Saves artifacts to stage. <span class="badge badge-spcs">SPCS</span></div>
+        <div class="wf-desc">Builds the training Dataset (Feature View + labels). Trains on a grouped holdout split, scores the PROD champion on the same holdout, and registers the candidate in the Model Registry (via Experiment Tracking when enabled). <span class="badge badge-spcs">SPCS</span></div>
       </div>
       <div class="wf-arrow">&rarr;</div>
       <div class="wf-card">
         <div class="wf-num">3</div>
         <div class="wf-title">EVALUATE</div>
-        <div class="wf-desc">Reads metrics from <code>PIPELINE_RESULTS</code>. Marks pipeline as <code>READY_FOR_REVIEW</code>. Quality gate runs downstream in CI (not inside the DAG). <span class="badge badge-wh">WH</span></div>
+        <div class="wf-desc">Runs the quality gate: absolute metric rules plus champion comparison. Pass: tags the version and marks <code>READY_FOR_REVIEW</code>. Fail: drops the candidate version and fails the DAG. <span class="badge badge-wh">WH</span></div>
       </div>
     </div>
   </div>
@@ -479,49 +516,65 @@
       <tr><td><code>DAG</code></td><td>Container for the task graph; defines root task name and warehouse</td></tr>
       <tr><td><code>DAGTask</code></td><td>Individual task (step) within the DAG</td></tr>
       <tr><td><code>DAGOperation</code></td><td>Operations on the DAG: deploy, run, get status</td></tr>
-      <tr><td><code>StoredProcedureCall</code></td><td>Warehouse-mode task definition (SQL/Python sproc)</td></tr>
+      <tr><td>Anonymous stored procedure</td><td>Warehouse-mode task definition (<code>WITH ... AS PROCEDURE () ... CALL</code>)</td></tr>
       <tr><td><code>@remote</code></td><td>ML Job definition (runs on compute pool via SPCS)</td></tr>
+      <tr><td><code>STEPS</code></td><td><code>source/pipeline/train_dag.py</code>: maps each task name to its step module and pip deps</td></tr>
     </tbody>
   </table>
 
   <h3>Configurable Compute Per Step</h3>
-  <p>Each pipeline step can run on either a <strong>warehouse</strong> <span class="badge badge-wh">WH</span> or a <strong>compute pool</strong> <span class="badge badge-spcs">SPCS</span>, configured via <code>source/config.py</code>:</p>
+  <p>Each pipeline step independently runs on either a <strong>warehouse</strong> <span class="badge badge-wh">WH</span> or a <strong>compute pool</strong> <span class="badge badge-spcs">SPCS</span>, configured in <code>source/configs/config.yml</code>:</p>
 
-  <pre><code class="language-python">PIPELINE_CONFIG = {
-    "feature_engineering_compute": "spcs",   # "warehouse" or "spcs"
-    "training_compute": "spcs",
-    "evaluation_compute": "warehouse",        # lightweight eval runs on warehouse
-    ...
-}</code></pre>
+  <pre><code class="language-yaml">pipeline_steps:
+  feature_eng:
+    compute: spcs        # "warehouse" or "spcs"
+  train_model:
+    compute: spcs
+  evaluate:
+    compute: warehouse   # lightweight eval runs on warehouse</code></pre>
 
   <table>
     <thead><tr><th>Mode</th><th>When to Use</th><th>Implementation</th></tr></thead>
     <tbody>
-      <tr><td><span class="badge badge-spcs">SPCS</span></td><td>GPU training, custom packages, heavy compute</td><td><code>DAGTask(definition=@remote_func)</code></td></tr>
-      <tr><td><span class="badge badge-wh">WH</span></td><td>SQL-heavy, lightweight Python, cost-sensitive</td><td><code>DAGTask(definition=StoredProcedureCall(...))</code></td></tr>
+      <tr><td><span class="badge badge-spcs">SPCS</span></td><td>GPU training, arbitrary pip packages, long-running compute</td><td><code>@remote</code> ML Job on the compute pool, <code>source.zip</code> mounted via <code>imports=</code></td></tr>
+      <tr><td><span class="badge badge-wh">WH</span></td><td>SQL-heavy, lightweight Python, cost-sensitive, no container cold start</td><td>Anonymous stored procedure with <code>IMPORTS=('@PIPELINE_STAGE/source.zip')</code></td></tr>
     </tbody>
   </table>
 
+  <div class="note">
+    <strong>Switching compute is a config change, never a code change</strong>
+    Both modes call the same <code>run(session)</code> function in the step's logic module. Because the step contract is uniform, the two wrappers in <code>train_dag.py</code> are generic — adding a step requires no new dispatch code, only an entry in <code>STEPS</code>. All-warehouse mode is fully supported for every step, including training.
+  </div>
+
   <h3>DAG Definition Pattern</h3>
+  <p>The DAG is built generically from <code>STEPS</code>. <code>_task_def()</code> reads each step's configured compute and returns either an <code>@remote</code> ML Job or an anonymous stored procedure body:</p>
   <pre><code class="language-python">from snowflake.core.task.dagv1 import DAG, DAGOperation, DAGTask
-from snowflake.ml.jobs import remote
+from config import resolve_env_config, step_compute
 
-# Build @remote-decorated functions (ML Jobs)
-fe_func = build_feature_eng_remote(cfg)
-train_func = build_train_model_remote(cfg)
-eval_func = build_evaluate_remote(cfg)
+cfg = resolve_env_config(env)   # target DB / schema / WH / pool for this env
 
-# Define DAG with dependency chain
-with DAG("MLOPS_DEMO_TASK", warehouse=wh) as dag:
-    fe_task = DAGTask("FEATURE_ENG", definition=fe_func)
-    train_task = DAGTask("TRAIN_MODEL", definition=train_func)
-    eval_task = DAGTask("EVALUATE", definition=eval_func)
-    fe_task >> train_task >> eval_task
+def _task_def(task_name, cfg, ...):
+    mode = step_compute(STEPS[task_name]["config_key"])
+    if mode == "spcs":
+        return _remote_def(task_name, cfg, job_stage, source_zip)   # ML Job
+    return _sproc_def(task_name, cfg, imports, packages)           # anonymous sproc
+
+with DAG(DAG_NAME, warehouse=wh, stage_location=pipeline_stage) as dag:
+    tasks = {
+        name: DAGTask(name, definition=_task_def(name, cfg, ...), warehouse=wh)
+        for name in STEP_ORDER
+    }
+    for upstream, downstream in zip(STEP_ORDER, STEP_ORDER[1:]):
+        tasks[upstream] >> tasks[downstream]
 
 # Deploy to Snowflake
 schema_ref = root.databases[db].schemas[schema]
-dag_op = DAGOperation(schema_ref)
-dag_op.deploy(dag, mode=CreateMode.or_replace)</code></pre>
+DAGOperation(schema_ref).deploy(dag, mode=CreateMode.or_replace)</code></pre>
+
+  <p>Each wrapper body is the same few lines regardless of compute mode:</p>
+  <pre><code class="language-python">os.environ.update(env)   # pin target DB / schema / WH
+step = importlib.import_module(module)   # e.g. "model_training.training"
+return json.dumps(step.run(session))</code></pre>
 
   <h3>Task Naming Convention</h3>
   <p>The Python SDK prefixes child task names with the DAG name:</p>
@@ -532,16 +585,26 @@ dag_op.deploy(dag, mode=CreateMode.or_replace)</code></pre>
 
   <h3>CLI Usage</h3>
   <pre><code class="language-python"># Deploy the DAG (creates/replaces tasks)
-python source/pipeline/ml_pipeline_dag.py --deploy --env stage
+python source/pipeline/train_dag.py --deploy --env stage
 
 # Execute (triggers the root task)
-python source/pipeline/ml_pipeline_dag.py --execute --env stage
+python source/pipeline/train_dag.py --execute --env stage
 
 # Show recent task history
-python source/pipeline/ml_pipeline_dag.py --status --env stage</code></pre>
+python source/pipeline/train_dag.py --status --env stage</code></pre>
+  <p><code>--env</code> accepts <code>dev</code>, <code>stage</code>, or <code>prod</code>.</p>
+
+  <h3>Running a Single Step</h3>
+  <p>Each step package ships an <code>entrypoint.py</code> that calls the same <code>run(session)</code> the DAG invokes, so local behavior matches the pipeline exactly. The target environment comes from <code>SNOWFLAKE_DATABASE</code> / <code>SNOWFLAKE_SCHEMA</code> / <code>SNOWFLAKE_WAREHOUSE</code> (default: DEV):</p>
+  <pre><code class="language-bash">uv run python source/feature_engineering/entrypoint.py
+uv run --group ml-runtime python source/model_training/entrypoint.py
+uv run python source/evaluate/entrypoint.py</code></pre>
 
 
   <h2 id="feature-store">Feature Store</h2>
+
+  <h3>Data Checks</h3>
+  <p>The <code>FEATURE_ENG</code> step first runs <code>source/feature_engineering/data_checks.py</code> against the source database/schema, using the <code>data_checks:</code> block in config. Each table key supports <code>min_rows</code>, <code>max_null_pct</code> (<code>{column: pct}</code>), and <code>freshness_column</code> + <code>max_age_hours</code>. All rules are optional; the step raises listing every failure, so bad upstream data stops the pipeline before features are built.</p>
 
   <p>Features are managed via Snowflake's native <strong>Feature Store</strong> with Dynamic Tables for automatic refresh. The feature engineering step registers entities and feature views, then materializes 5000 rows of customer risk features.</p>
 
@@ -583,78 +646,107 @@ python source/pipeline/ml_pipeline_dag.py --status --env stage</code></pre>
 
   <div class="note">
     <strong>Which feature view is used in training?</strong>
-    Both feature views are registered by <code>source/features/feature_views.py</code>, but the pipeline DAG currently trains on <strong><code>CUSTOMER_RISK_FEATURES</code> only</strong>. <code>TRANSACTION_CONTEXT_FEATURES</code> is registered and kept fresh, but not yet wired into the training spine. To include it: add the <code>TRANSACTION</code> entity to the Feature Store spine in <code>build_train_model_remote()</code> and join both feature views via <code>fs.generate_dataset(..., features=[cust_fv, txn_fv], ...)</code>.
+    Both feature views are registered by <code>source/feature_engineering/feature_views.py</code>, which the <code>FEATURE_ENG</code> step calls via <code>register_feature_views(session=session)</code> — the single implementation for both compute modes. The pipeline currently trains on <strong><code>CUSTOMER_RISK_FEATURES</code> only</strong>. <code>TRANSACTION_CONTEXT_FEATURES</code> is registered and kept fresh, but not yet wired into the training spine. To include it: change <code>build_dataset(session)</code> in <code>source/model_training/training.py</code> to add the <code>TRANSACTION</code> entity to the spine and join both feature views via <code>fs.generate_dataset(..., features=[cust_fv, txn_fv], ...)</code>.
   </div>
 
   <h3>Refresh Strategy</h3>
-  <p>Both feature views use configurable refresh intervals via <code>FEATURE_VIEW_CONFIG</code>:</p>
-  <pre><code class="language-python">FEATURE_VIEW_CONFIG = {
-    "customer_features_refresh": "1 hour",
-    "transaction_features_refresh": "1 hour",
-}</code></pre>
+  <p>Both feature views use configurable refresh intervals, set in <code>source/configs/config.yml</code>:</p>
+  <pre><code class="language-yaml">feature_store:
+  view_name: CUSTOMER_RISK_FEATURES
+  view_version: V1              # Bump when feature SQL changes
+  customer_features_refresh: "1 hour"
+  transaction_features_refresh: "1 hour"</code></pre>
   <p>Dynamic Tables automatically refresh on this cadence, ensuring features are fresh without manual intervention.</p>
 
 
   <h2 id="model-training">Model Training</h2>
 
-  <p>Training runs as an <strong>ML Job</strong> on a compute pool using the <code>@remote</code> decorator from <code>snowflake.ml.jobs</code>. The function is serialized via <code>cloudpickle</code> and executed in an isolated container.</p>
+  <p>Training logic lives in <code>source/model_training/training.py</code> as a single <code>run(session)</code> function. When the step is configured for <code>spcs</code>, the DAG wraps it in an <strong>ML Job</strong> on a compute pool using the <code>@remote</code> decorator from <code>snowflake.ml.jobs</code>; when configured for <code>warehouse</code>, the same function runs inside an anonymous stored procedure. The step itself is identical in both cases.</p>
+
+  <h3>What You Replace</h3>
+  <p>Two example functions in <code>training.py</code> are the customization points:</p>
+  <ul>
+    <li><code>build_dataset(session)</code> &mdash; builds the training Dataset from the Feature Store</li>
+    <li><code>train_model(X_train, y_train)</code> &mdash; fits and returns the model</li>
+  </ul>
+  <p>Everything else (holdout split, metrics, champion scoring, registration) is generic and driven by the <code>model:</code> contract in config:</p>
+  <pre><code class="language-yaml">model:
+  name: MLOPS_FRAUD_DETECTOR
+  task_type: binary_classification   # binary_classification | multiclass | regression
+  predict_function: predict_proba     # predict_proba for classifiers, predict for regressors
+  id_columns: [CUSTOMER_ID]           # carried through to predictions
+  label_column: IS_FRAUD</code></pre>
+  <p>Metrics come from <code>source/model_training/metrics.py</code> per task type:</p>
+  <table>
+    <thead><tr><th>Task type</th><th>Metrics</th></tr></thead>
+    <tbody>
+      <tr><td><code>binary_classification</code></td><td><code>auc_roc</code>, <code>pr_auc</code>, <code>precision</code>, <code>recall</code>, <code>f1</code>, <code>log_loss</code></td></tr>
+      <tr><td><code>multiclass</code></td><td><code>accuracy</code>, <code>f1_macro</code>, <code>log_loss</code></td></tr>
+      <tr><td><code>regression</code></td><td><code>rmse</code>, <code>mae</code>, <code>r2</code></td></tr>
+    </tbody>
+  </table>
 
   <h3>ML Runtime Dependency Management</h3>
   <p>Training and serving dependencies are pinned in <code>pyproject.toml</code> under the <code>[dependency-groups] ml-runtime</code> group:</p>
   <pre><code class="language-toml">[dependency-groups]
-ml-runtime = ["xgboost==3.3.0", "scikit-learn==1.6.1"]</code></pre>
+ml-runtime = ["xgboost==3.3.0", "scikit-learn==1.8.0"]</code></pre>
   <p><code>config.py</code> reads this group at import time via <code>tomllib</code>, producing <code>ML_RUNTIME_DEPS</code>. This single source of truth feeds both:</p>
   <ul>
-    <li><strong>Training (ML Job):</strong> <code>pip_requirements=ML_RUNTIME_DEPS + ["snowflake-ml-python"]</code></li>
+    <li><strong>Training on SPCS (ML Job):</strong> <code>pip_requirements=ML_RUNTIME_DEPS + ["snowflake-ml-python"]</code></li>
+    <li><strong>Training on a warehouse (stored procedure):</strong> <code>PACKAGES=(... + ML_RUNTIME_DEPS)</code> from the Snowflake Anaconda channel</li>
     <li><strong>Serving (Model Registry):</strong> <code>conda_dependencies=ML_RUNTIME_DEPS</code></li>
   </ul>
-  <p>To update versions: edit <code>pyproject.toml</code>, run <code>uv lock</code>, commit. Both train and serve environments update automatically. Use <code>uv sync --group ml-runtime</code> for local dev parity.</p>
+  <div class="note">
+    <strong>Pins match the ML Job runtime image</strong>
+    SPCS containers have no internet access by default. The pins are set to the versions already preinstalled in the ML Job runtime image (scikit-learn 1.8.0, xgboost 3.3.0 on Python 3.12), so <code>pip</code> finds them already satisfied and never needs PyPI. Both versions are also published in the Snowflake Anaconda channel, so warehouse training and Registry serving resolve the same versions. Installing a version the image doesn't ship would require an external access integration to PyPI on the ML Job.
+  </div>
+  <p>To update versions: check the runtime image's versions, edit <code>pyproject.toml</code>, run <code>uv lock</code>, commit. Use <code>uv sync --group ml-runtime</code> for local dev parity.</p>
 
   <h3>Dataset Versioning</h3>
   <p>The training dataset version is tied to the Feature View version:</p>
-  <pre><code class="language-python"># Version mirrors Feature View: "V1" from "CUSTOMER_RISK_FEATURES$V1"
-dataset_version = fv.split("$")[1]
-try:
-    dataset = fs.generate_dataset(name="FRAUD_TRAINING_DATA", version=dataset_version, ...)
-except Exception as e:
-    if "already exists" in str(e):
-        dataset = snow_dataset.load_dataset(session, "FRAUD_TRAINING_DATA", dataset_version)
-    else:
-        raise</code></pre>
+  <p>The Dataset is named <code>&lt;MODEL_NAME&gt;_TRAINING_DATA</code> (e.g. <code>MLOPS_FRAUD_DETECTOR_TRAINING_DATA</code>) and its version equals the Feature View version (<code>feature_store.view_version</code>, e.g. <code>V1</code>).</p>
   <ul>
     <li><strong>Same FV version (reruns):</strong> Reuses existing dataset &mdash; fast, no regeneration</li>
     <li><strong>New FV version (schema change):</strong> Creates new dataset version automatically</li>
-    <li><strong>Lineage:</strong> Model V3 &rarr; Dataset V1 &rarr; Feature View V1 (traceable end-to-end)</li>
+    <li><strong>Lineage:</strong> Model V3 &rarr; Dataset V1 &rarr; Feature View V1 (traceable end-to-end). The model is logged with <code>sample_input_data</code> derived from the Dataset, which records the model&rarr;Dataset link.</li>
   </ul>
 
-  <h3>Training Function Pattern</h3>
+  <h3>Step Wrapper Pattern</h3>
+  <p>The DAG builds this wrapper around the training step when its compute is <code>spcs</code>. Note that the wrapper carries no ML logic — it only pins the environment, imports the step, and calls it:</p>
   <pre><code class="language-python">@remote(
     pool_name,
     stage_name="@DB.SCHEMA.PIPELINE_STAGE",
-    pip_requirements=ML_RUNTIME_DEPS + ["snowflake-ml-python"],
+    pip_requirements=ML_RUNTIME_DEPS + ["snowflake-ml-python", "pyyaml"],
+    imports=[str(source_zip)],   # step packages + config.py + configs/config.yml
+    name="TRAIN_MODEL",          # readable ML Job name
 )
-def train_model() -> str:
-    import json                          # MUST be inside for cloudpickle
-    import numpy as np
-    import xgboost as xgb
-    from snowflake.snowpark import Session as _Session
+def run_step() -> str:
+    import importlib
+    import json
+    import os
+    from snowflake.snowpark import Session
 
-    session = _Session.builder.getOrCreate()
-    # ... load data, train, evaluate, save artifacts
-    return json.dumps(result)</code></pre>
+    os.environ.update(env)       # SNOWFLAKE_DATABASE / SCHEMA / WAREHOUSE / COMPUTE_POOL
+    session = Session.builder.getOrCreate()
+    session.sql(f"USE WAREHOUSE {env['SNOWFLAKE_WAREHOUSE']}").collect()
+
+    mod = importlib.import_module("model_training.training")
+    return json.dumps(mod.run(session))</code></pre>
 
   <div class="note">
     <strong>Important: cloudpickle Serialization Rules</strong>
-    <p>All imports MUST be inside the <code>@remote</code> function body. Module references from outer scope may not serialize correctly. Closure variables (strings, dicts) are captured fine.</p>
+    <p>All imports MUST be inside the <code>@remote</code> function body. Module references from outer scope may not serialize correctly. Closure variables (strings, dicts) are captured fine — which is how the target environment reaches the container. Step <em>packages</em> are not pickled at all; they are mounted into the container via <code>imports=</code>.</p>
   </div>
 
   <h3>Training Details</h3>
   <ul>
-    <li><strong>Algorithm:</strong> XGBoost (<code>XGBClassifier</code>)</li>
-    <li><strong>Validation:</strong> 5-fold stratified cross-validation</li>
+    <li><strong>Algorithm (example):</strong> XGBoost (<code>XGBClassifier</code>)</li>
+    <li><strong>Validation:</strong> single grouped holdout (1 of 5 folds, ~20%), grouped by <code>model.id_columns[0]</code> so no entity appears in both train and test. <code>StratifiedGroupKFold</code> for classification, <code>GroupKFold</code> for regression.</li>
+    <li><strong>Champion scoring:</strong> the default version in <code>quality_gate.champion.source_env</code> (PROD) is scored on the same holdout via <code>ModelVersion.run()</code>. If there is no champion or it can't score the holdout, the result records a reason and comparison is skipped.</li>
     <li><strong>Class imbalance:</strong> <code>scale_pos_weight=33</code> (~3% fraud rate)</li>
-    <li><strong>Artifacts saved to stage:</strong> <code>model.ubj</code>, <code>sample_input.json</code></li>
-    <li><strong>Metrics written to:</strong> <code>PIPELINE_RESULTS</code> table</li>
+    <li><strong>Hyperparameters:</strong> from <code>training_params</code> in <code>source/configs/config.yml</code> (<code>n_estimators: 100</code>, <code>max_depth: 6</code>, <code>learning_rate: 0.1</code>)</li>
+    <li><strong>Registration:</strong> in this step, to the target environment's Model Registry (no model files are staged)</li>
+    <li><strong>Results written to:</strong> <code>PIPELINE_RESULTS</code> (<code>STEP='training'</code>: model version, metrics, champion)</li>
   </ul>
 
   <h3>SQL for Results Table</h3>
@@ -665,16 +757,15 @@ SELECT 'training', 'SUCCESS', PARSE_JSON('{"metrics": {...}}'), CURRENT_TIMESTAM
 
   <h2 id="model-registry">Model Registry</h2>
 
-  <p>After training passes the quality gate, the model is registered in Snowflake's Model Registry with auto-incremented versioning.</p>
+  <p>The training step registers the candidate directly in the target environment's Model Registry with auto-incremented versioning. The <code>EVALUATE</code> step then keeps or removes it based on the quality gate. CI does not register models.</p>
 
   <h3>Registration Flow</h3>
   <ol>
-    <li>Download <code>model.ubj</code> from <code>PIPELINE_STAGE/artifacts/</code></li>
-    <li>Load model into XGBClassifier</li>
-    <li>Query existing versions: <code>SHOW VERSIONS IN MODEL ...</code></li>
-    <li>Auto-increment: V11 &rarr; V12</li>
-    <li>Register with <code>conda_dependencies=["xgboost==3.3.0", "scikit-learn"]</code></li>
-    <li>Set as DEFAULT version</li>
+    <li>Query existing versions and auto-increment: V11 &rarr; V12</li>
+    <li>Log the model with <code>ExperimentTracking.log_model</code> (when <code>experiment.enabled</code>) or <code>Registry.log_model</code></li>
+    <li>Pass <code>sample_input_data</code> = a Snowpark DataFrame from the training Dataset (model&rarr;Dataset lineage), <code>metrics=...</code>, and <code>conda_dependencies=ML_RUNTIME_DEPS</code></li>
+    <li>EVALUATE runs the gate: pass keeps the version; fail drops it</li>
+    <li>The version becomes DEFAULT in PROD when promoted by <code>deploy-prod</code></li>
   </ol>
 
   <div class="note">
@@ -686,7 +777,7 @@ SELECT 'training', 'SUCCESS', PARSE_JSON('{"metrics": {...}}'), CURRENT_TIMESTAM
 
   <div class="note">
     <strong>Template defaults are intentionally low</strong>
-    <code>MIN_AUC_ROC</code>, <code>MIN_PRECISION</code>, and <code>MIN_RECALL</code> are all set to <code>0.01</code> in the template so the pipeline succeeds end-to-end with synthetic data out of the box. Set these to meaningful values before using this template in production.
+    The <code>auc_roc</code>, <code>precision</code>, and <code>recall</code> minimums under <code>quality_gate.metrics</code> are all set to <code>0.01</code> in the template so the pipeline succeeds end-to-end with synthetic data out of the box. Set these to meaningful values before using this template in production.
   </div>
 
   <table>
@@ -698,7 +789,25 @@ SELECT 'training', 'SUCCESS', PARSE_JSON('{"metrics": {...}}'), CURRENT_TIMESTAM
     </tbody>
   </table>
 
-  <p>To update thresholds: edit <code>MIN_AUC_ROC</code>, <code>MIN_PRECISION</code>, <code>MIN_RECALL</code> in <code>source/config.py</code>. The quality gate in <code>scripts/quality_gate_and_register.py</code> reads them at runtime — no other changes needed. If any threshold fails, the workflow exits with code 1 and the model is not registered.</p>
+  <p>The gate runs in the <code>EVALUATE</code> step (<code>source/evaluate/evaluation.py</code> + <code>gate.py</code>) and is configured under <code>quality_gate:</code> in <code>source/configs/config.yml</code>:</p>
+  <pre><code class="language-yaml">quality_gate:
+  metrics:                 # {metric: {min: x} | {max: x}}; names from metrics.py
+    auc_roc: {min: 0.01}
+    precision: {min: 0.01}
+    recall: {min: 0.01}
+  champion:
+    enabled: true
+    source_env: prod       # champion = default version in this env
+    metric: auc_roc
+    higher_is_better: true
+    min_improvement: -0.01 # small negative value tolerates noise</code></pre>
+  <ul>
+    <li><strong>Absolute rules:</strong> every metric in <code>quality_gate.metrics</code> must meet its <code>min</code> / <code>max</code>.</li>
+    <li><strong>Champion comparison:</strong> the candidate must beat the PROD default version, scored on the same holdout, by at least <code>min_improvement</code> on <code>champion.metric</code>. If there is no champion or it can't score, the comparison is skipped (passes) with a reason.</li>
+    <li><strong>On pass:</strong> <code>set_metric('quality_gate', 'PASSED')</code> and <code>champion_comparison</code> are stored on the version.</li>
+    <li><strong>On fail:</strong> the candidate version is dropped from the registry (<code>DROP MODEL</code> if it was the only version), an evaluation row with <code>gate_failures</code> is written to <code>PIPELINE_RESULTS</code>, and the step raises so the DAG and CI fail.</li>
+  </ul>
+  <p>In CI, <code>source/utils/read_candidate.py</code> reads the evaluation result exported by <code>wait_for_task.py</code>, writes a Job Summary with candidate vs champion metrics and the gate rules, emits <code>model_version</code> to <code>GITHUB_OUTPUT</code>, and exits 1 if the gate failed.</p>
 
   <h3>Dual-Platform Registration</h3>
   <p>Models are registered with <code>target_platforms=["WAREHOUSE", "SNOWPARK_CONTAINER_SERVICES"]</code>. This tells Snowflake to prepare the model for both serving modes:</p>
@@ -715,33 +824,33 @@ SELECT 'training', 'SUCCESS', PARSE_JSON('{"metrics": {...}}'), CURRENT_TIMESTAM
   <h2 id="inference">Inference</h2>
 
   <h3>Batch Inference</h3>
-  <p>Batch inference scores the entire Feature View table using the <strong>default model version</strong> from the Model Registry. It runs on a <strong>warehouse</strong> (no SPCS service needed) and writes predictions to an output table.</p>
+  <p>Batch inference runs as a scheduled Snowflake Task in PROD and scores <code>serving.batch.input_table</code> (or, when null, the training Feature View table) with the model's <strong>default version</strong>. It runs on a <strong>warehouse</strong> (no SPCS service needed) and <strong>appends</strong> predictions to <code>serving.batch.output_table</code> (default <code>BATCH_PREDICTIONS</code>). Enable or disable it with <code>serving.batch.enabled</code>.</p>
 
   <h4>Architecture</h4>
   <div class="workflow-diagram">
     <div class="wf-row">
       <div class="wf-card">
         <div class="wf-num" style="background: #11567F;">1</div>
-        <div class="wf-title">Feature View Table</div>
-        <div class="wf-desc"><code>CUSTOMER_RISK_FEATURES$V1</code> &mdash; 12 feature columns, full table as input DataFrame</div>
+        <div class="wf-title">Input Table</div>
+        <div class="wf-desc"><code>serving.batch.input_table</code>, or the Feature View table (<code>CUSTOMER_RISK_FEATURES$V1</code>). Inputs are cast to the model signature.</div>
       </div>
       <div class="wf-arrow">&rarr;</div>
       <div class="wf-card">
         <div class="wf-num" style="background: #11567F;">2</div>
         <div class="wf-title">Model Registry</div>
-        <div class="wf-desc"><code>MLOPS_FRAUD_DETECTOR.default</code> &mdash; <code>mv.run(input_df, "predict_proba")</code> on warehouse compute</div>
+        <div class="wf-desc"><code>MLOPS_FRAUD_DETECTOR.default</code> &mdash; <code>mv.run(input_df, model.predict_function)</code> on warehouse compute</div>
       </div>
       <div class="wf-arrow">&rarr;</div>
       <div class="wf-card">
         <div class="wf-num" style="background: #11567F;">3</div>
         <div class="wf-title">Output Table</div>
-        <div class="wf-desc"><code>BATCH_PREDICTIONS</code> &mdash; all input features + <code>output_feature_0</code>, <code>output_feature_1</code>, <code>PREDICTION_TS</code></div>
+        <div class="wf-desc"><code>BATCH_PREDICTIONS</code> (append) &mdash; input features + model outputs + <code>MODEL_VERSION</code>, <code>SCORED_AT</code>, <code>RUN_ID</code></div>
       </div>
       <div class="wf-arrow">&rarr;</div>
       <div class="wf-card">
         <div class="wf-num" style="background: #11567F;">4</div>
         <div class="wf-title">Validation</div>
-        <div class="wf-desc">No NULL predictions, P(class0) + P(class1) &approx; 1.0, row count matches input</div>
+        <div class="wf-desc">Rows of this <code>RUN_ID</code>: no NULL outputs; for classifiers, probabilities in [0, 1] summing to 1</div>
       </div>
     </div>
   </div>
@@ -750,53 +859,76 @@ SELECT 'training', 'SUCCESS', PARSE_JSON('{"metrics": {...}}'), CURRENT_TIMESTAM
   <table>
     <thead><tr><th>CI/CD Stage</th><th>Environment</th><th>Purpose</th></tr></thead>
     <tbody>
-      <tr><td>deploy-stage (step 5)</td><td>STAGE</td><td>Validate newly registered model works</td></tr>
-      <tr><td>deploy-prod (step 2)</td><td>PROD</td><td>Validate model runs correctly in PROD</td></tr>
+      <tr><td>deploy-stage</td><td>STAGE</td><td><code>--validate --env stage</code>: validate the candidate scores correctly</td></tr>
+      <tr><td>deploy-prod</td><td>PROD</td><td><code>--validate --env prod</code> on the promoted version, then <code>--deploy --env prod</code> creates and resumes the scheduled Task</td></tr>
+      <tr><td>Schedule</td><td>PROD</td><td><code>serving.batch.schedule</code> (default <code>USING CRON 0 7 * * * America/Los_Angeles</code>): appends to the output table</td></tr>
+      <tr><td>rollback.yml</td><td>PROD</td><td><code>--validate --env prod</code> on the rolled-back version</td></tr>
     </tbody>
   </table>
 
+  <h4>Scheduled Task</h4>
+  <p><code>source/pipeline/batch_inference_dag.py</code> defines a Task DAG named <code>&lt;MODEL_NAME&gt;_BATCH_INFERENCE</code> with a single task, <code>SCORE</code>: a warehouse anonymous stored procedure that imports <code>@PIPELINE_STAGE/batch_inference/source.zip</code> and calls <code>serving.batch_inference.run(session)</code>.</p>
+  <pre><code class="language-bash"># Create + resume the Task on serving.batch.schedule
+uv run python source/pipeline/batch_inference_dag.py --deploy --env prod
+
+# Trigger a run now / show recent history
+uv run python source/pipeline/batch_inference_dag.py --execute --env prod
+uv run python source/pipeline/batch_inference_dag.py --status --env prod
+
+# CI validation: score into &lt;output_table&gt;_VALIDATION (overwrite), validate,
+# write Job Summary, exit 1 on failure. MODEL_VERSION pins the version.
+MODEL_VERSION=V12 uv run python source/pipeline/batch_inference_dag.py --validate --env prod</code></pre>
+
   <h4>Code Pattern</h4>
-  <pre><code class="language-python">from snowflake.ml.registry import Registry
+  <pre><code class="language-python">from serving.batch_inference import run_batch_inference, validate_predictions
 
-reg = Registry(session, database_name="SNOW_MLOPS_PROD", schema_name="ML")
-model = reg.get_model("MLOPS_FRAUD_DETECTOR")
-mv = model.default                              # Current DEFAULT version (e.g., V12)
-
-input_df = session.table('DB.SCHEMA."CUSTOMER_RISK_FEATURES$V1"')
-predictions_df = mv.run(input_df, function_name="predict_proba")
-
-predictions_df.write.mode("overwrite").save_as_table("BATCH_PREDICTIONS")</code></pre>
+# version=None -> model default; mode="append" for scheduled scoring,
+# "overwrite" for CI validation tables
+result = run_batch_inference(session, version=None, mode="append", ...)
+validate_predictions(session, result)   # checks rows WHERE RUN_ID = result["run_id"]</code></pre>
 
   <h4>Output Schema</h4>
   <table>
     <thead><tr><th>Column</th><th>Type</th><th>Description</th></tr></thead>
     <tbody>
-      <tr><td><em>(all input features)</em></td><td>-</td><td>Passed through from input</td></tr>
-      <tr><td><code>output_feature_0</code></td><td>FLOAT</td><td>P(legitimate) — probability of class 0</td></tr>
-      <tr><td><code>output_feature_1</code></td><td>FLOAT</td><td>P(fraud) — probability of class 1</td></tr>
+      <tr><td><em>(input features)</em></td><td>original input types</td><td>Written with the input table's types, so history keeps one schema across model versions</td></tr>
+      <tr><td><em>(model outputs)</em></td><td>FLOAT</td><td>From the model signature, e.g. <code>output_feature_0</code> / <code>output_feature_1</code> = P(legitimate) / P(fraud) for this example</td></tr>
+      <tr><td><code>MODEL_VERSION</code></td><td>VARCHAR</td><td>Version that produced the row</td></tr>
+      <tr><td><code>SCORED_AT</code></td><td>TIMESTAMP_NTZ</td><td>Scoring time (monitor timestamp column)</td></tr>
+      <tr><td><code>RUN_ID</code></td><td>VARCHAR</td><td>UUID of the scoring run</td></tr>
     </tbody>
   </table>
 
   <h4>Validation Checks</h4>
   <ul>
-    <li><strong>No NULLs:</strong> If any prediction is NULL, the model failed to score that row (exit code 1)</li>
-    <li><strong>Probability sanity:</strong> P(class0) + P(class1) must be within 0.01 of 1.0</li>
+    <li><strong>No NULLs:</strong> If any output is NULL, the model failed to score that row (exit code 1)</li>
+    <li><strong>Probability sanity (classifiers):</strong> each probability in [0, 1] and each row summing to 1 within 0.01</li>
   </ul>
+  <p>Checks come from <code>source/serving/signature.py</code> (<code>validate_outputs</code> / <code>validate_outputs_sql</code>), which also casts inputs to the model signature for Snowpark and pandas and derives <code>output_columns</code>. There are no hardcoded feature lists.</p>
 
   <h4>How It Works Under the Hood</h4>
-  <p>When the model was registered with <code>conda_dependencies=["xgboost==3.3.0", "scikit-learn"]</code>, Snowflake created a <strong>vectorized Python UDF</strong> backed by the serialized model. <code>mv.run()</code> invokes that UDF over the input DataFrame — all computation stays inside the warehouse, no data leaves Snowflake, no SPCS service needed.</p>
+  <p>When the model was registered with <code>conda_dependencies=ML_RUNTIME_DEPS</code>, Snowflake created a <strong>vectorized Python UDF</strong> backed by the serialized model. <code>mv.run()</code> invokes that UDF over the input DataFrame — all computation stays inside the warehouse, no data leaves Snowflake, no SPCS service needed.</p>
 
   <h4>Files</h4>
   <table>
     <thead><tr><th>File</th><th>Role</th></tr></thead>
     <tbody>
-      <tr><td><code>scripts/run_batch_inference.py</code></td><td>CI entry point: orchestrates scoring + validation</td></tr>
-      <tr><td><code>source/serving/batch_inference.py</code></td><td>Core logic: <code>run_batch_inference()</code> and <code>validate_predictions()</code></td></tr>
+      <tr><td><code>source/pipeline/batch_inference_dag.py</code></td><td>Scheduled Task definition + CLI (<code>--deploy</code>, <code>--execute</code>, <code>--status</code>, <code>--validate</code>)</td></tr>
+      <tr><td><code>source/serving/batch_inference.py</code></td><td>Core logic: <code>run()</code>, <code>run_batch_inference()</code>, <code>validate_predictions()</code></td></tr>
+      <tr><td><code>source/serving/signature.py</code></td><td>Signature-driven casting and output validation</td></tr>
     </tbody>
   </table>
 
   <h3>Real-Time Inference (SPCS + Gateway)</h3>
-  <p>The latest model version is deployed as a <strong>containerized SPCS service</strong> behind a <strong>Snowflake Gateway</strong> for HTTP access. Uses a <strong>canary deployment</strong> strategy with git-driven traffic management via <code>gateway-config.yml</code>.</p>
+  <p>The latest model version is deployed as a <strong>containerized SPCS service</strong> behind a <strong>Snowflake Gateway</strong> for HTTP access. Uses a <strong>canary deployment</strong> strategy with git-driven traffic management via <code>gateway-config.yml</code>. Enable or disable it with <code>serving.realtime.enabled</code>; gateway name, instance counts, canary weight, and health-check row count come from <code>serving.realtime</code>, and PROD database/warehouse/pool from <code>environments.prod</code>.</p>
+  <pre><code class="language-yaml">serving:
+  realtime:
+    enabled: true
+    gateway_name: FRAUD_DETECTOR_GATEWAY
+    min_instances: 1
+    max_instances: 2
+    canary_weight: 20        # initial traffic % for a new version
+    health_check_rows: 20    # rows from the batch input table</code></pre>
 
   <h4>Architecture</h4>
   <div class="workflow-diagram">
@@ -816,13 +948,13 @@ predictions_df.write.mode("overwrite").save_as_table("BATCH_PREDICTIONS")</code>
       <div class="wf-card">
         <div class="wf-num" style="background: #249EDB;">3</div>
         <div class="wf-title">Health Check</div>
-        <div class="wf-desc">Test prediction via <code>mv.run(sample, service_name=...)</code>. Validates output columns and probability sums.</div>
+        <div class="wf-desc">Real rows from the batch input table: valid outputs, parity with warehouse <code>mv.run()</code>, agreement with incumbent reported.</div>
       </div>
       <div class="wf-arrow">&rarr;</div>
       <div class="wf-card">
         <div class="wf-num" style="background: #249EDB;">4</div>
         <div class="wf-title">Canary Traffic Split</div>
-        <div class="wf-desc">Updates <code>gateway-config.yml</code> with 80/20 canary split. <code>traffic-shift.yml</code> applies <code>ALTER GATEWAY</code>.</div>
+        <div class="wf-desc"><code>apply_gateway_config.py</code> applies the canary split (default 80/20); CI syncs <code>gateway-config.yml</code> to the repo.</div>
       </div>
     </div>
   </div>
@@ -834,8 +966,8 @@ predictions_df.write.mode("overwrite").save_as_table("BATCH_PREDICTIONS")</code>
       <tr><td>1</td><td>Get latest model version</td><td><code>SHOW MODELS</code> &rarr; reads <code>default_version_name</code> (e.g., V12)</td></tr>
       <tr><td>2</td><td>Determine service names</td><td>New: <code>MLOPS_FRAUD_DETECTOR_SERVICE_V12</code>, Old: <code>..._V11</code></td></tr>
       <tr><td>3</td><td>Create new versioned service</td><td><code>mv.create_service()</code> &mdash; builds container image on compute pool</td></tr>
-      <tr><td>4</td><td>Wait for READY + health check</td><td>Polls <code>SYSTEM$GET_SERVICE_STATUS()</code>, then test prediction via <code>mv.run()</code></td></tr>
-      <tr><td>5</td><td>Update gateway-config.yml</td><td>Writes 80/20 canary split. <code>traffic-shift.yml</code> applies the gateway change.</td></tr>
+      <tr><td>4</td><td>Wait for READY + health check</td><td>Polls <code>SYSTEM$GET_SERVICE_STATUS()</code>, then runs the health check below</td></tr>
+      <tr><td>5</td><td>Apply canary split</td><td>New version at <code>canary_weight</code>%, remainder to the incumbent. <code>apply_gateway_config.py</code> applies it and CI commits <code>gateway-config.yml</code>.</td></tr>
     </tbody>
   </table>
 
@@ -850,27 +982,22 @@ mv.create_service(
     service_compute_pool="SNOW_MLOPS_PROD_POOL",
     image_build_compute_pool="SNOW_MLOPS_PROD_POOL",
     ingress_enabled=True,
-    max_instances=2,
+    min_instances=1,          # serving.realtime.min_instances
+    max_instances=2,          # serving.realtime.max_instances
+    autocapture=True,
 )</code></pre>
 
   <h4>Health Check</h4>
-  <p>Before shifting traffic, a test prediction is sent directly to the new service:</p>
-  <pre><code class="language-python"># Targets the new service specifically (bypasses gateway)
-result = mv.run(sample_df, function_name="predict_proba",
-                service_name="MLOPS_FRAUD_DETECTOR_SERVICE_V12")
-
-# Validates:
-# - output_feature_0 and output_feature_1 columns exist
-# - Probabilities sum to ~1.0 (within 0.01 tolerance)</code></pre>
+  <p>Before shifting traffic, <code>health_check_rows</code> real rows from the batch input table are sent directly to the new service (bypassing the gateway):</p>
+  <ol>
+    <li><strong>Valid outputs</strong> for the task type (no NULLs; probabilities valid for classifiers)</li>
+    <li><strong>Parity:</strong> service output matches warehouse <code>mv.run()</code> for the same version within <code>1e-4</code></li>
+    <li><strong>Incumbent agreement:</strong> agreement / mean abs diff vs the current service is reported in the Job Summary (not gated)</li>
+  </ol>
 
   <h4>Gateway Traffic Management</h4>
   <p>Traffic state lives in <code>gateway-config.yml</code> &mdash; the single source of truth. The deploy script writes the canary split; the engineer edits it to complete the cutover.</p>
-  <pre><code class="language-yaml"># gateway-config.yml (after deploy creates V12 service)
-gateway: FRAUD_DETECTOR_GATEWAY
-database: SNOW_MLOPS_PROD
-schema: ML
-initial_canary_weight: 20
-
+  <pre><code class="language-yaml"># gateway-config.yml (repo root, after deploy creates V12 service)
 targets:
   - service: MLOPS_FRAUD_DETECTOR_SERVICE_V11
     weight: 80
@@ -881,12 +1008,22 @@ targets:
 targets:
   - service: MLOPS_FRAUD_DETECTOR_SERVICE_V12
     weight: 100</code></pre>
-  <p>Set <code>initial_canary_weight: 100</code> to skip the canary period and get instant cutover (same as a traditional blue/green deploy).</p>
+  <p>Set <code>serving.realtime.canary_weight: 100</code> in <code>config.yml</code> to skip the canary period and get instant cutover (same as a traditional blue/green deploy).</p>
 
-  <h4>Gateway Access</h4>
-  <pre><code class="language-sql">-- Get the gateway URL
-DESC GATEWAY SNOW_MLOPS_PROD.ML.FRAUD_DETECTOR_GATEWAY
--- Returns: ingress_url (e.g., https://&lt;hash&gt;.snowflakecomputing.app)</code></pre>
+  <h4>Calling the Endpoint</h4>
+  <pre><code class="language-sql">-- Get the ingress_url
+SHOW ENDPOINTS IN SERVICE SNOW_MLOPS_PROD.ML.MLOPS_FRAUD_DETECTOR_SERVICE_V12;</code></pre>
+  <pre><code class="language-bash"># Method paths use dashes for underscores (predict_proba -> /predict-proba)
+curl -X POST "https://&lt;ingress-url&gt;/predict-proba" \
+  -H 'Authorization: Snowflake Token="&lt;pat&gt;"' \
+  -H "Content-Type: application/json" \
+  -d '{"dataframe_split": {
+        "index": [0],
+        "columns": ["TOTAL_TXN_COUNT", "AVG_TXN_AMOUNT", "MAX_TXN_AMOUNT", "STDDEV_TXN_AMOUNT",
+                    "UNIQUE_MERCHANTS", "ACTIVE_DAYS", "LATE_NIGHT_TXN_RATIO", "CREDIT_SCORE",
+                    "ACCOUNT_AGE_DAYS", "ANNUAL_INCOME"],
+        "data": [[20, 150.5, 500.0, 100.0, 10, 30, 0.05, 700, 365, 80000]]}}'</code></pre>
+  <p>By default only the service owner can call the endpoint; grant another role access with the service role <code>ALL_ENDPOINTS_USAGE</code>. Authorization failures return 404. Callers supply the feature values themselves; Snowflake also offers request-time feature lookup from an online feature store (<code>create_service(feature_sources_per_function=...)</code>, public preview), which this template does not configure.</p>
 
   <h4>Key Details</h4>
   <table>
@@ -895,9 +1032,9 @@ DESC GATEWAY SNOW_MLOPS_PROD.ML.FRAUD_DETECTOR_GATEWAY
       <tr><td>Compute</td><td>SPCS (<code>SNOW_MLOPS_PROD_POOL</code>, CPU_X64_M, 1-3 nodes)</td></tr>
       <tr><td>Service naming</td><td><code>MLOPS_FRAUD_DETECTOR_SERVICE_{VERSION}</code></td></tr>
       <tr><td>Container build time</td><td>~2-5 min (image built on compute pool)</td></tr>
-      <tr><td>Max instances</td><td>2 (auto-scales)</td></tr>
+      <tr><td>Instances</td><td><code>min_instances</code> 1 / <code>max_instances</code> 2 (from <code>serving.realtime</code>)</td></tr>
       <tr><td>Zero downtime</td><td>Old service stays live during canary period. Dropped only when removed from <code>gateway-config.yml</code></td></tr>
-      <tr><td>Canary default</td><td>80/20 split (configurable via <code>initial_canary_weight</code>)</td></tr>
+      <tr><td>Canary default</td><td>80/20 split (configurable via <code>serving.realtime.canary_weight</code>)</td></tr>
       <tr><td>Traffic config</td><td><code>gateway-config.yml</code> (single source of truth)</td></tr>
       <tr><td>Cleanup</td><td>Services removed from <code>gateway-config.yml</code> are dropped by <code>traffic-shift.yml</code></td></tr>
       <tr><td>READY timeout</td><td>10 minutes (configurable)</td></tr>
@@ -908,9 +1045,9 @@ DESC GATEWAY SNOW_MLOPS_PROD.ML.FRAUD_DETECTOR_GATEWAY
   <h4>Rollback</h4>
   <p>If the real-time service has issues after deployment, the <code>rollback.yml</code> workflow:</p>
   <ol>
-    <li>Sets model DEFAULT back to previous version (e.g., V11)</li>
-    <li>Runs <code>deploy_prod_service.py</code> again &rarr; creates <code>_V11</code> service, shifts gateway back</li>
-    <li>Drops the broken <code>_V12</code> service</li>
+    <li>Sets model DEFAULT back to the previous version (e.g., V11) with <code>deploy/set_default_version.py</code></li>
+    <li>Runs <code>deploy_prod_service.py</code> (ensures the <code>_V11</code> service), then <code>apply_gateway_config.py --targets "V11:100"</code> to route all traffic to it</li>
+    <li>Syncs <code>gateway-config.yml</code> to the repo; services removed from it are dropped by <code>traffic-shift.yml</code></li>
   </ol>
 
 
@@ -922,6 +1059,7 @@ DESC GATEWAY SNOW_MLOPS_PROD.ML.FRAUD_DETECTOR_GATEWAY
     <tbody>
       <tr><td><code>deploy.yml</code></td><td>Push to <code>main</code>, PR to <code>main</code>, or manual dispatch</td><td>Code quality (lint+tests) on every PR; full pipeline on push to main: train &rarr; promote &rarr; deploy to PROD</td></tr>
       <tr><td><code>scheduled-retrain.yml</code></td><td>Weekly cron (Mon 6AM PT) or manual dispatch</td><td>Retrain on fresh data, register candidate in STAGE only</td></tr>
+      <tr><td><code>traffic-shift.yml</code></td><td>Merge to <code>main</code> touching <code>gateway-config.yml</code>, or manual dispatch</td><td>Apply gateway traffic allocation across model versions (e.g. complete a canary cutover)</td></tr>
       <tr><td><code>rollback.yml</code></td><td>Manual dispatch</td><td>Revert PROD to a previous model version</td></tr>
     </tbody>
   </table>
@@ -942,7 +1080,7 @@ DESC GATEWAY SNOW_MLOPS_PROD.ML.FRAUD_DETECTOR_GATEWAY
       <div class="wf-card">
         <div class="wf-num">1</div>
         <div class="wf-title">deploy-stage completes</div>
-        <div class="wf-desc">Pipeline trains, evaluates, and registers model in STAGE. Or skipped entirely if <code>promote_only=true</code>.</div>
+        <div class="wf-desc">Pipeline trains, registers, and gates the model in STAGE. Or skipped entirely if <code>promote_only=true</code>.</div>
       </div>
       <div class="wf-arrow">&rarr;</div>
       <div class="wf-card" style="border: 2px dashed light-dark(#E8A317, #92700c);">
@@ -954,7 +1092,7 @@ DESC GATEWAY SNOW_MLOPS_PROD.ML.FRAUD_DETECTOR_GATEWAY
       <div class="wf-card">
         <div class="wf-num" style="background: #11567F;">3</div>
         <div class="wf-title">deploy-prod runs</div>
-        <div class="wf-desc">Replicate model &rarr; Feature Views &rarr; Batch inference &rarr; SPCS canary deploy &rarr; Gateway split &rarr; Monitor setup &rarr; Git tag.</div>
+        <div class="wf-desc">Promote model &rarr; Validate batch &rarr; Deploy batch Task &rarr; SPCS canary deploy &rarr; Apply gateway &rarr; Sync gateway-config.yml &rarr; Monitor setup &rarr; Git tag.</div>
       </div>
     </div>
   </div>
@@ -965,10 +1103,11 @@ DESC GATEWAY SNOW_MLOPS_PROD.ML.FRAUD_DETECTOR_GATEWAY
     <tbody>
       <tr><td><strong>lint</strong></td><td>ruff check + format check</td><td>-</td></tr>
       <tr><td><strong>test</strong></td><td>pytest (unit tests only)</td><td>-</td></tr>
-      <tr><td><strong>deploy-stage</strong></td><td>Deploy DAG &rarr; Execute &rarr; Wait &rarr; Quality gate &rarr; Register &rarr; Batch inference</td><td>STAGE</td></tr>
-      <tr><td><strong>deploy-prod</strong></td><td>Feature Views &rarr; Batch inference &rarr; SPCS deploy &rarr; Monitor setup &rarr; Gateway verify &rarr; Tag release</td><td>PROD (approval required)</td></tr>
+      <tr><td><strong>deploy-stage</strong></td><td>Deploy DAG &rarr; Execute (train + register + gate in Snowflake) &rarr; Wait &rarr; Read candidate (<code>read_candidate.py</code>) &rarr; Serving flags &rarr; Validate batch &rarr; Validate monitor</td><td>STAGE</td></tr>
+      <tr><td><strong>deploy-prod</strong></td><td>Promote &rarr; Serving flags &rarr; Validate batch (<code>--validate --env prod</code>) &rarr; Deploy batch Task (<code>--deploy --env prod</code>) &rarr; Real-time service &rarr; Apply gateway &rarr; Sync <code>gateway-config.yml</code> &rarr; Monitor &rarr; Tag release</td><td>PROD (approval required)</td></tr>
     </tbody>
   </table>
+  <p><code>source/utils/serving_flags.py</code> writes <code>batch_enabled</code>, <code>realtime_enabled</code>, and <code>monitor_enabled</code> to <code>GITHUB_OUTPUT</code> from <code>serving.*.enabled</code>; <code>deploy.yml</code> and <code>rollback.yml</code> skip the steps for disabled modes, so a batch-only use case never provisions an inference service.</p>
   <p><strong>Manual dispatch inputs:</strong></p>
   <ul>
     <li><code>promote_only</code> (boolean) &mdash; skip training, go straight to PROD deployment</li>
@@ -983,7 +1122,7 @@ DESC GATEWAY SNOW_MLOPS_PROD.ML.FRAUD_DETECTOR_GATEWAY
       <tr><td>1</td><td>Deploy Task DAG (with <code>RESUME_SCHEDULE=true</code> to enable cron)</td></tr>
       <tr><td>2</td><td>Trigger pipeline (FEATURE_ENG &rarr; TRAIN &rarr; EVALUATE)</td></tr>
       <tr><td>3</td><td>Wait for ML Jobs to complete</td></tr>
-      <tr><td>4</td><td>Quality gate + register (<code>STAGE_ONLY=true</code> &mdash; does NOT promote to PROD)</td></tr>
+      <tr><td>4</td><td>Read candidate (<code>read_candidate.py</code>): the gate already ran in EVALUATE; candidate stays in STAGE only (does NOT promote to PROD)</td></tr>
       <tr><td>5</td><td>Notify: create GitHub Issue with model version and metrics table</td></tr>
     </tbody>
   </table>
@@ -994,7 +1133,7 @@ DESC GATEWAY SNOW_MLOPS_PROD.ML.FRAUD_DETECTOR_GATEWAY
     <li>Approve the PROD deployment when prompted</li>
   </ol>
   <h4>Notification Channel</h4>
-  <p>The template ships with <code>scripts/notify_candidate.py</code>, which creates a <strong>GitHub Issue</strong> by default. This is a pluggable step &mdash; swap it out for whatever notification channel your team uses:</p>
+  <p>The template ships with <code>source/utils/notify_candidate.py</code>, which creates a <strong>GitHub Issue</strong> by default. This is a pluggable step &mdash; swap it out for whatever notification channel your team uses:</p>
   <table>
     <thead><tr><th>Channel</th><th>How to Adapt</th></tr></thead>
     <tbody>
@@ -1039,9 +1178,9 @@ DESC GATEWAY SNOW_MLOPS_PROD.ML.FRAUD_DETECTOR_GATEWAY
 
   <h3>Rollback Steps</h3>
   <ol>
-    <li>Set DEFAULT version: <code>ALTER MODEL ... SET DEFAULT_VERSION = 'V11'</code></li>
-    <li>Redeploy SPCS service with rolled-back model</li>
-    <li>Validate gateway endpoint responds correctly</li>
+    <li>Set DEFAULT version: <code>deploy/set_default_version.py --version V11</code></li>
+    <li>If real-time is enabled: <code>deploy_prod_service.py</code>, then <code>apply_gateway_config.py --targets "V11:100"</code>, then sync <code>gateway-config.yml</code></li>
+    <li>If batch is enabled: validate batch inference on the rolled-back version (<code>--validate --env prod</code>)</li>
     <li>Tag rollback: <code>rollback/V11-{timestamp}</code></li>
   </ol>
 
@@ -1058,14 +1197,16 @@ DESC GATEWAY SNOW_MLOPS_PROD.ML.FRAUD_DETECTOR_GATEWAY
   │     ├── SELECT on SNOW_MLOPS_PROD.ML (read-only)
   │     ├── USAGE on DEV + STAGE warehouses and compute pools
   │     ├── OWNERSHIP on models in DEV.ML and STAGE.ML
-  │     └── EXECUTE TASK, EXECUTE MANAGED TASK
+  │     ├── USAGE on PROD schema + ALL/FUTURE MODELS in PROD (champion read)
+  │     └── EXECUTE TASK, EXECUTE MANAGED TASK, EXECUTE ALERT
   │
   └── MLOPS_PROD_ROLE (CI: PROD)
         ├── ALL on SNOW_MLOPS_PROD.ML (schema, tables, stages)
         ├── OWNERSHIP on models in PROD.ML
+        ├── USAGE on STAGE schema + models (replication)
         ├── USAGE on PROD warehouse and compute pool
         ├── BIND SERVICE ENDPOINT
-        └── EXECUTE TASK, EXECUTE MANAGED TASK</code></pre>
+        └── EXECUTE TASK, EXECUTE MANAGED TASK, EXECUTE ALERT</code></pre>
 
   <h3>Branch Protection</h3>
   <ul>
@@ -1104,68 +1245,62 @@ DESC GATEWAY SNOW_MLOPS_PROD.ML.FRAUD_DETECTOR_GATEWAY
       <div class="wf-card">
         <div class="wf-num">1</div>
         <div class="wf-title">Batch Inference</div>
-        <div class="wf-desc">Scores production data. Writes predictions + <code>PREDICTION_TS</code> (TIMESTAMP_NTZ) to <code>BATCH_PREDICTIONS</code>.</div>
+        <div class="wf-desc">Scheduled Task appends predictions + <code>MODEL_VERSION</code>, <code>SCORED_AT</code> (TIMESTAMP_NTZ), <code>RUN_ID</code> to <code>BATCH_PREDICTIONS</code>.</div>
       </div>
       <div class="wf-arrow">&rarr;</div>
       <div class="wf-card">
         <div class="wf-num">2</div>
-        <div class="wf-title">Model Monitor</div>
-        <div class="wf-desc">Reads <code>BATCH_PREDICTIONS</code> on a daily refresh. Aggregates over a 7-day sliding window.</div>
+        <div class="wf-title">Monitor Source View</div>
+        <div class="wf-desc"><code>BATCH_PREDICTIONS_MONITOR_SOURCE</code>: predictions for the monitored version, LEFT JOINed to actuals when <code>monitor.actuals.table</code> is set. The monitor refreshes daily over a 7-day window.</div>
       </div>
       <div class="wf-arrow">&rarr;</div>
       <div class="wf-card">
         <div class="wf-num">3</div>
-        <div class="wf-title">Baseline (optional)</div>
-        <div class="wf-desc">If configured, a snapshot table is embedded in the monitor for drift comparison.</div>
+        <div class="wf-title">Baseline</div>
+        <div class="wf-desc"><code>baseline: auto</code> snapshots the promotion-time validation scoring into <code>BATCH_PREDICTIONS_BASELINE</code>.</div>
       </div>
       <div class="wf-arrow">&rarr;</div>
       <div class="wf-card">
         <div class="wf-num">4</div>
         <div class="wf-title">Drift Alert</div>
-        <div class="wf-desc">A Snowflake Alert fires when the drift metric (e.g., PSI) exceeds the configured threshold.</div>
+        <div class="wf-desc">A Snowflake Alert logs to <code>DRIFT_ALERTS</code> when the drift metric (e.g., PSI) exceeds the threshold, and emails recipients when a notification integration is set.</div>
       </div>
     </div>
   </div>
 
   <h3>Monitor Configuration</h3>
-  <pre><code class="language-python">MONITOR_CONFIG = {
-    "monitor_name": "FRAUD_DETECTOR_MONITOR",
-    "function_name": "predict_proba",
-    "source_table": "BATCH_PREDICTIONS",
-    "timestamp_column": "PREDICTION_TS",
-    "prediction_columns": ["output_feature_1"],
-    "refresh_interval": "1 day",
-    "aggregation_window": "7 days",
+  <p>The monitor reads <code>serving.batch.output_table</code> through a source view and monitors <code>model.predict_function</code>. Settings live under <code>monitor:</code> in <code>source/configs/config.yml</code>:</p>
+  <pre><code class="language-yaml">monitor:
+  monitor_name: FRAUD_DETECTOR_MONITOR
+  timestamp_column: SCORED_AT
+  prediction_column: output_feature_1   # score column monitored and used for drift
+  refresh_interval: "1 day"
+  aggregation_window: "7 days"
+  actuals:                              # ground truth; enables performance metrics
+    table: RAW_TRANSACTIONS             # in the source database/schema
+    join_keys: [CUSTOMER_ID]
+    label_sql: "MAX(IS_FRAUD::INT)"
+  baseline: auto                        # auto | &lt;table name&gt; | null
+  drift_metric: POPULATION_STABILITY_INDEX
+  drift_threshold: 0.25
+  alert_name: FRAUD_DETECTOR_DRIFT_ALERT
+  alert_schedule: "1440 MINUTE"
+  notification_integration: null        # EMAIL notification integration (optional)
+  notification_recipients: []</code></pre>
 
-    # Drift detection (requires baseline)
-    "drift_metric": "POPULATION_STABILITY_INDEX",
-    "drift_column": "output_feature_1",
-    "drift_threshold": 0.25,
+  <h3>Source View and Actuals</h3>
+  <p><code>source/monitoring/model_monitor.py</code> creates <code>&lt;output_table&gt;_MONITOR_SOURCE</code>, a view over the predictions filtered to the monitored version (<code>MODEL_VERSION</code> env var, or the model default). When <code>monitor.actuals.table</code> is set, the view LEFT JOINs <code>label_sql</code> (grouped by <code>join_keys</code>) as <code>ACTUAL_LABEL</code>, which the monitor uses as <code>ACTUAL_CLASS_COLUMNS</code> (binary) or <code>ACTUAL_SCORE_COLUMNS</code> (regression) so it reports performance metrics as well as drift. <code>ID_COLUMNS</code> are <code>model.id_columns</code> plus <code>RUN_ID</code>.</p>
 
-    # Baseline table (None = no baseline, drift detection disabled)
-    "baseline_table": None,
-
-    # Snowflake Alert for threshold breaches
-    "alert_name": "FRAUD_DETECTOR_DRIFT_ALERT",
-    "alert_schedule": "1440 MINUTE",  # Check daily
-}</code></pre>
-
-  <h3>With vs. Without Baseline</h3>
-  <p>The <code>baseline_table</code> setting controls whether drift detection is active:</p>
+  <h3>Baseline</h3>
+  <p>The <code>baseline</code> setting controls whether drift detection is active:</p>
   <table>
     <thead><tr><th>Mode</th><th>Configuration</th><th>What Happens</th></tr></thead>
     <tbody>
-      <tr><td><strong>Without baseline</strong></td><td><code>"baseline_table": None</code></td><td>Monitor collects prediction statistics (count, mean, stddev, min/max, histograms) over time. No drift metrics, no alerts. Use this for initial deployment before you have enough data for a meaningful baseline.</td></tr>
-      <tr><td><strong>With baseline</strong></td><td><code>"baseline_table": "BATCH_PREDICTIONS_BASELINE"</code></td><td>A snapshot of the baseline table is embedded in the monitor. Drift metrics (PSI, Jensen&ndash;Shannon, etc.) are computed against it. A Snowflake Alert fires when drift exceeds the threshold.</td></tr>
+      <tr><td><strong>Auto</strong> (default)</td><td><code>baseline: auto</code></td><td>Snapshots the promotion-time validation scoring (<code>&lt;output_table&gt;_VALIDATION</code>) into <code>&lt;output_table&gt;_BASELINE</code>, so drift metrics work from day one and the drift alert is created.</td></tr>
+      <tr><td><strong>Explicit table</strong></td><td><code>baseline: MY_BASELINE_TABLE</code></td><td>Uses the named table as the expected distribution.</td></tr>
+      <tr><td><strong>None</strong></td><td><code>baseline: null</code></td><td>Monitor collects prediction statistics over time. No drift metrics, no alert.</td></tr>
     </tbody>
   </table>
-  <p>To enable drift detection later, create a baseline snapshot from your initial PROD predictions:</p>
-  <pre><code class="language-sql">-- Snapshot current predictions as baseline
-CREATE TABLE SNOW_MLOPS_PROD.ML.BATCH_PREDICTIONS_BASELINE AS
-SELECT * FROM SNOW_MLOPS_PROD.ML.BATCH_PREDICTIONS;
-
--- Then set baseline_table in config.py:
--- "baseline_table": "BATCH_PREDICTIONS_BASELINE"</code></pre>
 
   <h3>Drift Metrics</h3>
   <p>When a baseline is configured, the monitor can compute any of these drift metrics via <code>MODEL_MONITOR_DRIFT_METRIC()</code>:</p>
@@ -1178,7 +1313,7 @@ SELECT * FROM SNOW_MLOPS_PROD.ML.BATCH_PREDICTIONS;
       <tr><td><strong>DIFFERENCE_OF_MEANS</strong></td><td>Simple difference between average prediction values</td><td>Quick sanity check. Large shift in mean prediction is an obvious red flag.</td></tr>
     </tbody>
   </table>
-  <p>Set the metric in <code>MONITOR_CONFIG["drift_metric"]</code>. The default is <code>POPULATION_STABILITY_INDEX</code>.</p>
+  <p>Set the metric with <code>monitor.drift_metric</code>. The default is <code>POPULATION_STABILITY_INDEX</code>.</p>
 
   <h3>Threshold Alerts</h3>
   <p>When a baseline is configured, the framework creates a <a href="https://docs.snowflake.com/en/sql-reference/sql/create-alert">Snowflake Alert</a> that checks the drift metric daily:</p>
@@ -1196,13 +1331,13 @@ CREATE ALERT FRAUD_DETECTOR_DRIFT_ALERT
     THEN
         INSERT INTO DRIFT_ALERTS (DRIFT_METRIC, THRESHOLD, STATUS)
         VALUES ('POPULATION_STABILITY_INDEX', 0.25, 'THRESHOLD_EXCEEDED');</code></pre>
-  <p>Breaches are logged to a <code>DRIFT_ALERTS</code> table. Extend the alert action with a <a href="https://docs.snowflake.com/en/sql-reference/sql/create-notification-integration">notification integration</a> (email, Slack, PagerDuty) for real-time alerting.</p>
+  <p>Breaches are logged to a <code>DRIFT_ALERTS</code> table. When <code>monitor.notification_integration</code> and <code>notification_recipients</code> are set, the alert action also calls <code>SYSTEM$SEND_EMAIL</code>.</p>
 
   <h3>Lifecycle</h3>
   <table>
     <thead><tr><th>Operation</th><th>When</th><th>What Happens</th></tr></thead>
     <tbody>
-      <tr><td>Create</td><td>deploy-prod (if <code>ENABLE_MODEL_MONITOR=true</code>)</td><td><code>CREATE MODEL MONITOR</code> + optionally set baseline + create drift alert</td></tr>
+      <tr><td>Create</td><td>deploy-prod (if <code>ENABLE_MODEL_MONITOR=true</code> and batch is enabled)</td><td>Source view + baseline + <code>CREATE MODEL MONITOR</code> + drift alert</td></tr>
       <tr><td>Version tracking</td><td>Each PROD deployment</td><td>If model version changed, drops and recreates the monitor (and alert)</td></tr>
       <tr><td>Validate (STAGE)</td><td>deploy-stage</td><td>Creates monitor &rarr; verifies ACTIVE &rarr; drops (proves PROD will work)</td></tr>
       <tr><td>Suspend / Resume</td><td>Manual</td><td><code>suspend_monitor()</code> / <code>resume_monitor()</code> for cost control</td></tr>
@@ -1238,7 +1373,7 @@ AS
            SUM(CASE WHEN output_feature_1 > 0.5 AND IS_FRAUD = 1 THEN AMOUNT ELSE 0 END)
     FROM BATCH_PREDICTIONS bp
     JOIN RAW_TRANSACTIONS rt ON bp.TXN_ID = rt.TXN_ID
-    WHERE bp.PREDICTION_TS > DATEADD('DAY', -1, CURRENT_TIMESTAMP());
+    WHERE bp.SCORED_AT > DATEADD('DAY', -1, CURRENT_TIMESTAMP());
 
 -- 3. Alert when metric crosses a threshold
 CREATE OR REPLACE ALERT FRAUD_LOSS_ALERT
@@ -1268,7 +1403,7 @@ exp.set_experiment("FRAUD_DETECTION_TRAINING")
 
 run_name = f"pipeline_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 with exp.start_run(run_name):
-    exp.log_params({"n_estimators": 200, "max_depth": 6, "learning_rate": 0.1})
+    exp.log_params({"n_estimators": 100, "max_depth": 6, "learning_rate": 0.1})
     exp.log_params({"feature_view": "V1", "dataset_rows": "5000"})
     exp.log_metrics({"auc_roc": 0.94, "f1_score": 0.82, "precision": 0.85})</code></pre>
 
@@ -1297,7 +1432,7 @@ with exp.start_run(run_name):
     <tbody>
       <tr><td><code>01_setup_and_data.ipynb</code></td><td>Connect to Snowflake, verify infrastructure, inspect the synthetic dataset created by <code>generate_dataset.py</code></td><td><code>setup.sh</code> + <code>generate_dataset.py</code> must have run</td></tr>
       <tr><td><code>02_feature_store.ipynb</code></td><td>Register entities and both feature views; inspect Dynamic Table refresh and feature schemas; generate a point-in-time correct training dataset</td><td>Notebook 01</td></tr>
-      <tr><td><code>03_model_training.ipynb</code></td><td>Train XGBoost interactively using the Feature Store dataset; evaluate metrics; save <code>model.ubj</code> and <code>sample_input.json</code> to <code>/tmp/</code></td><td>Notebook 02</td></tr>
+      <tr><td><code>03_model_training.ipynb</code></td><td>Train XGBoost interactively using the Feature Store dataset; evaluate metrics</td><td>Notebook 02</td></tr>
       <tr><td><code>04_registry_and_deploy.ipynb</code></td><td>Register the trained model to the Model Registry; run batch inference on a warehouse; deploy a real-time SPCS service and test it</td><td>Notebook 03</td></tr>
       <tr><td><code>05_pipeline_orchestration.ipynb</code></td><td>Deploy and execute the full Task DAG end-to-end; monitor task status; inspect experiment tracking results</td><td>Notebooks 01–04</td></tr>
     </tbody>
@@ -1311,16 +1446,17 @@ with exp.start_run(run_name):
 
   <h2 id="testing">Testing</h2>
 
-  <p>The project has two test files with different scopes and when they run.</p>
+  <p>Unit tests run on every PR and push with no Snowflake connection; integration tests need a live PROD deployment.</p>
 
-  <h3>Unit Tests: <code>tests/test_config.py</code></h3>
+  <h3>Unit Tests: <code>tests/test_config.py</code>, <code>test_pipeline_steps.py</code>, <code>test_gap_fillers.py</code></h3>
   <p>Run on every PR and push — no Snowflake connection needed. Tests:</p>
   <ul>
-    <li>Config values are the right types (strings, numerics)</li>
-    <li>Required keys exist in <code>PIPELINE_CONFIG</code></li>
+    <li>Config values are the right types; required keys exist; every <code>STEPS</code> entry resolves to a step package exposing <code>run(session)</code></li>
     <li><code>ML_RUNTIME_DEPS</code> matches <code>pyproject.toml [dependency-groups] ml-runtime</code> and every dep is pinned with <code>==</code></li>
-    <li>Quality gate thresholds are in range (0, 1.0]</li>
-    <li>Quality gate logic: pass/fail on boundary values, missing keys, multiple failures</li>
+    <li>Gate rules reference metrics produced for the configured <code>task_type</code>; min/max rules, boundary values, and missing metrics</li>
+    <li>Champion/challenger: disabled, no champion, higher/lower-is-better, and improvement margins</li>
+    <li>Metrics per task type, signature-based output validation, data-check SQL and rules</li>
+    <li>Serving flags, gateway target parsing/weight validation/file round-trip, canary split, monitor source SQL, and batch Task wiring</li>
   </ul>
   <pre><code class="language-bash"># Run unit tests (no Snowflake required)
 uv run pytest tests/ -v --ignore=tests/test_endpoint.py</code></pre>
@@ -1347,74 +1483,158 @@ SNOWFLAKE_CONNECTION_NAME=your-connection uv run pytest tests/test_endpoint.py -
 
   <h2 id="config">Configuration</h2>
 
-  <p>All pipeline configuration is centralized in <code>source/config.py</code>:</p>
+  <p>All pipeline configuration lives in <code>source/configs/config.yml</code>. <code>source/config.py</code> is a thin loader that reads this YAML and re-exports the values as Python constants (<code>MODEL_NAME</code>, <code>TASK_TYPE</code>, <code>GATE_RULES</code>, <code>CHAMPION_CONFIG</code>, <code>BATCH_CONFIG</code>, <code>REALTIME_CONFIG</code>, <code>DATA_CHECKS</code>, <code>TRAINING_PARAMS</code>, <code>MONITOR_CONFIG</code>, &hellip;), so every module keeps one import surface.</p>
 
-  <pre><code class="language-python"># Target environment
-DATABASE = "SNOW_MLOPS_DEV"
-SCHEMA = "ML"
-WAREHOUSE = "SNOW_MLOPS_DEV_WH"
-COMPUTE_POOL = "SNOW_MLOPS_DEV_POOL"
+  <pre><code class="language-yaml"># Target environment (where the pipeline WRITES)
+database: SNOW_MLOPS_DEV
+schema: ML
+warehouse: SNOW_MLOPS_DEV_WH
+compute_pool: SNOW_MLOPS_DEV_POOL
 
 # Source data (always PROD)
-SOURCE_DATABASE = "SNOW_MLOPS_PROD"
-SOURCE_SCHEMA = "ML"
+source_database: SNOW_MLOPS_PROD
+source_schema: ML
 
-# Pipeline configuration
-PIPELINE_CONFIG = {
-    # Compute mode per step: "warehouse" or "spcs"
-    "feature_engineering_compute": "spcs",
-    "training_compute": "spcs",
-    "evaluation_compute": "warehouse",
-}
+# Model identity and contract
+model:
+  name: MLOPS_FRAUD_DETECTOR
+  task_type: binary_classification   # binary_classification | multiclass | regression
+  predict_function: predict_proba    # predict_proba for classifiers, predict for regressors
+  id_columns: [CUSTOMER_ID]
+  label_column: IS_FRAUD
+
+# Feature Store
+feature_store:
+  view_name: CUSTOMER_RISK_FEATURES
+  view_version: V1
+  customer_features_refresh: "1 hour"
+  transaction_features_refresh: "1 hour"
+
+# Quality gate (evaluated in the EVALUATE step)
+quality_gate:
+  metrics:
+    auc_roc: {min: 0.01}     # Template default; set your real bar for production
+    precision: {min: 0.01}
+    recall: {min: 0.01}
+  champion:
+    enabled: true
+    source_env: prod
+    metric: auc_roc
+    higher_is_better: true
+    min_improvement: -0.01
+
+# Training hyperparameters (read by the training step)
+training_params:
+  n_estimators: 100
+  learning_rate: 0.1
+  max_depth: 6
+  scale_pos_weight: 33
+  objective: "binary:logistic"
+  eval_metric: aucpr
+  random_state: 42
+
+# Per-step compute: "warehouse" or "spcs"
+pipeline_steps:
+  feature_eng:
+    compute: spcs
+  train_model:
+    compute: spcs
+  evaluate:
+    compute: warehouse
+
+# Serving
+serving:
+  batch:
+    enabled: true
+    schedule: "USING CRON 0 7 * * * America/Los_Angeles"
+    input_table: null          # null = the training feature view table
+    output_table: BATCH_PREDICTIONS
+  realtime:
+    enabled: true
+    gateway_name: FRAUD_DETECTOR_GATEWAY
+    min_instances: 1
+    max_instances: 2
+    canary_weight: 20
+    health_check_rows: 20
+
+# Data checks (run before feature engineering)
+data_checks:
+  RAW_TRANSACTIONS:
+    min_rows: 1000
+    max_null_pct: {CUSTOMER_ID: 0, IS_FRAUD: 0}
+    freshness_column: TIMESTAMP
+    max_age_hours: null        # synthetic data is static; set e.g. 26 for daily loads
+  CUSTOMER_PROFILES:
+    min_rows: 100
+    max_null_pct: {CUSTOMER_ID: 0}
 
 # Experiment Tracking
-EXPERIMENT_CONFIG = {
-    "enabled": "true",
-    "experiment_name": "FRAUD_DETECTION_TRAINING",
-    "run_name_prefix": "pipeline",
-}
-
-# Feature View refresh intervals
-FEATURE_VIEW_CONFIG = {
-    "customer_features_refresh": "1 hour",
-    "transaction_features_refresh": "1 hour",
-}
+experiment:
+  enabled: true
+  experiment_name: FRAUD_DETECTION_TRAINING
+  run_name_prefix: pipeline
 
 # Model Monitor
-MONITOR_CONFIG = {
-    "monitor_name": "FRAUD_DETECTOR_MONITOR",
-    "refresh_interval": "1 day",
-    "aggregation_window": "7 days",
-    "prediction_columns": ["output_feature_1"],
-}
+monitor:
+  monitor_name: FRAUD_DETECTOR_MONITOR
+  timestamp_column: SCORED_AT
+  prediction_column: output_feature_1
+  refresh_interval: "1 day"
+  aggregation_window: "7 days"
+  actuals:
+    table: RAW_TRANSACTIONS
+    join_keys: [CUSTOMER_ID]
+    label_sql: "MAX(IS_FRAUD::INT)"
+  baseline: auto
+  drift_metric: POPULATION_STABILITY_INDEX
+  drift_threshold: 0.25
+  alert_name: FRAUD_DETECTOR_DRIFT_ALERT
+  alert_schedule: "1440 MINUTE"
+  notification_integration: null
+  notification_recipients: []
 
-# Scheduled Retraining
-RETRAIN_CONFIG = {
-    "enabled": "true",
-    "schedule": "USING CRON 0 6 * * MON America/Los_Angeles",
-    "stage_only": "true",
-    "notify_github_issue": "true",
-}
+# Scheduled retraining
+retrain:
+  enabled: true
+  schedule: "USING CRON 0 6 * * MON America/Los_Angeles"
+  stage_only: true
+  notify_github_issue: true</code></pre>
 
-# Quality gate thresholds
-MIN_AUC_ROC = 0.01   # Template default — set to e.g. 0.85 for production
-MIN_PRECISION = 0.01  # Template default — set to e.g. 0.70 for production
-MIN_RECALL = 0.01     # Template default — set to e.g. 0.60 for production</code></pre>
+  <div class="note">
+    <strong>One setting stays in <code>pyproject.toml</code></strong>
+    <code>ML_RUNTIME_DEPS</code> is read from <code>[dependency-groups] ml-runtime</code> rather than YAML, because the same pins must feed the training job's <code>pip_requirements</code>, the warehouse sproc's <code>PACKAGES</code>, and <code>log_model(conda_dependencies=...)</code>.
+  </div>
 
   <h3>Environment Overrides</h3>
-  <p>The CI workflow overrides database/warehouse/pool per environment via environment variables. The <code>ml_pipeline_dag.py</code> script reads <code>--env stage</code> to select the correct config:</p>
-  <pre><code class="language-python">ENV_CONFIG = {
-    "dev":   {"database": "SNOW_MLOPS_DEV",   "warehouse": "SNOW_MLOPS_DEV_WH",   ...},
-    "stage": {"database": "SNOW_MLOPS_STAGE", "warehouse": "SNOW_MLOPS_STAGE_WH", ...},
-}</code></pre>
+  <p>Per-environment infrastructure names live under <code>environments:</code> in the same file and are selected by <code>--env</code> on the DAG (<code>dev</code>, <code>stage</code>, or <code>prod</code>):</p>
+  <pre><code class="language-yaml">environments:
+  dev:
+    database: SNOW_MLOPS_DEV
+    warehouse: SNOW_MLOPS_DEV_WH
+    compute_pool: SNOW_MLOPS_DEV_POOL
+  stage:
+    database: SNOW_MLOPS_STAGE
+    warehouse: SNOW_MLOPS_STAGE_WH
+    compute_pool: SNOW_MLOPS_STAGE_POOL
+  prod:
+    database: SNOW_MLOPS_PROD
+    warehouse: SNOW_MLOPS_PROD_WH
+    compute_pool: SNOW_MLOPS_PROD_POOL</code></pre>
+  returning a flat dict of primitives:</p>
+  <pre><code class="language-python">from config import resolve_env_config
+
+cfg = resolve_env_config("stage")
+# {"env": "stage", "database": "SNOW_MLOPS_STAGE", "warehouse": ..., "compute_pool": ...}</code></pre>
+  <p>The DAG uses it to pick the target infrastructure and pins those names into each task's environment. <code>source/monitoring/model_monitor.py</code> uses the same function to resolve its environment.</p>
 
   <h3>Adding a New Pipeline Step</h3>
   <ol>
-    <li>Add compute mode to <code>PIPELINE_CONFIG</code>: <code>"new_step_compute": "spcs"</code></li>
-    <li>Create a <code>build_new_step_remote(cfg)</code> function in <code>ml_pipeline_dag.py</code></li>
-    <li>Add <code>DAGTask("NEW_STEP", definition=func)</code> to the DAG</li>
-    <li>Wire dependencies: <code>eval_task >> new_task</code></li>
+    <li>Create <code>source/&lt;name&gt;/</code> with a logic module exposing <code>run(session) -&gt; dict</code> and an <code>entrypoint.py</code></li>
+    <li>Add an entry to <code>STEPS</code> in <code>source/pipeline/train_dag.py</code> (module, config key, pip deps), append it to <code>STEP_ORDER</code>, and add the package to <code>STAGED_PACKAGES</code></li>
+    <li>Add a <code>pipeline_steps.&lt;name&gt;</code> block to <code>source/configs/config.yml</code></li>
   </ol>
+  <p>No new dispatch code is required — both the ML Job and the stored procedure wrapper are built generically, and steps are chained in <code>STEP_ORDER</code>.</p>
+
 
   <script src="/libs/highlight.js@11.10.0/highlight.min.js"></script>
   <script>

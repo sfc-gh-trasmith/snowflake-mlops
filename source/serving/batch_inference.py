@@ -1,15 +1,30 @@
-"""Batch inference: score a table using the registered model on warehouse compute.
+"""Batch inference: score a table with a registered model on warehouse compute.
 
-Uses model.run() from the Model Registry — no SPCS service needed.
-Runs on the warehouse, suitable for bulk scoring (daily/hourly).
+Uses ModelVersion.run() from the Model Registry (no inference service needed).
+Input casting and output validation are derived from the model signature, so
+this works for any registered model.
+
+Every run APPENDS rows tagged with MODEL_VERSION, SCORED_AT and RUN_ID, which
+gives the model monitor a prediction history and makes every score traceable
+to the version that produced it.
+
+run(session) is the scheduled Task entrypoint (pipeline/batch_inference_dag.py).
 """
 
-import os
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from config import DATABASE, MODEL_NAME, SCHEMA
+from config import (
+    DATABASE,
+    MODEL_NAME,
+    PREDICT_FUNCTION,
+    SCHEMA,
+    TASK_TYPE,
+    WAREHOUSE,
+    batch_input_table,
+    batch_output_table,
+)
 
 
 def run_batch_inference(
@@ -18,100 +33,85 @@ def run_batch_inference(
     output_table: str,
     model_name: str = MODEL_NAME,
     version: str | None = None,
+    mode: str = "append",
+    database: str = DATABASE,
+    schema: str = SCHEMA,
 ) -> dict:
-    """Score an entire table using the registered model.
+    """Score input_table and write predictions to output_table.
 
     Args:
-        session: Active Snowpark session
-        input_table: Fully-qualified input table with feature columns
-        output_table: Where to write predictions (overwritten each run)
-        model_name: Model to use from the registry
-        version: Specific version, or None for default
+        version: model version to use; None = the model's default version
+        mode: "append" (scheduled scoring) or "overwrite" (CI validation tables)
 
-    Returns:
-        dict with row_count and output_table
+    Returns dict with run_id, row_count, output_table, model_version, and the
+    prediction output columns.
     """
+    import uuid
+
+    from serving.signature import cast_snowpark, input_features, output_columns
     from snowflake.ml.registry import Registry
+    from snowflake.snowpark import functions as F
 
-    db = os.getenv("SNOWFLAKE_DATABASE", DATABASE)
-    schema = os.getenv("SNOWFLAKE_SCHEMA", SCHEMA)
-
-    reg = Registry(session=session, database_name=db, schema_name=schema)
+    reg = Registry(session=session, database_name=database, schema_name=schema)
     model = reg.get_model(model_name)
     mv = model.version(version) if version else model.default
+    run_id = str(uuid.uuid4())
 
-    print(f"  Model: {model_name} (version: {mv.version_name})")
+    print(f"  Model: {model_name} (version: {mv.version_name}, function: {PREDICT_FUNCTION})")
     print(f"  Input: {input_table}")
 
     input_df = session.table(input_table)
+    missing = [c for c in input_features(mv, PREDICT_FUNCTION) if c not in input_df.columns]
+    if missing:
+        raise ValueError(f"Input table {input_table} is missing model features: {missing}")
+    original_types = {f.name: f.datatype for f in input_df.schema.fields}
     row_count = input_df.count()
     print(f"  Rows to score: {row_count:,}")
 
-    # Cast all feature columns to match model signature (INT64)
-    # The model was trained on pandas integers (from fillna(0)), but the Feature View
-    # stores FLOAT/DECIMAL types. Model Registry validates types strictly.
-    from snowflake.snowpark.functions import col
-    from snowflake.snowpark.types import LongType
-
-    feature_cols = [
-        "TOTAL_TXN_COUNT",
-        "AVG_TXN_AMOUNT",
-        "MAX_TXN_AMOUNT",
-        "STDDEV_TXN_AMOUNT",
-        "UNIQUE_MERCHANTS",
-        "ACTIVE_DAYS",
-        "LATE_NIGHT_TXN_RATIO",
-        "CREDIT_SCORE",
-        "ACCOUNT_AGE_DAYS",
-        "ANNUAL_INCOME",
-    ]
-    for c in feature_cols:
-        if c in input_df.columns:
-            input_df = input_df.with_column(c, col(c).cast(LongType()))
-
-    predictions_df = mv.run(input_df, function_name="predict_proba")
-
-    # Add timestamp for model monitoring (TIMESTAMP_NTZ required by MODEL MONITOR)
-    from snowflake.snowpark.functions import current_timestamp
-
-    predictions_df = predictions_df.with_column("PREDICTION_TS", current_timestamp().cast("TIMESTAMP_NTZ"))
-
-    predictions_df.write.mode("overwrite").save_as_table(output_table)
-    print(f"  Output written to: {output_table}")
+    predictions = mv.run(cast_snowpark(input_df, mv, PREDICT_FUNCTION), function_name=PREDICT_FUNCTION)
+    # Casting to the signature is only for scoring. Restore the input's types so
+    # the appended history keeps one schema across model versions (signatures
+    # can differ between versions).
+    restore = [c for c in predictions.columns if c in original_types]
+    predictions = predictions.with_columns(restore, [F.col(c).cast(original_types[c]) for c in restore])
+    predictions = predictions.with_columns(
+        ["MODEL_VERSION", "SCORED_AT", "RUN_ID"],
+        [F.lit(mv.version_name), F.current_timestamp().cast("TIMESTAMP_NTZ"), F.lit(run_id)],
+    )
+    predictions.write.mode(mode).save_as_table(output_table, column_order="name")
+    print(f"  Output {'appended to' if mode == 'append' else 'written to'}: {output_table}")
 
     return {
+        "run_id": run_id,
         "row_count": row_count,
         "output_table": output_table,
         "model_version": mv.version_name,
+        "output_columns": output_columns(mv, PREDICT_FUNCTION),
     }
 
 
-def validate_predictions(session, output_table: str) -> dict:
-    """Validate batch predictions are sane (no nulls, probabilities sum to ~1)."""
-    from snowflake.snowpark.functions import abs as sf_abs
-    from snowflake.snowpark.functions import avg, col, count, when
-    from snowflake.snowpark.functions import max as sf_max
+def validate_predictions(session, result: dict) -> dict:
+    """Validate the rows written by one scoring run (filtered by RUN_ID)."""
+    from serving.signature import validate_outputs_sql
+    from snowflake.snowpark import functions as F
 
-    df = session.table(output_table)
-
-    # Column names from model.run() are lowercase quoted identifiers
-    col_0 = '"output_feature_0"'
-    col_1 = '"output_feature_1"'
-
-    # Push all validation into Snowflake — no client-side data pull
-    stats = df.select(
-        count("*").alias("TOTAL"),
-        count(when(col(col_0).is_null() | col(col_1).is_null(), 1)).alias("NULLS"),
-        avg(col(col_0) + col(col_1)).alias("AVG_SUM"),
-        sf_max(sf_abs(col(col_0) + col(col_1) - 1.0)).alias("MAX_DEV"),
-    ).collect()[0]
-
-    validation = {
-        "total_rows": stats["TOTAL"],
-        "null_predictions": stats["NULLS"],
-        "avg_probability_sum": float(stats["AVG_SUM"]),
-        "max_deviation_from_1": float(stats["MAX_DEV"]),
-        "passed": stats["NULLS"] == 0 and float(stats["MAX_DEV"]) < 0.01,
-    }
-
+    df = session.table(result["output_table"]).filter(F.col("RUN_ID") == result["run_id"])
+    validation = validate_outputs_sql(df, TASK_TYPE, result["output_columns"])
+    if validation["total_rows"] != result["row_count"]:
+        validation["problems"].append(f"wrote {validation['total_rows']} rows, expected {result['row_count']}")
+        validation["passed"] = False
     return validation
+
+
+def run(session) -> dict:
+    """Scheduled batch scoring: default model version, append, validate."""
+    session.sql(f"USE WAREHOUSE {WAREHOUSE}").collect()
+    result = run_batch_inference(
+        session,
+        input_table=batch_input_table(DATABASE, SCHEMA),
+        output_table=batch_output_table(DATABASE, SCHEMA),
+    )
+    validation = validate_predictions(session, result)
+    if not validation["passed"]:
+        raise RuntimeError(f"Batch predictions failed validation: {validation['problems']}")
+    return {"status": "success", "step": "batch_inference", **result, "validation": validation}

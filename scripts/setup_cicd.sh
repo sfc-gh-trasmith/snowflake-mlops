@@ -15,21 +15,23 @@
 
 set -e
 
-# Check for unfilled template placeholders
-if grep -q '<your-github' "$0"; then
-  echo "ERROR: setup_cicd.sh contains unfilled placeholders."
-  echo "Edit the file and replace all <your-github-...> values before running."
-  exit 1
-fi
-
 # --- CONFIGURATION ---
-# Update these with your GitHub repo details.
+# Set these via environment variables or edit the defaults below.
 # GitHub enriches OIDC subjects with numeric IDs: owner@<owner_id>/repo@<repo_id>
-# Find yours in the Actions error log on first run, or via GitHub API.
-GITHUB_OWNER="<your-github-username>"
-GITHUB_OWNER_ID="<your-github-owner-id>"
-GITHUB_REPO="snowflake-mlops"
-GITHUB_REPO_ID="<your-github-repo-id>"
+# Find the IDs with: gh api repos/<owner>/<repo> --jq '.id, .owner.id'
+GITHUB_OWNER="${GITHUB_OWNER:-<your-github-username>}"
+GITHUB_OWNER_ID="${GITHUB_OWNER_ID:-<your-github-owner-id>}"
+GITHUB_REPO="${GITHUB_REPO:-snowflake-mlops}"
+GITHUB_REPO_ID="${GITHUB_REPO_ID:-<your-github-repo-id>}"
+
+# Fail fast on unfilled placeholders (check the values, not this file's text).
+for value in "$GITHUB_OWNER" "$GITHUB_OWNER_ID" "$GITHUB_REPO" "$GITHUB_REPO_ID"; do
+  if [[ "$value" == "<"*">" || -z "$value" ]]; then
+    echo "ERROR: GitHub settings are not filled in (GITHUB_OWNER, GITHUB_OWNER_ID, GITHUB_REPO, GITHUB_REPO_ID)."
+    echo "Example: GITHUB_OWNER=my-org GITHUB_OWNER_ID=123 GITHUB_REPO_ID=456 bash scripts/setup_cicd.sh"
+    exit 1
+  fi
+done
 
 SUBJECT="repo:${GITHUB_OWNER}@${GITHUB_OWNER_ID}/${GITHUB_REPO}@${GITHUB_REPO_ID}:ref:refs/heads/main"
 STAGE_SUBJECT="repo:${GITHUB_OWNER}@${GITHUB_OWNER_ID}/${GITHUB_REPO}@${GITHUB_REPO_ID}:environment:STAGE"
@@ -49,11 +51,6 @@ snow sql -q "
 -- Step 1: Network Policy for GitHub Actions
 -- Uses Snowflake's managed network rule that auto-tracks GitHub runner IPs.
 -- =============================================================================
-CREATE NETWORK RULE IF NOT EXISTS GITHUB_ACTIONS_NETWORK_RULE
-    MODE = INGRESS
-    TYPE = HOST_PORT
-    VALUE_LIST = ('github.com');
-
 CREATE NETWORK POLICY IF NOT EXISTS GITHUB_ACTIONS_POLICY
     ALLOWED_NETWORK_RULE_LIST = ('SNOWFLAKE.NETWORK_SECURITY.GITHUBACTIONS_GLOBAL')
     COMMENT = 'Allow GitHub Actions runners via managed network rule';
@@ -68,12 +65,17 @@ CREATE ROLE IF NOT EXISTS MLOPS_STAGE_ROLE
 
 GRANT USAGE ON DATABASE SNOW_MLOPS_DEV TO ROLE MLOPS_STAGE_ROLE;
 GRANT USAGE ON DATABASE SNOW_MLOPS_STAGE TO ROLE MLOPS_STAGE_ROLE;
-GRANT USAGE ON DATABASE SNOW_MLOPS_PROD TO ROLE MLOPS_STAGE_ROLE;  -- read source data only
+GRANT USAGE ON DATABASE SNOW_MLOPS_PROD TO ROLE MLOPS_STAGE_ROLE;  -- read source data + champion model
 
 GRANT ALL ON SCHEMA SNOW_MLOPS_DEV.ML TO ROLE MLOPS_STAGE_ROLE;
 GRANT ALL ON SCHEMA SNOW_MLOPS_STAGE.ML TO ROLE MLOPS_STAGE_ROLE;
+GRANT USAGE ON SCHEMA SNOW_MLOPS_PROD.ML TO ROLE MLOPS_STAGE_ROLE;
 GRANT SELECT ON ALL TABLES IN SCHEMA SNOW_MLOPS_PROD.ML TO ROLE MLOPS_STAGE_ROLE;
 GRANT SELECT ON FUTURE TABLES IN SCHEMA SNOW_MLOPS_PROD.ML TO ROLE MLOPS_STAGE_ROLE;
+-- Read-only use of PROD models: candidates are scored against the PROD champion
+-- (quality_gate.champion.source_env) on the same holdout.
+GRANT USAGE ON ALL MODELS IN SCHEMA SNOW_MLOPS_PROD.ML TO ROLE MLOPS_STAGE_ROLE;
+GRANT USAGE ON FUTURE MODELS IN SCHEMA SNOW_MLOPS_PROD.ML TO ROLE MLOPS_STAGE_ROLE;
 
 GRANT ALL ON ALL TABLES IN SCHEMA SNOW_MLOPS_DEV.ML TO ROLE MLOPS_STAGE_ROLE;
 GRANT ALL ON ALL TABLES IN SCHEMA SNOW_MLOPS_STAGE.ML TO ROLE MLOPS_STAGE_ROLE;
@@ -94,6 +96,7 @@ GRANT USAGE ON COMPUTE POOL SNOW_MLOPS_STAGE_POOL TO ROLE MLOPS_STAGE_ROLE;
 
 GRANT EXECUTE TASK ON ACCOUNT TO ROLE MLOPS_STAGE_ROLE;
 GRANT EXECUTE MANAGED TASK ON ACCOUNT TO ROLE MLOPS_STAGE_ROLE;
+GRANT EXECUTE ALERT ON ACCOUNT TO ROLE MLOPS_STAGE_ROLE;  -- drift alert validation
 
 GRANT ROLE MLOPS_STAGE_ROLE TO ROLE ACCOUNTADMIN;
 
@@ -116,10 +119,14 @@ GRANT USAGE ON COMPUTE POOL SNOW_MLOPS_PROD_POOL TO ROLE MLOPS_PROD_ROLE;
 GRANT BIND SERVICE ENDPOINT ON ACCOUNT TO ROLE MLOPS_PROD_ROLE;
 GRANT EXECUTE TASK ON ACCOUNT TO ROLE MLOPS_PROD_ROLE;
 GRANT EXECUTE MANAGED TASK ON ACCOUNT TO ROLE MLOPS_PROD_ROLE;
+GRANT EXECUTE ALERT ON ACCOUNT TO ROLE MLOPS_PROD_ROLE;  -- drift alerts
 
--- PROD role also needs SELECT on STAGE to replicate models
+-- PROD role reads STAGE to replicate the gated model version
 GRANT USAGE ON DATABASE SNOW_MLOPS_STAGE TO ROLE MLOPS_PROD_ROLE;
+GRANT USAGE ON SCHEMA SNOW_MLOPS_STAGE.ML TO ROLE MLOPS_PROD_ROLE;
 GRANT SELECT ON ALL TABLES IN SCHEMA SNOW_MLOPS_STAGE.ML TO ROLE MLOPS_PROD_ROLE;
+GRANT USAGE ON ALL MODELS IN SCHEMA SNOW_MLOPS_STAGE.ML TO ROLE MLOPS_PROD_ROLE;
+GRANT USAGE ON FUTURE MODELS IN SCHEMA SNOW_MLOPS_STAGE.ML TO ROLE MLOPS_PROD_ROLE;
 
 GRANT ROLE MLOPS_PROD_ROLE TO ROLE ACCOUNTADMIN;
 
@@ -201,7 +208,7 @@ gh api "repos/${GITHUB_OWNER}/${GITHUB_REPO}/environments/PROD" -X PUT --input -
 
 echo ""
 echo "=== Branch protection configured ==="
-echo "  - PRs required to merge to main (no direct pushes, admins included)"
+echo "  - PRs required to merge to main (no direct pushes; admins can bypass)"
 echo "  - Status check 'Code Quality' must pass"
 echo "  - 1 approving review required"
 echo "  - Stale reviews dismissed on new pushes"

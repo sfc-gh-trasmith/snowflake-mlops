@@ -12,21 +12,29 @@ import sys
 import urllib.request
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "source"))
-from config import MODEL_NAME
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from config import MODEL_NAME, env_database
 
-DATABASE = os.getenv("SNOWFLAKE_DATABASE", "SNOW_MLOPS_STAGE")
+DATABASE = os.getenv("SNOWFLAKE_DATABASE", env_database("stage"))
 SCHEMA = os.getenv("SNOWFLAKE_SCHEMA", "ML")
 REPO = os.getenv("GITHUB_REPOSITORY", "<your-org>/snowflake-mlops")
 
 
-def create_github_issue(version: str, metrics: dict):
+def _metrics_table(metrics: dict) -> str:
+    rows = ["| Metric | Value |", "|--------|-------|"]
+    for name, value in metrics.items():
+        rows.append(f"| {name} | {value:.4f} |" if isinstance(value, float) else f"| {name} | {value} |")
+    return "\n".join(rows)
+
+
+def create_github_issue(version: str, evaluation: dict):
     """Create a GitHub issue notifying that a candidate model is ready."""
     token = os.getenv("GH_TOKEN") or os.getenv("GITHUB_TOKEN")
     if not token:
         print("  WARNING: No GH_TOKEN set — skipping GitHub issue creation.")
         return None
 
+    metrics = evaluation.get("metrics", {})
     title = f"Model Candidate Ready: {MODEL_NAME}/{version}"
     body = f"""## Scheduled Retrain Complete
 
@@ -38,14 +46,9 @@ A new model candidate has been trained and registered in STAGE.
 
 ### Metrics
 
-| Metric | Value |
-|--------|-------|
-| AUC-ROC | {metrics.get("auc_roc", "N/A"):.4f} |
-| PR-AUC | {metrics.get("pr_auc", "N/A"):.4f} |
-| Precision | {metrics.get("precision", "N/A"):.4f} |
-| Recall | {metrics.get("recall", "N/A"):.4f} |
-| F1 | {metrics.get("f1", "N/A"):.4f} |
-| CV AUC Mean | {metrics.get("cv_auc_mean", "N/A"):.4f} |
+{_metrics_table(metrics)}
+
+**Champion:** {evaluation.get("champion_comparison", "N/A")}
 
 ### To Promote to PROD
 
@@ -89,18 +92,17 @@ def main():
         sys.exit(1)
 
     with open(metrics_file) as f:
-        metrics = json.load(f)
+        evaluation = json.load(f)
 
-    # Get the latest version from metrics or PIPELINE_RESULTS
-    version = metrics.get("model_version", "unknown")
+    version = evaluation.get("model_version", "unknown")
 
     print("=" * 60)
     print("NOTIFY: Model Candidate Ready")
     print("=" * 60)
     print(f"  Model: {MODEL_NAME}/{version}")
-    print(f"  AUC-ROC: {metrics.get('auc_roc', 'N/A')}")
+    print(f"  Champion: {evaluation.get('champion_comparison', 'N/A')}")
 
-    create_github_issue(version, metrics)
+    create_github_issue(version, evaluation)
 
     print("=" * 60)
 

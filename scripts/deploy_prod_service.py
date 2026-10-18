@@ -1,18 +1,19 @@
-"""PROD service deployment: create, validate, and set canary traffic split.
+"""PROD real-time deployment: create, validate, and set a canary traffic split.
 
-This script is called by the deploy-prod GitHub Actions workflow.
-It deploys a NEW service for the latest model version, validates it,
-then updates gateway-config.yml with a canary split (default 80/20).
-
-The traffic-shift workflow reads gateway-config.yml and applies the
-ALTER GATEWAY. The engineer later edits the YAML to shift to 100%.
+Called by the deploy-prod workflow when serving.realtime.enabled is true.
 
 Flow:
-  1. Get latest model version from registry
-  2. Create versioned service (e.g. MLOPS_FRAUD_DETECTOR_SERVICE_V7)
-  3. Wait for READY state
-  4. Health check the new service
-  5. Update gateway-config.yml with canary split
+  1. Resolve the PROD default model version
+  2. Create a versioned inference service (<MODEL>_SERVICE_<VERSION>)
+  3. Wait for READY
+  4. Health check on real rows from the batch input table:
+       - outputs are valid for the task type
+       - parity: service outputs match warehouse mv.run() for the same version
+       - agreement with the incumbent service (reported, not gated)
+  5. Write a canary split to gateway-config.yml (applied by apply_gateway_config.py)
+
+All model-specific inputs come from the model signature and config, so no
+feature names or model types are hardcoded here.
 """
 
 import json
@@ -22,48 +23,51 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "source"))
-from config import MODEL_NAME
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from apply_gateway_config import GATEWAY_NAME, load_config, service_name, update_config_file
+from config import (
+    MODEL_NAME,
+    PREDICT_FUNCTION,
+    REALTIME_CONFIG,
+    SCHEMA,
+    TASK_TYPE,
+    batch_input_table,
+    env_database,
+    env_setting,
+)
 from snowpark_session import create_snowpark_session
 
-PROD_DATABASE = os.getenv("SNOWFLAKE_DATABASE", "SNOW_MLOPS_PROD")
-PROD_SCHEMA = os.getenv("SNOWFLAKE_SCHEMA", "ML")
-PROD_WAREHOUSE = os.getenv("SNOWFLAKE_WAREHOUSE", "SNOW_MLOPS_PROD_WH")
-PROD_COMPUTE_POOL = os.getenv("SNOWFLAKE_COMPUTE_POOL", "SNOW_MLOPS_PROD_POOL")
-GATEWAY_NAME = "FRAUD_DETECTOR_GATEWAY"
-SERVICE_PREFIX = f"{MODEL_NAME}_SERVICE"
+PROD_DATABASE = os.getenv("SNOWFLAKE_DATABASE", env_database("prod"))
+PROD_SCHEMA = os.getenv("SNOWFLAKE_SCHEMA", SCHEMA)
+PROD_WAREHOUSE = os.getenv("SNOWFLAKE_WAREHOUSE", env_setting("prod", "warehouse"))
+PROD_COMPUTE_POOL = os.getenv("SNOWFLAKE_COMPUTE_POOL", env_setting("prod", "compute_pool"))
 
-READY_TIMEOUT_SECONDS = 600  # 10 minutes
+READY_TIMEOUT_SECONDS = 600
 READY_POLL_INTERVAL = 15
+PARITY_TOLERANCE = 1e-4
 
 
-def get_current_gateway_target(session):
-    """Get the current service target from the gateway spec. Returns None if gateway doesn't exist."""
+def current_gateway_targets(session) -> list[str]:
+    """Services currently behind the gateway (empty if the gateway doesn't exist)."""
     try:
         rows = session.sql(f"DESC GATEWAY {PROD_DATABASE}.{PROD_SCHEMA}.{GATEWAY_NAME}").collect()
     except Exception:
-        return None
-    if not rows:
-        return None
-    spec = rows[0]["spec"]
-    for line in spec.split("\n"):
+        return []
+    services = []
+    for line in (rows[0]["spec"] if rows else "").split("\n"):
         line = line.strip()
         if line.startswith("value:"):
-            full_value = line.split("value:")[1].strip()
-            service_fqn = full_value.split("!")[0].strip()
-            return service_fqn.split(".")[-1]
-    return None
+            services.append(line.split("value:")[1].strip().split("!")[0].split(".")[-1])
+    return services
 
 
-def wait_for_service_ready(session, service_name, timeout=READY_TIMEOUT_SECONDS):
-    """Poll service status until READY or timeout."""
-    fqn = f"{PROD_DATABASE}.{PROD_SCHEMA}.{service_name}"
+def wait_for_service_ready(session, name, timeout=READY_TIMEOUT_SECONDS) -> bool:
+    fqn = f"{PROD_DATABASE}.{PROD_SCHEMA}.{name}"
     start = time.time()
     while time.time() - start < timeout:
         try:
-            status_json = session.sql(f"SELECT SYSTEM$GET_SERVICE_STATUS('{fqn}')").collect()[0][0]
-            statuses = json.loads(status_json)
-            ready = [s for s in statuses if s["status"] == "READY"]
-            if ready:
+            statuses = json.loads(session.sql(f"SELECT SYSTEM$GET_SERVICE_STATUS('{fqn}')").collect()[0][0])
+            if any(s["status"] == "READY" for s in statuses):
                 return True
             print(f"  Status: {statuses[0]['status']} (elapsed: {int(time.time() - start)}s)")
         except Exception as e:
@@ -72,165 +76,125 @@ def wait_for_service_ready(session, service_name, timeout=READY_TIMEOUT_SECONDS)
     return False
 
 
-def health_check(session, service_name, model_version_name):
-    """Run a test prediction against the new service to validate it works."""
+def health_check(session, mv, new_service: str, incumbent_service: str | None) -> dict:
+    """Validate the new service on real rows. Raises on invalid output or parity failure."""
     import numpy as np
-    import pandas as pd
-    from snowflake.ml.registry import Registry
+    from serving.signature import input_features, run_outputs, validate_outputs
 
-    reg = Registry(session=session, database_name=PROD_DATABASE, schema_name=PROD_SCHEMA)
-    model = reg.get_model(MODEL_NAME)
-    mv = model.version(model_version_name)
+    n_rows = int(REALTIME_CONFIG.get("health_check_rows", 20))
+    feats = input_features(mv, PREDICT_FUNCTION)
+    sample = session.table(batch_input_table(PROD_DATABASE, PROD_SCHEMA)).select(*feats).limit(n_rows).to_pandas()
+    if sample.empty:
+        raise RuntimeError("Health check: batch input table returned no rows")
 
-    sample = pd.DataFrame(
-        [
-            {
-                "TOTAL_TXN_COUNT": 20,
-                "AVG_TXN_AMOUNT": 150.5,
-                "MAX_TXN_AMOUNT": 500.0,
-                "STDDEV_TXN_AMOUNT": 100.0,
-                "UNIQUE_MERCHANTS": 10,
-                "ACTIVE_DAYS": 30,
-                "LATE_NIGHT_TXN_RATIO": 0.05,
-                "CREDIT_SCORE": 700,
-                "ACCOUNT_AGE_DAYS": 365,
-                "ANNUAL_INCOME": 80000,
-            }
-        ]
-    )
+    service_out = run_outputs(mv, sample, PREDICT_FUNCTION, service_name=new_service)
+    problems = validate_outputs(TASK_TYPE, service_out)
+    if problems:
+        raise RuntimeError(f"Health check: invalid outputs from {new_service}: {problems}")
 
-    # Cast sample columns to match model signature so health check doesn't fail on type mismatches
-    _NUMPY_DTYPE = {
-        "INT8": np.int8,
-        "INT16": np.int16,
-        "INT32": np.int32,
-        "INT64": np.int64,
-        "FLOAT": np.float32,
-        "DOUBLE": np.float64,
-    }
-    functions = mv.show_functions()
-    predict_proba = [f for f in functions if f["name"].upper() == "PREDICT_PROBA"]
-    if predict_proba:
-        for feat in predict_proba[0]["signature"].inputs:
-            if feat.name in sample.columns:
-                np_type = _NUMPY_DTYPE.get(str(feat._dtype).split(".")[-1])
-                if np_type:
-                    sample[feat.name] = sample[feat.name].astype(np_type)
+    warehouse_out = run_outputs(mv, sample, PREDICT_FUNCTION)
+    parity = float(np.abs(service_out - warehouse_out).max())
+    if parity > PARITY_TOLERANCE:
+        raise RuntimeError(f"Health check: service vs warehouse outputs differ by {parity:.6f}")
 
-    result = mv.run(sample, function_name="predict_proba", service_name=service_name)
-    # Validate result structure
-    assert "output_feature_0" in result.columns, f"Missing output_feature_0 in {result.columns.tolist()}"
-    assert "output_feature_1" in result.columns, f"Missing output_feature_1 in {result.columns.tolist()}"
-    prob_sum = result["output_feature_0"].iloc[0] + result["output_feature_1"].iloc[0]
-    assert abs(prob_sum - 1.0) < 0.01, f"Probabilities sum to {prob_sum}, not 1.0"
-    return result
+    report = {"rows": len(sample), "max_parity_diff": parity, "incumbent_agreement": None}
+    if incumbent_service and incumbent_service != new_service:
+        try:
+            from snowflake.ml.registry import Registry
+
+            inc_version = incumbent_service.rsplit("_SERVICE_", 1)[-1]
+            inc_mv = (
+                Registry(session=session, database_name=PROD_DATABASE, schema_name=PROD_SCHEMA)
+                .get_model(MODEL_NAME)
+                .version(inc_version)
+            )
+            inc_out = run_outputs(inc_mv, sample, PREDICT_FUNCTION, service_name=incumbent_service)
+            if TASK_TYPE == "regression":
+                report["incumbent_mean_abs_diff"] = float(np.abs(service_out - inc_out).mean())
+            else:
+                pick = (lambda o: o.argmax(axis=1)) if service_out.shape[1] > 1 else (lambda o: o[:, 0])
+                report["incumbent_agreement"] = float((pick(service_out) == pick(inc_out)).mean())
+        except Exception as e:
+            print(f"  Incumbent comparison skipped: {e}")
+    return report
 
 
-def update_gateway_config(new_service_name, old_service_name):
-    """Update gateway-config.yml with a canary split. Does NOT apply — traffic-shift workflow does that."""
-    from apply_gateway_config import load_config, update_config_file
-
-    config_path = Path(__file__).resolve().parent.parent / "gateway-config.yml"
-    config = load_config(config_path)
-    canary_weight = config.get("initial_canary_weight", 20)
-
-    if old_service_name and old_service_name != new_service_name:
-        targets = [
-            {"service": old_service_name, "weight": 100 - canary_weight},
-            {"service": new_service_name, "weight": canary_weight},
-        ]
-    else:
-        targets = [{"service": new_service_name, "weight": 100}]
-
-    update_config_file(config, targets)
-    print("  Updated gateway-config.yml:")
-    for t in targets:
-        print(f"    {t['service']}: {t['weight']}%")
-    return targets
+def canary_targets(new_service: str, incumbents: list[str], weight: int) -> list[dict]:
+    """New service at `weight`%, remainder to the first incumbent (or 100% if none)."""
+    old = next((s for s in incumbents if s != new_service), None)
+    if not old or weight >= 100:
+        return [{"service": new_service, "weight": 100}]
+    return [{"service": old, "weight": 100 - weight}, {"service": new_service, "weight": weight}]
 
 
 def main():
     print("=" * 60)
-    print("PROD DEPLOYMENT: Canary with Gateway")
+    print("PROD REAL-TIME DEPLOYMENT: canary via gateway")
     print("=" * 60)
+
+    from snowflake.ml.registry import Registry
 
     session = create_snowpark_session()
     session.sql(f"USE WAREHOUSE {PROD_WAREHOUSE}").collect()
 
-    # Step 1: Get the latest model version
-    print("\n[1/5] Getting latest model version...")
-    models = session.sql(f"SHOW MODELS LIKE '{MODEL_NAME}' IN {PROD_DATABASE}.{PROD_SCHEMA}").collect()
-    if not models:
-        raise RuntimeError(f"Model {MODEL_NAME} not found in {PROD_DATABASE}.{PROD_SCHEMA}")
+    print("\n[1/5] Resolving PROD default version...")
+    mv = Registry(session=session, database_name=PROD_DATABASE, schema_name=PROD_SCHEMA).get_model(MODEL_NAME).default
+    version = mv.version_name
+    new_service = service_name(version)
+    incumbents = current_gateway_targets(session)
+    print(f"  Model: {MODEL_NAME}/{version}")
+    print(f"  New service: {new_service} | gateway targets: {incumbents or 'none'}")
 
-    default_version = models[0]["default_version_name"]
-    print(f"  Model: {MODEL_NAME}, Default version: {default_version}")
-
-    # Step 2: Determine service names
-    print("\n[2/5] Determining service names...")
-    new_service_name = f"{SERVICE_PREFIX}_{default_version}"
-    old_service_name = get_current_gateway_target(session)
-    print(f"  New service: {new_service_name}")
-    print(f"  Old service: {old_service_name or 'none'}")
-
-    if old_service_name == new_service_name:
-        print(f"\n  Service {new_service_name} is already the active gateway target.")
-        print("  Nothing to deploy. Exiting.")
+    if incumbents == [new_service]:
+        print(f"\n  {new_service} already serves 100% of traffic. Nothing to deploy.")
         session.close()
         return
 
-    # Step 3: Create the new versioned service
-    print(f"\n[3/5] Creating service: {new_service_name}...")
-    from snowflake.ml.registry import Registry
-
-    reg = Registry(session=session, database_name=PROD_DATABASE, schema_name=PROD_SCHEMA)
-    model = reg.get_model(MODEL_NAME)
-    mv = model.version(default_version)
-
+    print(f"\n[2/5] Creating service {new_service}...")
     try:
         mv.create_service(
-            service_name=new_service_name,
+            service_name=new_service,
             service_compute_pool=PROD_COMPUTE_POOL,
             image_build_compute_pool=PROD_COMPUTE_POOL,
             ingress_enabled=True,
-            max_instances=2,
-            gpu_requests=None,
+            min_instances=int(REALTIME_CONFIG.get("min_instances", 1)),
+            max_instances=int(REALTIME_CONFIG.get("max_instances", 2)),
             autocapture=True,
         )
-        print("  Service creation initiated.")
     except Exception as e:
-        if "already exists" in str(e).lower():
-            print("  Service already exists - will verify readiness.")
-        else:
+        if "already exists" not in str(e).lower():
             raise
+        print("  Service already exists — verifying readiness.")
 
-    # Step 4: Wait for READY
-    print("\n[4/5] Waiting for service to become READY...")
-    ready = wait_for_service_ready(session, new_service_name)
-    if not ready:
-        raise RuntimeError(f"Service {new_service_name} did not become READY within {READY_TIMEOUT_SECONDS}s")
-    print("  Service is READY!")
+    print("\n[3/5] Waiting for READY...")
+    if not wait_for_service_ready(session, new_service):
+        raise RuntimeError(f"Service {new_service} did not become READY within {READY_TIMEOUT_SECONDS}s")
 
-    # Health check
-    print(f"\n  Running health check against {new_service_name}...")
-    result = health_check(session, new_service_name, default_version)
-    fraud_prob = result["output_feature_1"].iloc[0]
-    print(f"  Health check PASSED (fraud_prob={fraud_prob:.4f})")
+    print("\n[4/5] Health check...")
+    incumbent = next((s for s in incumbents if s != new_service), None)
+    report = health_check(session, mv, new_service, incumbent)
+    print(f"  PASSED: {report}")
 
-    # Step 5: Update gateway config (traffic-shift workflow applies it)
-    print("\n[5/5] Updating gateway-config.yml with canary split...")
-    targets = update_gateway_config(new_service_name, old_service_name)
-
-    print("\n" + "=" * 60)
-    print("PROD SERVICE DEPLOYED (canary)")
-    print(f"  Model: {MODEL_NAME} ({default_version})")
-    print(f"  Service: {new_service_name}")
-    print("  Traffic split:")
+    print("\n[5/5] Writing canary split to gateway-config.yml...")
+    weight = int(REALTIME_CONFIG.get("canary_weight", 20))
+    targets = canary_targets(new_service, incumbents or [t["service"] for t in load_config()["targets"]], weight)
+    update_config_file(targets)
     for t in targets:
         print(f"    {t['service']}: {t['weight']}%")
-    print("\n  Next: traffic-shift workflow applies the gateway change.")
-    print("  To complete cutover: edit gateway-config.yml to 100% and merge.")
-    print("=" * 60)
+
+    summary_path = os.getenv("GITHUB_STEP_SUMMARY")
+    if summary_path:
+        with open(summary_path, "a") as f:
+            f.write(f"\n## Real-time Canary: `{new_service}`\n\n| Check | Value |\n|-------|-------|\n")
+            f.write(f"| Rows checked | {report['rows']} |\n")
+            f.write(f"| Service vs warehouse max diff | {report['max_parity_diff']:.2e} |\n")
+            if report.get("incumbent_agreement") is not None:
+                f.write(f"| Agreement with incumbent | {report['incumbent_agreement']:.1%} |\n")
+            if report.get("incumbent_mean_abs_diff") is not None:
+                f.write(f"| Mean abs diff vs incumbent | {report['incumbent_mean_abs_diff']:.4f} |\n")
+            f.write("\n" + "\n".join(f"- `{t['service']}`: {t['weight']}%" for t in targets) + "\n")
+
+    print("\nNext: apply_gateway_config.py applies the split. Edit gateway-config.yml to 100% and merge to cut over.")
     session.close()
 
 

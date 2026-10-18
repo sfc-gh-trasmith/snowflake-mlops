@@ -46,24 +46,24 @@ jobs:
         run: uv python install 3.12
 
       - name: Install dependencies
-        run: uv sync --group snow --no-default-groups
+        run: uv sync --group snow --group ml-runtime --no-default-groups
 
       - name: Deploy Task DAG (ensures schedule is set)
-        run: uv run python source/pipeline/ml_pipeline_dag.py --deploy --env stage
+        run: uv run python source/pipeline/train_dag.py --deploy --env stage
         env:
           RESUME_SCHEDULE: 'true'
 
       - name: Trigger ML training pipeline
-        run: uv run python source/pipeline/ml_pipeline_dag.py --execute --env stage
+        run: uv run python source/pipeline/train_dag.py --execute --env stage
 
       - name: Wait for training pipeline completion
-        run: uv run python scripts/wait_for_task.py
+        run: uv run python source/utils/wait_for_task.py
         timeout-minutes: 30
         env:
           METRICS_FILE: ${{ runner.temp }}/pipeline_metrics.json
 
-      - name: "Quality gate + register (STAGE only)"
-        run: uv run python scripts/quality_gate_and_register.py
+      - name: "Quality gate: read candidate (STAGE only)"
+        run: uv run python source/utils/read_candidate.py
         timeout-minutes: 10
         env:
           METRICS_FILE: ${{ runner.temp }}/pipeline_metrics.json
@@ -73,4 +73,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           METRICS_FILE: ${{ runner.temp }}/pipeline_metrics.json
-        run: uv run python scripts/notify_candidate.py
+        run: uv run python source/utils/notify_candidate.py

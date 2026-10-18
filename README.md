@@ -8,30 +8,37 @@ Use this template as a bootstrap for your MLOps workflows, or as a baseline to e
 
 - **Multi-step ML Pipelines** — Snowflake Task DAG (Python SDK) with configurable compute per step (warehouse or SPCS compute pools)
 - **Feature Engineering** — Snowflake Feature Store with Dynamic Tables and configurable refresh intervals
-- **Model Training** — ML Jobs (`@remote`) running XGBoost on compute pools with experiment tracking
-- **Quality Gates** — Automated metric thresholds (AUC-ROC, precision, recall) that block bad models from promotion
-- **Model Versioning** — Auto-incremented versions in the Snowflake Model Registry with full lineage
+- **Model Training** — ML Jobs (`@remote`) on compute pools with experiment tracking; registered straight from the pipeline with lineage to the training Dataset
+- **Quality Gates** — Configurable metric bars plus champion/challenger comparison against the model in PROD; rejected candidates are removed from the registry
+- **Model Versioning** — Auto-incremented versions in the Snowflake Model Registry with metrics, Dataset, and experiment lineage
+- **Data Checks** — Row-count, null-rate, and freshness checks on source tables before training
 - **CI/CD Workflows** — GitHub Actions with OIDC auth, PR checks, and environment-gated approvals
 - **Model Promotion** — Two paths: code-driven (push to main) and data-driven (scheduled retrain with candidate review)
-- **Batch Inference** — Model Registry `run()` on warehouse with prediction validation
-- **Real-Time Inference** — SPCS containers with canary Gateway deployment and git-driven traffic management
-- **Model Monitoring** — Snowflake ML Observability tracking prediction drift and feature distribution shifts
+- **Batch Inference** — Scheduled Task scoring with Model Registry `run()`; predictions appended with model version for full history
+- **Real-Time Inference** — SPCS inference services with canary Gateway deployment, parity health checks, and git-driven traffic management
+- **Serving Modes** — Batch, real-time, or both, chosen in config; CI skips what you don't use
+- **Model Monitoring** — Snowflake ML Observability for drift *and* performance (ground-truth join), automatic baseline, drift alerts
 - **Rollback** — One-click revert to any previous model version
 - **Scheduled Retraining** — Weekly cron with GitHub Issue notifications for human review
 
 ## How It Works
 
-**Code-driven promotion:** feature branch → PR (code quality checks) → merge to main → deploy-stage (train, validate, register) → human approval → deploy-prod (SPCS, gateway, monitor, tag)
+**Code-driven promotion:** feature branch → PR (code quality checks) → merge to main → deploy-stage (train, gate, register, validate) → human approval → deploy-prod (promote, batch schedule and/or real-time canary, monitor, tag)
 
 **Data-driven promotion:** weekly cron retrains on fresh data → registers candidate in STAGE → creates GitHub Issue → human reviews → manual promote to PROD
 
 ## For Data Science Teams
 
-Swap in your own model logic — the infrastructure stays the same:
+Swap in your own model — the infrastructure stays the same:
 
-1. **Replace the training function** in `source/pipeline/ml_pipeline_dag.py` (the `train_model()` `@remote` function)
-2. **Update feature engineering** in `source/features/feature_views.py`
-3. **Adjust quality gate thresholds** in `source/config.py`
+1. **Describe your model** under `model:` in `source/configs/config.yml` — `task_type` (`binary_classification`, `multiclass`, `regression`), `predict_function`, `id_columns`, `label_column`
+2. **Replace the two example functions** in `source/model_training/training.py`: `build_dataset(session)` and `train_model(X_train, y_train)`. Any model the Model Registry supports works (scikit-learn, XGBoost, LightGBM, PyTorch, ...).
+3. **Update feature engineering** in `source/feature_engineering/feature_views.py`
+4. **Set your bar** under `quality_gate:` — metric rules for your task type and the champion comparison
+
+Registration, the quality gate, batch scoring, real-time health checks, and monitoring read the model's signature and these settings — they contain no model-specific code.
+
+Each pipeline step is a self-contained package under `source/` with a logic module exposing `run(session) -> dict` and an `entrypoint.py` CLI. You can run any step on its own without deploying the DAG (see [Run a single step](#run-a-single-step)).
 
 Everything else (CI/CD, versioning, deployment, monitoring) works automatically.
 
@@ -52,21 +59,19 @@ This template provides:
 1. **Code Quality** — Ruff linting, format checks, and unit tests run on every PR and push
 2. **Merge to main** — Triggers the deploy workflow
 3. **Deploy Task DAG** — Creates/updates Snowflake Tasks using the Python SDK
-4. **Execute Pipeline** — Runs three ML Jobs sequentially on the compute pool:
-   - Feature Engineering (registers Feature Views from raw data)
-   - Model Training (XGBoost with cross-validation, logs to Experiment Tracking)
-   - Evaluation (computes metrics, writes to PIPELINE_RESULTS table)
-5. **Quality Gate** — Checks AUC-ROC, precision, and recall against configured thresholds. If any threshold is missed, the workflow fails and the model is NOT registered.
-6. **Register Model** — Only if the quality gate passes. Auto-increments version (V1 → V2 → V3) in the STAGE Model Registry. Emits the blessed version to the workflow for promotion. Does NOT touch PROD yet.
-7. **Batch Inference Validation** — Scores the Feature View table using `model.run()` on the warehouse. Validates predictions are sane (no nulls, probabilities sum to 1.0). Writes results to `BATCH_PREDICTIONS` for monitoring.
-8. **Monitor Validation** — Creates a ModelMonitor in STAGE, verifies it reaches ACTIVE state, then drops it (proves PROD setup will succeed)
-9. **Human Approval** — Workflow pauses. Reviewer sees metrics in the Job Summary and approves PROD deployment.
-10. **PROD Deployment:**
+4. **Execute Pipeline** — Runs three steps sequentially, each on its configured compute (warehouse or SPCS compute pool):
+   - Feature Engineering (`source/feature_engineering/` — runs data checks on source tables, then registers the Feature Views)
+   - Model Training (`source/model_training/` — trains on a grouped holdout split, scores the PROD champion on the same holdout, logs the run to Experiment Tracking, and registers the candidate in the STAGE registry with lineage to the training Dataset)
+   - Evaluation (`source/evaluate/` — the **quality gate**: metric rules plus champion/challenger. A rejected candidate is removed from the registry and the DAG fails.)
+5. **Read Candidate** — CI publishes the gate decision (candidate vs champion metrics) to the Job Summary and passes the gated version to downstream jobs. Nothing touches PROD yet.
+6. **Batch Inference Validation** — Scores the batch input with the *candidate* version into `BATCH_PREDICTIONS_VALIDATION` and validates outputs against the model signature (no nulls; probabilities sum to 1 for classifiers).
+7. **Monitor Validation** — Creates a ModelMonitor for the candidate in STAGE, verifies it reaches ACTIVE state, then drops it (proves PROD setup will succeed)
+8. **Human Approval** — Workflow pauses. Reviewer sees candidate and champion metrics in the Job Summary and approves PROD deployment.
+9. **PROD Deployment** (steps for disabled serving modes are skipped):
     - **Promote model** — replicates the exact gated version from STAGE to PROD (no re-resolution), sets as DEFAULT
-    - Registers Feature Views in PROD
-    - **Batch inference** — validates `model.run()` works in PROD
-    - **Real-time inference** — deploys SPCS container service (canary 80/20 split), engineer shifts Gateway traffic to complete cutover
-    - Sets up persistent ModelMonitor (tracks prediction drift daily)
+    - **Batch** — validates `model.run()` in PROD, then deploys the scheduled scoring Task (`serving.batch.schedule`) that appends to `BATCH_PREDICTIONS`
+    - **Real-time** — deploys a versioned inference service, health-checks it on real rows (valid outputs, parity with warehouse `run()`, agreement with the incumbent), and routes a canary share of Gateway traffic to it
+    - Sets up the persistent ModelMonitor (drift + performance, automatic baseline, drift alert)
     - Tags release: `prod/V3-20260812-...`
 
 ### Data-Driven Promotion (scheduled retrain)
@@ -80,7 +85,7 @@ This template provides:
 
 ### Rollback
 
-Manual dispatch of the rollback workflow: sets DEFAULT version back, redeploys SPCS service, validates gateway.
+Manual dispatch of the rollback workflow: sets the DEFAULT version back, routes 100% of Gateway traffic to that version's service (if real-time is enabled), and re-validates batch scoring. The scheduled batch Task always uses the default version, so it follows the rollback automatically.
 
 ## Snowflake Services Used
 
@@ -91,7 +96,7 @@ Manual dispatch of the rollback workflow: sets DEFAULT version back, redeploys S
 | Model Training | ML Jobs (`@remote` on Compute Pools) |
 | Experiment Tracking | ExperimentTracking API |
 | Model Versioning | Model Registry |
-| Batch Inference | Model Registry `run()` on warehouse |
+| Batch Inference | Scheduled Task + Model Registry `run()` on warehouse |
 | Real-Time Serving | SPCS containers + Gateway |
 | Model Monitoring | ML Observability (ModelMonitor) |
 | CI/CD | GitHub Actions with OIDC (zero secrets) |
@@ -134,13 +139,30 @@ Creates 100K synthetic fraud transactions (~3% fraud rate) in `SNOW_MLOPS_PROD.M
 
 ```bash
 # Deploy the Task DAG
-uv run python source/pipeline/ml_pipeline_dag.py --deploy --env dev
+uv run python source/pipeline/train_dag.py --deploy --env dev
 
 # Execute (triggers Feature Eng → Training → Evaluation)
-uv run python source/pipeline/ml_pipeline_dag.py --execute --env dev
+uv run python source/pipeline/train_dag.py --execute --env dev
 
 # Check status
-uv run python source/pipeline/ml_pipeline_dag.py --status --env dev
+uv run python source/pipeline/train_dag.py --status --env dev
+
+# Batch scoring: validate a specific version, or deploy/run the scheduled Task
+MODEL_VERSION=V3 uv run python source/pipeline/batch_inference_dag.py --validate --env dev
+uv run python source/pipeline/batch_inference_dag.py --deploy --env dev
+uv run python source/pipeline/batch_inference_dag.py --execute --env dev
+```
+
+`--env` accepts `dev`, `stage`, or `prod`.
+
+#### Run a single step
+
+Each step package ships a CLI entrypoint that calls the exact same `run(session)` the DAG invokes, so local behavior matches the pipeline. Useful for iterating on one step without redeploying the DAG. The target environment comes from `SNOWFLAKE_DATABASE` / `SNOWFLAKE_SCHEMA` / `SNOWFLAKE_WAREHOUSE` (default: DEV):
+
+```bash
+uv run python source/feature_engineering/entrypoint.py
+uv run --group ml-runtime python source/model_training/entrypoint.py
+uv run python source/evaluate/entrypoint.py
 ```
 
 ### 5. Set Up CI/CD
@@ -150,7 +172,7 @@ bash scripts/setup_cicd.sh
 ```
 
 This creates OIDC service users (`SVC_GITHUB_ACTIONS_STAGE`, `SVC_GITHUB_ACTIONS`) for passwordless CI authentication, plus two roles:
-- **`MLOPS_STAGE_ROLE`** — used by STAGE workflows (DEV + STAGE access, read-only on PROD)
+- **`MLOPS_STAGE_ROLE`** — used by STAGE workflows (DEV + STAGE access; read-only on PROD source data and PROD models, for the champion comparison)
 - **`MLOPS_PROD_ROLE`** — used by PROD workflows (PROD access, BIND SERVICE ENDPOINT)
 
 Then configure your GitHub repo (**Settings → Secrets and variables → Actions → Variables tab**):
@@ -214,29 +236,44 @@ snowflake-mlops/
 ├── .github/workflows/
 │   ├── deploy.yml                 # PR checks + deploy (code quality → stage → prod)
 │   ├── scheduled-retrain.yml      # Cron: retrain → STAGE candidate → notify
+│   ├── traffic-shift.yml          # Gateway traffic allocation (gateway-config.yml)
 │   └── rollback.yml               # Manual: revert to previous version
 ├── deploy/                        # Promotion strategies (single-account)
 ├── scripts/
 │   ├── setup.sh                   # Infrastructure provisioning
 │   ├── setup_cicd.sh              # OIDC users + network policy
 │   ├── generate_dataset.py        # Synthetic data generation
-│   ├── wait_for_task.py           # Poll Task DAG completion
-│   ├── quality_gate_and_register.py  # Metric validation + model registration
-│   ├── run_batch_inference.py     # Batch scoring + validation
-│   ├── deploy_prod_service.py     # PROD canary SPCS deployment
-│   ├── setup_model_monitor.py     # Model monitoring setup/validation
-│   └── notify_candidate.py        # GitHub Issue notification for candidates
+│   ├── apply_gateway_config.py    # Gateway traffic allocation
+│   └── deploy_prod_service.py     # PROD canary SPCS deployment
 ├── source/
-│   ├── config.py                  # All configuration (single file)
+│   ├── configs/config.yml         # Pipeline configuration (single source of truth)
+│   ├── config.py                  # YAML loader + env resolution (resolve_env_config)
 │   ├── snowpark_session.py        # Session helper (SSO + OIDC)
-│   ├── features/                  # Feature Store definitions
-│   │   └── feature_views.py      # Feature View registration (canonical schema)
+│   ├── feature_engineering/       # Step: feature engineering
+│   │   ├── entrypoint.py         # CLI — calls feature_engineering.run(session)
+│   │   ├── feature_engineering.py
+│   │   └── feature_views.py      # Feature View definitions (canonical schema)
+│   ├── model_training/            # Step: model training
+│   │   ├── entrypoint.py
+│   │   └── training.py
+│   ├── evaluate/                  # Step: evaluation
+│   │   ├── entrypoint.py
+│   │   └── evaluation.py
 │   ├── pipeline/
-│   │   └── ml_pipeline_dag.py     # Task DAG + @remote ML Job functions
+│   │   ├── train_dag.py           # Training Task DAG (per-step warehouse/SPCS)
+│   │   └── batch_inference_dag.py # Scheduled batch scoring Task + CI validation
 │   ├── serving/
-│   │   └── batch_inference.py     # Batch inference utilities
-│   └── monitoring/
-│       └── model_monitor.py       # Monitor create/status/suspend/resume
+│   │   ├── batch_inference.py     # Score + append predictions (Task entrypoint)
+│   │   └── signature.py           # Signature-driven casting + output validation
+│   ├── monitoring/
+│   │   └── model_monitor.py       # Monitor source/baseline/alert management
+│   └── utils/                     # CI helpers
+│       ├── wait_for_task.py           # Poll Task DAG completion, export gate result
+│       ├── read_candidate.py          # Publish gate decision + gated version to CI
+│       ├── serving_flags.py           # Serving modes from config → GITHUB_OUTPUT
+│       ├── setup_model_monitor.py     # Model monitoring setup/validation
+│       └── notify_candidate.py        # GitHub Issue notification for candidates
+├── gateway-config.yml             # Real-time traffic split (edit + merge to shift)
 ├── tests/                         # Unit + integration tests
 ├── notebooks/                     # Educational Jupyter notebooks (01-05)
 └── docs/
@@ -245,67 +282,154 @@ snowflake-mlops/
 
 ## Configuration
 
-Everything is configurable from `source/config.py`:
+Everything is configurable from `source/configs/config.yml`. The sections you will touch most:
 
-```python
-# Compute mode per pipeline step
-"feature_engineering_compute": "spcs",  # or "warehouse"
-"training_compute": "spcs",
-"evaluation_compute": "spcs",
+```yaml
+# What the model is — serving, validation, and monitoring read this
+model:
+  name: MLOPS_FRAUD_DETECTOR
+  task_type: binary_classification   # binary_classification | multiclass | regression
+  predict_function: predict_proba    # predict for regressors
+  id_columns: [CUSTOMER_ID]
+  label_column: IS_FRAUD
 
-# Feature View refresh
-"customer_features_refresh": "1 hour",
+# Quality gate: absolute bars + champion/challenger vs PROD
+quality_gate:
+  metrics:
+    auc_roc: {min: 0.85}
+    recall: {min: 0.60}
+  champion:
+    enabled: true
+    source_env: prod
+    metric: auc_roc
+    higher_is_better: true
+    min_improvement: 0.0
 
-# Scheduled retraining
-"schedule": "USING CRON 0 6 * * MON America/Los_Angeles",
+# Serving: batch, real-time, or both
+serving:
+  batch:
+    enabled: true
+    schedule: "USING CRON 0 7 * * * America/Los_Angeles"
+    output_table: BATCH_PREDICTIONS   # appended with MODEL_VERSION / SCORED_AT / RUN_ID
+  realtime:
+    enabled: true
+    gateway_name: FRAUD_DETECTOR_GATEWAY
+    min_instances: 1
+    max_instances: 2
+    canary_weight: 20
 
-# Quality gate thresholds
-MIN_AUC_ROC = 0.85
-MIN_PRECISION = 0.70
-MIN_RECALL = 0.60
+# Pre-training data checks on source tables
+data_checks:
+  RAW_TRANSACTIONS:
+    min_rows: 1000
+    max_null_pct: {CUSTOMER_ID: 0}
+    freshness_column: TIMESTAMP
+    max_age_hours: 26
+
+# Monitoring: ground truth enables performance metrics; baseline enables drift
+monitor:
+  actuals:
+    table: RAW_TRANSACTIONS
+    join_keys: [CUSTOMER_ID]
+    label_sql: "MAX(IS_FRAUD::INT)"
+  baseline: auto
+  notification_integration: null      # set to email on drift
+
+# Compute mode per pipeline step — "warehouse" or "spcs"
+pipeline_steps:
+  feature_eng: {compute: spcs}
+  train_model: {compute: spcs}
+  evaluate: {compute: warehouse}
 ```
+
+`source/config.py` loads this file and re-exports the values as Python constants (`MODEL_NAME`, `GATE_RULES`, `TRAINING_PARAMS`, etc.), so modules keep a single import surface.
+
+**Compute selection is config-only.** Both compute paths execute the same `run(session)` function in each step's logic module (e.g. `source/model_training/training.py`) — SPCS as an ML Job on a compute pool, warehouse as an anonymous stored procedure. Switching a step between them never requires a code change. Per-environment infrastructure names live under `environments:` in the same file. At deploy time, `train_dag.py` packages `config.py` and `configs/config.yml` into `source.zip` with the step code, and pins the target environment's database/schema/warehouse before each step imports its config.
 
 ### ML Runtime Dependencies
 
 Training and serving dependency versions are pinned in `pyproject.toml` under the `[dependency-groups] ml-runtime` group:
 
 ```toml
-ml-runtime = ["xgboost==3.3.0", "scikit-learn==1.6.1"]
+ml-runtime = ["xgboost==3.3.0", "scikit-learn==1.8.0"]
 ```
 
-This ensures the ML Job (training on SPCS) and the Model Registry (serving environment) always use the same library versions. To update:
+This ensures SPCS training, warehouse training, and the Model Registry serving environment all use the same library versions. The pins match the versions preinstalled in the ML Job runtime image, so training containers need no internet access. Installing other versions in SPCS would require an external access integration to PyPI.
 
-1. Edit the versions in `pyproject.toml`
-2. Run `uv lock`
-3. Commit — both training and serving automatically pick up the new versions
+To update:
+1. Check the runtime image's versions (or confirm your target version is reachable)
+2. Edit the versions in `pyproject.toml` and run `uv lock`
+3. Commit — training and serving both pick up the new versions
 
 To install locally for development: `uv sync --group ml-runtime`
+
+## Serving
+
+### Batch
+
+`source/pipeline/batch_inference_dag.py --deploy --env prod` creates a scheduled Task (warehouse stored procedure) that scores `serving.batch.input_table` (default: the training feature view) with the model's **default** version and appends to `serving.batch.output_table`. Each run adds `MODEL_VERSION`, `SCORED_AT`, and `RUN_ID`, so you can always tell which version produced a score, and the monitor gets a history. Because it follows the default version, promotion and rollback need no Task changes.
+
+### Real-time
+
+Each PROD version gets its own inference service (`<MODEL_NAME>_SERVICE_<VERSION>`) behind one Gateway. `gateway-config.yml` holds the traffic split; edit the weights and merge to `main` to shift traffic (the traffic-shift workflow applies it and drops services you removed).
+
+To call the endpoint:
+
+```sql
+-- Ingress URL of the gateway (or of a single service)
+SHOW ENDPOINTS IN SERVICE SNOW_MLOPS_PROD.ML.MLOPS_FRAUD_DETECTOR_SERVICE_V3;
+```
+
+```bash
+# Authenticate with a programmatic access token (PAT). Method names map to URL
+# paths with underscores as dashes (predict_proba -> /predict-proba).
+curl -X POST "https://<ingress-url>/predict-proba" \
+  -H "Authorization: Snowflake Token=\"$PAT\"" \
+  -H "Content-Type: application/json" \
+  -d '{"dataframe_split": {
+        "index": [0],
+        "columns": ["TOTAL_TXN_COUNT", "AVG_TXN_AMOUNT", "MAX_TXN_AMOUNT", "STDDEV_TXN_AMOUNT",
+                    "UNIQUE_MERCHANTS", "ACTIVE_DAYS", "LATE_NIGHT_TXN_RATIO", "CREDIT_SCORE",
+                    "ACCOUNT_AGE_DAYS", "ANNUAL_INCOME"],
+        "data": [[20, 150.5, 500.0, 100.0, 10, 30, 0.05, 700, 365, 80000]]}}'
+```
+
+By default only the service owner can call the endpoint; grant another role access with the service role `ALL_ENDPOINTS_USAGE`. Authorization failures return 404. Callers supply the feature values themselves; Snowflake also offers request-time feature lookup from an online feature store (`create_service(feature_sources_per_function=...)`, public preview), which this template does not configure. See [Deploy models for real-time inference](https://docs.snowflake.com/en/developer-guide/snowflake-ml/inference/real-time-inference-rest-api).
+
+## Monitoring
+
+`source/utils/setup_model_monitor.py --env prod` creates a Snowflake Model Monitor for the default version:
+
+- **Source** — a view over `BATCH_PREDICTIONS` for that version. With `monitor.actuals` set, the view joins ground-truth labels so the monitor reports performance (AUC, precision, recall; RMSE/MAE for regression) as well as drift.
+- **Baseline** — `baseline: auto` snapshots the promotion-time validation scoring as the expected distribution, so drift metrics work from day one.
+- **Alert** — a Snowflake Alert logs to `DRIFT_ALERTS` when `drift_metric` exceeds `drift_threshold`, and emails `notification_recipients` when `notification_integration` is set.
 
 ## CI/CD Workflows
 
 | Trigger | What Happens | Human Approval |
 |---------|-------------|----------------|
 | PR to `main` | Code quality (lint + format + tests) | Merge requires passing checks |
-| Push to `main` | Code quality → train → quality gate → register → batch inference → PROD deploy | Required for PROD |
+| Push to `main` | Code quality → train → gate (vs PROD champion) → register → validate batch/monitor → PROD deploy | Required for PROD |
 | Weekly cron | Retrain on fresh data → register candidate → GitHub Issue | Manual promote via `promote_only` |
 | Manual dispatch | Promote existing candidate or full retrain | Required for PROD |
+| Merge to `main` touching `gateway-config.yml` (or manual dispatch) | Apply gateway traffic allocation across model versions | Merge review |
 | Rollback dispatch | Revert PROD to previous version | Immediate |
 
 ## Extending This Template
 
 **Add a new pipeline step:**
-1. Add `"new_step_compute": "spcs"` to `PIPELINE_CONFIG`
-2. Create a `build_new_step_remote(cfg)` function in `ml_pipeline_dag.py`
-3. Add `DAGTask("NEW_STEP", definition=func)` and wire dependencies
+1. Create `source/<name>/` with a logic module exposing `run(session) -> dict` and an `entrypoint.py`
+2. Add an entry to `STEPS` in `source/pipeline/train_dag.py` (module, config key, pip deps), append it to `STEP_ORDER`, and add the package to `STAGED_PACKAGES`
+3. Add a `pipeline_steps.<name>` block to `source/configs/config.yml`
+
+No new dispatch code is needed — the DAG builds the warehouse or SPCS wrapper generically and chains steps in `STEP_ORDER`.
 
 **Switch to a different model:**
-1. Replace the training logic in `build_train_model_remote()`
-2. Update feature columns and Feature View SQL
-3. Adjust quality gate thresholds
-
-**Add multi-account support:**
-1. Create `deploy/strategies/multi_account.py` with a `promote(version, session)` function
-2. Set `TOPOLOGY=multi-account` in GitHub variables
+1. Set `model.task_type`, `predict_function`, `id_columns`, and `label_column` in `source/configs/config.yml`
+2. Replace `build_dataset()` and `train_model()` in `source/model_training/training.py`
+3. Update feature columns and Feature View SQL in `source/feature_engineering/feature_views.py`
+4. Set `quality_gate.metrics` and `quality_gate.champion.metric` to metrics produced for your task type (see `source/model_training/metrics.py`)
+5. Point `monitor.prediction_column` and `monitor.actuals` at your model's output and labels
 
 ## Documentation
 
