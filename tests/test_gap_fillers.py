@@ -10,6 +10,7 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "source"))
 sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT))  # deploy.strategies
 
 from feature_engineering.data_checks import build_check_sql, evaluate_rules
 from model_training.metrics import METRICS_BY_TASK, compute_metrics
@@ -241,3 +242,34 @@ def test_batch_scorer_exposes_run():
     from serving import batch_inference
 
     assert list(inspect.signature(batch_inference.run).parameters) == ["session"]
+
+
+# ─── Promotion idempotency ──────────────────────────────────────────────────
+
+
+def _version(comment="", size=100, metadata="{}"):
+    return {"comment": comment, "size": size, "metadata": metadata}
+
+
+def test_promotion_recognizes_same_training_run():
+    from deploy.strategies.single_account import same_version
+
+    stage = _version("dataset:D/V1_20261018_120000 | git:abc1234")
+    assert same_version(_version("dataset:D/V1_20261018_120000 | git:abc1234"), stage)
+    # A rebuilt STAGE reuses the name V1 for a different run: must not match.
+    assert not same_version(_version("dataset:D/V1_20261019_090000 | git:def5678"), stage)
+
+
+def test_promotion_falls_back_for_copies_without_comment():
+    from deploy.strategies.single_account import same_version
+
+    stage = _version("dataset:D/V1_x", size=268318, metadata='{"m": 1}')
+    assert same_version(_version("", size=268318, metadata='{"m": 1}'), stage)
+    assert not same_version(_version("", size=1, metadata='{"m": 1}'), stage)
+
+
+def test_comment_literal_escapes_quotes():
+    from deploy.strategies.single_account import _sql_string
+
+    assert _sql_string("it's") == "'it\\'s'"
+    assert _sql_string(None) == "''"
