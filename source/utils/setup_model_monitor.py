@@ -44,6 +44,9 @@ def main():
     print("=" * 60)
 
     session = create_snowpark_session()
+    # CI service users may have no default warehouse; select the env's warehouse
+    # (monitor DDL, the baseline CTAS, and the alert all need one).
+    session.use_warehouse(get_env_config(args.env)["warehouse"])
 
     # Create or update monitor
     print(f"\n[1/3] Creating/updating monitor (env={args.env})...")

@@ -160,10 +160,25 @@ def test_gateway_config_roundtrip(tmp_path):
 
 
 def test_repo_gateway_config_is_valid():
+    """Shipped config is either empty (fresh template) or a valid split."""
     from apply_gateway_config import CONFIG_PATH, load_config, validate_weights
 
     assert CONFIG_PATH == ROOT / "gateway-config.yml"
-    assert validate_weights(load_config()["targets"]) == []
+    targets = load_config()["targets"]
+    assert targets == [] or validate_weights(targets) == []
+
+
+@pytest.mark.parametrize("body", ["targets: []\n", "targets:\n", "# only a comment\n"])
+def test_empty_gateway_config_is_a_noop(tmp_path, monkeypatch, body):
+    """Before the first PROD deploy, a push touching the file must not fail."""
+    import apply_gateway_config as agc
+
+    path = tmp_path / "gateway-config.yml"
+    path.write_text(body)
+    monkeypatch.setattr(agc, "CONFIG_PATH", path)
+    monkeypatch.setattr(sys, "argv", ["apply_gateway_config.py"])
+    assert agc.load_config()["targets"] == []
+    agc.main()  # returns before opening a Snowflake session
 
 
 def test_canary_split():

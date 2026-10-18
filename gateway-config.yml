@@ -5,7 +5,7 @@
 #
 # Gateway name, initial canary weight, and instance sizing live in
 # source/configs/config.yml under serving.realtime.
+#
+# Empty until the first PROD deployment; deploy-prod writes the initial target.
 
-targets:
-  - service: MLOPS_FRAUD_DETECTOR_SERVICE_V6
-    weight: 100
+targets: []
