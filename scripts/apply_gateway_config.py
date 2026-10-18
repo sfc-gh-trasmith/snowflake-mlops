@@ -34,7 +34,7 @@ def load_config(path=None) -> dict:
     """Load gateway-config.yml ({"targets": [{"service", "weight"}, ...]})."""
     p = Path(path) if path else CONFIG_PATH
     config = yaml.safe_load(p.read_text()) or {}
-    config.setdefault("targets", [])
+    config["targets"] = config.get("targets") or []
     return config
 
 
@@ -159,6 +159,11 @@ def main():
         print(f"  Updated gateway-config.yml from --targets: {args.targets}")
     else:
         targets = load_config()["targets"]
+        if not targets:
+            # Fresh template: nothing is serving yet. deploy-prod writes the
+            # first target after the initial real-time deployment.
+            print("gateway-config.yml has no targets yet; nothing to apply.")
+            return
 
     problems = validate_weights(targets)
     if problems:
