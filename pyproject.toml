@@ -7,6 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "llvmlite>=0.48.0",
     "snowflake-ml-python>=1.47.0",
+    "pyyaml>=6.0",
 ]
 
 [dependency-groups]
@@ -20,8 +21,13 @@ snow = [
     "snowflake>=1.0.0",
 ]
 ml-runtime = [
+    # Pinned to the versions preinstalled in the Snowflake ML Job runtime image,
+    # so SPCS training needs no network access (no PyPI external access
+    # integration). The same pins feed warehouse training and Model Registry
+    # serving, keeping train/serve versions identical. When the runtime image
+    # updates, bump these to match.
     "xgboost==3.3.0",
-    "scikit-learn==1.6.1",
+    "scikit-learn==1.8.0",
 ]
 
 [tool.ruff]

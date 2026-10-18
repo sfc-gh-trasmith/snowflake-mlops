@@ -40,5 +40,5 @@ Thumbs.db
 .coverage
 htmlcov/
 
-# E2E test trigger
-# E2E test trigger
+# Cortex Code (IDE-generated plans and state)
+.snowflake/

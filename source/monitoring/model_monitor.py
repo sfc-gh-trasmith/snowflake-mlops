@@ -1,14 +1,18 @@
-"""Model Monitor: create and manage ML Observability for the fraud detector.
+"""Model Monitor: ML Observability for the deployed model.
 
-Uses Snowflake's native ModelMonitor (CREATE MODEL MONITOR) to track
-prediction drift and feature distribution shifts over time.
+Uses Snowflake's native MODEL MONITOR over the appended batch predictions
+(serving.batch.output_table).
 
-The monitor reads from the BATCH_PREDICTIONS table (scored by batch inference)
-and checks for distribution shifts at a configurable interval.
-
-When a baseline table is configured, drift metrics (PSI, Jensen-Shannon,
-Wasserstein, Difference of Means) are computed against the baseline. A
-Snowflake Alert fires when the chosen metric exceeds the configured threshold.
+  Source    A view over the predictions for the monitored version. When
+            monitor.actuals is configured, the view joins ground-truth labels,
+            enabling performance metrics (AUC, precision, RMSE, ...) as well
+            as drift.
+  Baseline  monitor.baseline: auto snapshots the promotion-time validation
+            scoring (<output>_VALIDATION) as the expected distribution, so
+            drift metrics (PSI, Jensen-Shannon, Wasserstein, Difference of
+            Means) work out of the box.
+  Alert     A Snowflake Alert logs to DRIFT_ALERTS when drift exceeds the
+            threshold, and optionally emails via a notification integration.
 """
 
 import os
@@ -16,247 +20,273 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from config import MODEL_NAME, MONITOR_CONFIG
+from config import (
+    ID_COLUMNS,
+    MODEL_NAME,
+    MONITOR_CONFIG,
+    PREDICT_FUNCTION,
+    SOURCE_DATABASE,
+    SOURCE_SCHEMA,
+    TASK_TYPE,
+    batch_output_table,
+    resolve_env_config,
+)
 
 VALID_DRIFT_METRICS = frozenset({"POPULATION_STABILITY_INDEX", "JENSEN_SHANNON", "WASSERSTEIN", "DIFFERENCE_OF_MEANS"})
+ACTUAL_COLUMN = "ACTUAL_LABEL"
 
 
 def get_env_config(env: str) -> dict:
-    """Get environment-specific database/warehouse for monitor."""
-    envs = {
-        "dev": {"database": "SNOW_MLOPS_DEV", "warehouse": "SNOW_MLOPS_DEV_WH"},
-        "stage": {"database": "SNOW_MLOPS_STAGE", "warehouse": "SNOW_MLOPS_STAGE_WH"},
-        "prod": {"database": "SNOW_MLOPS_PROD", "warehouse": "SNOW_MLOPS_PROD_WH"},
-    }
-    return envs.get(env, envs["dev"])
+    """Environment database/warehouse for the monitor (source/configs/config.yml)."""
+    try:
+        return resolve_env_config(env)
+    except ValueError:
+        return resolve_env_config("dev")
 
 
-def create_monitor(session, env: str = "prod") -> str:
-    """Create the model monitor if it doesn't exist. Returns the monitor name."""
+def _target(env: str) -> tuple[str, str, str]:
     cfg = get_env_config(env)
-    db = os.getenv("SNOWFLAKE_DATABASE", cfg["database"])
-    schema = os.getenv("SNOWFLAKE_SCHEMA", "ML")
-    wh = cfg["warehouse"]
+    return cfg["database"], cfg["schema"], cfg["warehouse"]
 
-    monitor_name = MONITOR_CONFIG["monitor_name"]
-    source_table = f"{db}.{schema}.{MONITOR_CONFIG['source_table']}"
-    ts_col = MONITOR_CONFIG["timestamp_column"]
-    pred_cols = MONITOR_CONFIG["prediction_columns"]
-    refresh = MONITOR_CONFIG["refresh_interval"]
-    agg_window = MONITOR_CONFIG["aggregation_window"]
-    function_name = MONITOR_CONFIG["function_name"]
-    baseline_table = MONITOR_CONFIG.get("baseline_table")
 
-    # Get current default model version
+def actuals_config() -> dict | None:
+    actuals = MONITOR_CONFIG.get("actuals") or {}
+    return actuals if actuals.get("table") else None
+
+
+def labeled_select_sql(predictions_table: str, version: str | None) -> str:
+    """SELECT over predictions (optionally one version), joined to actuals if configured."""
+    where = f" WHERE p.MODEL_VERSION = '{version}'" if version else ""
+    actuals = actuals_config()
+    if not actuals:
+        return f"SELECT p.* FROM {predictions_table} p{where}"
+
+    keys = list(actuals.get("join_keys") or ID_COLUMNS)
+    table = actuals["table"]
+    table_fqn = table if "." in table else f"{SOURCE_DATABASE}.{SOURCE_SCHEMA}.{table}"
+    key_list = ", ".join(keys)
+    join = " AND ".join(f"p.{k} = a.{k}" for k in keys)
+    return (
+        f"SELECT p.*, a.{ACTUAL_COLUMN} FROM {predictions_table} p "
+        f"LEFT JOIN (SELECT {key_list}, {actuals['label_sql']} AS {ACTUAL_COLUMN} "
+        f"FROM {table_fqn} GROUP BY {key_list}) a ON {join}{where}"
+    )
+
+
+def monitor_columns_sql() -> str:
+    """Column clauses for CREATE MODEL MONITOR, by task type and actuals."""
+    pred_col = MONITOR_CONFIG["prediction_column"]
+    clauses = [f"PREDICTION_SCORE_COLUMNS = ('{pred_col}')"]
+    if ID_COLUMNS:
+        # Predictions are appended per run, so the entity key alone repeats;
+        # RUN_ID makes each row unique.
+        clauses.append("ID_COLUMNS = (" + ", ".join(f"'{c}'" for c in [*ID_COLUMNS, "RUN_ID"]) + ")")
+    if actuals_config():
+        if TASK_TYPE == "regression":
+            clauses.append(f"ACTUAL_SCORE_COLUMNS = ('{ACTUAL_COLUMN}')")
+        elif TASK_TYPE == "binary_classification":
+            clauses.append(f"ACTUAL_CLASS_COLUMNS = ('{ACTUAL_COLUMN}')")
+        # multiclass: Model Monitor performance metrics need a single score
+        # column, so only drift is monitored.
+    return "\n            ".join(clauses)
+
+
+def _table_exists(session, fqn: str) -> bool:
+    db, schema, name = fqn.split(".", 2)
+    rows = session.sql(f"SHOW TABLES LIKE '{name}' IN SCHEMA {db}.{schema}").collect()
+    return bool(rows)
+
+
+def _resolve_version(session, db: str, schema: str) -> str:
+    version = os.getenv("MODEL_VERSION")
+    if version:
+        return version
     models = session.sql(f"SHOW MODELS LIKE '{MODEL_NAME}' IN {db}.{schema}").collect()
     if not models:
         raise RuntimeError(f"Model {MODEL_NAME} not found in {db}.{schema}")
-    version = models[0]["default_version_name"]
+    return models[0]["default_version_name"]
 
-    pred_cols_sql = ", ".join(f"'{c}'" for c in pred_cols)
 
-    # Check if monitor already exists
-    existing = session.sql(f"SHOW MODEL MONITORS LIKE '{monitor_name}' IN SCHEMA {db}.{schema}").collect()
+def prepare_sources(session, db: str, schema: str, version: str) -> dict:
+    """Create the monitor source view and (optionally) the baseline table."""
+    predictions = batch_output_table(db, schema)
+    validation = predictions + "_VALIDATION"
 
-    if existing:
-        print(f"  Monitor {monitor_name} already exists. Verifying state...")
-        desc = session.sql(f"DESC MODEL MONITOR {db}.{schema}.{monitor_name}").collect()
-        current_version = _get_model_version_from_desc(desc[0]) if desc else ""
-        if current_version != version:
-            print(f"  Updating monitor to track version {version} (was {current_version})...")
-            session.sql(f"DROP MODEL MONITOR IF EXISTS {db}.{schema}.{monitor_name}").collect()
+    # The scheduled scoring task may not have run yet on a fresh deploy.
+    if not _table_exists(session, predictions):
+        if not _table_exists(session, validation):
+            raise RuntimeError(f"Neither {predictions} nor {validation} exists — run batch inference first")
+        session.sql(f"CREATE TABLE {predictions} LIKE {validation}").collect()
+        print(f"  Created empty {predictions} (scheduled scoring will append)")
+
+    source_view = f"{predictions}_MONITOR_SOURCE"
+    session.sql(f"CREATE OR REPLACE VIEW {source_view} AS {labeled_select_sql(predictions, version)}").collect()
+
+    baseline_cfg = MONITOR_CONFIG.get("baseline")
+    baseline = None
+    if baseline_cfg == "auto":
+        if _table_exists(session, validation):
+            baseline = f"{predictions}_BASELINE"
+            session.sql(f"CREATE OR REPLACE TABLE {baseline} AS {labeled_select_sql(validation, version)}").collect()
         else:
-            print(f"  Monitor is tracking {MODEL_NAME}/{version}. No changes needed.")
+            print(f"  Baseline auto: {validation} not found — drift metrics disabled")
+    elif baseline_cfg:
+        baseline = baseline_cfg if "." in baseline_cfg else f"{db}.{schema}.{baseline_cfg}"
+
+    return {"source": source_view, "baseline": baseline}
+
+
+def create_monitor(session, env: str = "prod") -> str:
+    """Create (or recreate for a new version) the model monitor. Returns its name."""
+    db, schema, wh = _target(env)
+    monitor_name = MONITOR_CONFIG["monitor_name"]
+    version = _resolve_version(session, db, schema)
+    sources = prepare_sources(session, db, schema, version)
+
+    existing = session.sql(f"SHOW MODEL MONITORS LIKE '{monitor_name}' IN SCHEMA {db}.{schema}").collect()
+    if existing:
+        desc = session.sql(f"DESC MODEL MONITOR {db}.{schema}.{monitor_name}").collect()
+        current = _get_model_version_from_desc(desc[0]) if desc else ""
+        if current == version:
+            print(f"  Monitor already tracks {MODEL_NAME}/{version}.")
             _ensure_active(session, db, schema, monitor_name)
-            _set_baseline_if_configured(session, db, schema, monitor_name, baseline_table)
             return monitor_name
+        print(f"  Recreating monitor for {version} (was {current or 'unknown'})...")
+        session.sql(f"DROP MODEL MONITOR IF EXISTS {db}.{schema}.{monitor_name}").collect()
 
-    # Create the monitor
-    print(f"  Creating monitor: {monitor_name}")
-    print(f"    Model: {MODEL_NAME}/{version}")
-    print(f"    Source: {source_table}")
-    print(f"    Refresh: {refresh}, Aggregation: {agg_window}")
-
-    baseline_clause = ""
-    if baseline_table:
-        baseline_fqn = f"{db}.{schema}.{baseline_table}" if "." not in baseline_table else baseline_table
-        baseline_clause = f"\n            BASELINE = {baseline_fqn}"
+    baseline_clause = f"\n            BASELINE = {sources['baseline']}" if sources["baseline"] else ""
+    print(f"  Creating monitor {monitor_name}: {MODEL_NAME}/{version}")
+    print(f"    Source: {sources['source']}")
+    print(f"    Actuals: {'yes' if actuals_config() else 'no (drift only)'}")
+    print(f"    Baseline: {sources['baseline'] or 'none (drift metrics disabled)'}")
 
     session.sql(f"""
         CREATE MODEL MONITOR {db}.{schema}.{monitor_name} WITH
             MODEL = {db}.{schema}.{MODEL_NAME}
             VERSION = '{version}'
-            FUNCTION = '{function_name}'
-            SOURCE = {source_table}
+            FUNCTION = '{PREDICT_FUNCTION}'
+            SOURCE = {sources["source"]}
             WAREHOUSE = {wh}
-            REFRESH_INTERVAL = '{refresh}'
-            AGGREGATION_WINDOW = '{agg_window}'
-            TIMESTAMP_COLUMN = {ts_col}
-            PREDICTION_SCORE_COLUMNS = ({pred_cols_sql}){baseline_clause}
+            REFRESH_INTERVAL = '{MONITOR_CONFIG["refresh_interval"]}'
+            AGGREGATION_WINDOW = '{MONITOR_CONFIG["aggregation_window"]}'
+            TIMESTAMP_COLUMN = {MONITOR_CONFIG["timestamp_column"]}
+            {monitor_columns_sql()}{baseline_clause}
     """).collect()
-
-    print("  Monitor created successfully.")
     _ensure_active(session, db, schema, monitor_name)
-
-    if baseline_table:
-        print(f"  Baseline: {baseline_table}")
-    else:
-        print("  Baseline: not configured (drift detection disabled)")
-        print("  Set MONITOR_CONFIG['baseline_table'] to enable drift metrics.")
-
     return monitor_name
 
 
 def _get_model_version_from_desc(row) -> str:
-    """Extract model version from DESC MODEL MONITOR row."""
     import json
 
     try:
-        model_json = json.loads(row.model)
-        return model_json.get("version_name", "")
+        return json.loads(row.model).get("version_name", "")
     except Exception:
         return ""
 
 
-def _set_baseline_if_configured(session, db: str, schema: str, monitor_name: str, baseline_table: str | None):
-    """Set the baseline on an existing monitor if configured and not already set."""
-    if not baseline_table:
-        return
-    try:
-        desc = session.sql(f"DESC MODEL MONITOR {db}.{schema}.{monitor_name}").collect()
-        if desc:
-            current_baseline = desc[0].baseline or ""
-            if current_baseline and "NOT_SET" not in current_baseline:
-                return
-        baseline_fqn = f"{db}.{schema}.{baseline_table}" if "." not in baseline_table else baseline_table
-        print(f"  Setting baseline: {baseline_fqn}")
-        session.sql(f"ALTER MODEL MONITOR {db}.{schema}.{monitor_name} SET BASELINE = '{baseline_fqn}'").collect()
-    except Exception as e:
-        print(f"  Warning: could not set baseline: {e}")
-
-
 def _ensure_active(session, db: str, schema: str, monitor_name: str):
-    """Ensure the monitor is in ACTIVE state."""
     try:
         desc = session.sql(f"DESC MODEL MONITOR {db}.{schema}.{monitor_name}").collect()
-        if desc:
-            state = desc[0].monitor_state or "UNKNOWN"
-            if state == "SUSPENDED":
-                print("  Resuming suspended monitor...")
-                session.sql(f"ALTER MODEL MONITOR {db}.{schema}.{monitor_name} RESUME").collect()
-            elif state == "ACTIVE":
-                print("  Monitor state: ACTIVE")
-            else:
-                print(f"  Monitor state: {state}")
+        state = (desc[0].monitor_state if desc else None) or "UNKNOWN"
+        if state == "SUSPENDED":
+            print("  Resuming suspended monitor...")
+            session.sql(f"ALTER MODEL MONITOR {db}.{schema}.{monitor_name} RESUME").collect()
+        else:
+            print(f"  Monitor state: {state}")
     except Exception as e:
         print(f"  Warning: could not check monitor state: {e}")
 
 
-def create_drift_alert(session, env: str = "prod") -> str | None:
-    """Create a Snowflake Alert that fires when drift exceeds the threshold.
+def _has_baseline(session, db: str, schema: str, monitor_name: str) -> bool:
+    try:
+        desc = session.sql(f"DESC MODEL MONITOR {db}.{schema}.{monitor_name}").collect()
+        baseline = (desc[0].baseline or "") if desc else ""
+        return bool(baseline) and "NOT_SET" not in baseline.upper()
+    except Exception:
+        return False
 
-    Returns the alert name, or None if baseline is not configured.
-    """
-    baseline_table = MONITOR_CONFIG.get("baseline_table")
-    if not baseline_table:
-        print("  Drift alert: skipped (no baseline configured)")
+
+def alert_action_sql(db: str, schema: str, metric: str, threshold: float) -> str:
+    """Alert THEN clause: log to DRIFT_ALERTS, plus email when configured."""
+    insert = (
+        f"INSERT INTO {db}.{schema}.DRIFT_ALERTS (DRIFT_METRIC, THRESHOLD, STATUS) "
+        f"VALUES ('{metric}', {threshold}, 'THRESHOLD_EXCEEDED')"
+    )
+    integration = MONITOR_CONFIG.get("notification_integration")
+    recipients = MONITOR_CONFIG.get("notification_recipients") or []
+    if not integration or not recipients:
+        return insert
+    subject = f"[{db}] {MODEL_NAME} drift alert: {metric} > {threshold}"
+    body = f"Model monitor {MONITOR_CONFIG['monitor_name']} in {db}.{schema} exceeded the drift threshold."
+    email = f"CALL SYSTEM$SEND_EMAIL('{integration}', '{','.join(recipients)}', '{subject}', '{body}')"
+    return f"EXECUTE IMMEDIATE $$ BEGIN {insert}; {email}; END; $$"
+
+
+def create_drift_alert(session, env: str = "prod") -> str | None:
+    """Create a Snowflake Alert for drift breaches. None if the monitor has no baseline."""
+    db, schema, wh = _target(env)
+    monitor_name = MONITOR_CONFIG["monitor_name"]
+    if not _has_baseline(session, db, schema, monitor_name):
+        print("  Drift alert: skipped (monitor has no baseline)")
         return None
 
-    cfg = get_env_config(env)
-    db = os.getenv("SNOWFLAKE_DATABASE", cfg["database"])
-    schema = os.getenv("SNOWFLAKE_SCHEMA", "ML")
-    wh = cfg["warehouse"]
+    alert_name = MONITOR_CONFIG.get("alert_name", f"{MODEL_NAME}_DRIFT_ALERT")
+    metric = MONITOR_CONFIG.get("drift_metric", "POPULATION_STABILITY_INDEX")
+    threshold = float(MONITOR_CONFIG.get("drift_threshold", 0.25))
+    column = MONITOR_CONFIG["prediction_column"]
+    if metric not in VALID_DRIFT_METRICS:
+        raise ValueError(f"Invalid drift_metric '{metric}'. Must be one of: {sorted(VALID_DRIFT_METRICS)}")
 
-    monitor_name = MONITOR_CONFIG["monitor_name"]
-    alert_name = MONITOR_CONFIG.get("alert_name", "FRAUD_DETECTOR_DRIFT_ALERT")
-    alert_schedule = MONITOR_CONFIG.get("alert_schedule", "1440 MINUTE")
-    drift_metric = MONITOR_CONFIG.get("drift_metric", "POPULATION_STABILITY_INDEX")
-    drift_column = MONITOR_CONFIG.get("drift_column", "output_feature_1")
-    drift_threshold = MONITOR_CONFIG.get("drift_threshold", 0.25)
-
-    if drift_metric not in VALID_DRIFT_METRICS:
-        raise ValueError(f"Invalid drift_metric '{drift_metric}'. Must be one of: {VALID_DRIFT_METRICS}")
-
-    # Create a log table for drift alerts
     session.sql(f"""
         CREATE TABLE IF NOT EXISTS {db}.{schema}.DRIFT_ALERTS (
             ALERT_TS TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
-            DRIFT_METRIC VARCHAR,
-            THRESHOLD FLOAT,
-            STATUS VARCHAR
+            DRIFT_METRIC VARCHAR, THRESHOLD FLOAT, STATUS VARCHAR
         )
     """).collect()
-
-    # Create the alert
-    monitor_fqn = f"'{db}.{schema}.{monitor_name}'"
-    print(f"  Creating drift alert: {alert_name}")
-    print(f"    Metric: {drift_metric} > {drift_threshold}")
-    print(f"    Schedule: every {alert_schedule}")
-
     session.sql(f"""
         CREATE OR REPLACE ALERT {db}.{schema}.{alert_name}
             WAREHOUSE = {wh}
-            SCHEDULE = '{alert_schedule}'
+            SCHEDULE = '{MONITOR_CONFIG.get("alert_schedule", "1440 MINUTE")}'
             IF (EXISTS (
                 SELECT 1 FROM TABLE(MODEL_MONITOR_DRIFT_METRIC(
-                    {monitor_fqn}, '{drift_metric}', '{drift_column}', '1 DAY'
-                )) WHERE METRIC_VALUE > {drift_threshold}
+                    '{db}.{schema}.{monitor_name}', '{metric}', '{column}', '1 DAY'
+                )) WHERE METRIC_VALUE > {threshold}
                   AND EVENT_TIMESTAMP > DATEADD('DAY', -1, CURRENT_TIMESTAMP())
             ))
-            THEN
-                INSERT INTO {db}.{schema}.DRIFT_ALERTS (DRIFT_METRIC, THRESHOLD, STATUS)
-                VALUES ('{drift_metric}', {drift_threshold}, 'THRESHOLD_EXCEEDED')
+            THEN {alert_action_sql(db, schema, metric, threshold)}
     """).collect()
-
     session.sql(f"ALTER ALERT {db}.{schema}.{alert_name} RESUME").collect()
-    print(f"  Alert {alert_name} created and resumed.")
+    print(f"  Alert {alert_name}: {metric} > {threshold} (every {MONITOR_CONFIG.get('alert_schedule')})")
     return alert_name
 
 
 def drop_drift_alert(session, env: str = "prod"):
-    """Drop the drift alert."""
-    cfg = get_env_config(env)
-    db = os.getenv("SNOWFLAKE_DATABASE", cfg["database"])
-    schema = os.getenv("SNOWFLAKE_SCHEMA", "ML")
-    alert_name = MONITOR_CONFIG.get("alert_name", "FRAUD_DETECTOR_DRIFT_ALERT")
+    db, schema, _ = _target(env)
+    alert_name = MONITOR_CONFIG.get("alert_name", f"{MODEL_NAME}_DRIFT_ALERT")
     session.sql(f"DROP ALERT IF EXISTS {db}.{schema}.{alert_name}").collect()
     print(f"  Alert {alert_name} dropped.")
 
 
 def query_drift(session, env: str = "prod", lookback_days: int = 30) -> list:
-    """Query drift metrics for the last N days. Returns empty list if no baseline."""
-    baseline_table = MONITOR_CONFIG.get("baseline_table")
-    if not baseline_table:
-        print("  No baseline configured — drift metrics unavailable.")
-        return []
-
-    cfg = get_env_config(env)
-    db = os.getenv("SNOWFLAKE_DATABASE", cfg["database"])
-    schema = os.getenv("SNOWFLAKE_SCHEMA", "ML")
-
+    """Daily drift metric for the last N days (empty if no baseline)."""
+    db, schema, _ = _target(env)
     monitor_name = MONITOR_CONFIG["monitor_name"]
-    drift_metric = MONITOR_CONFIG.get("drift_metric", "POPULATION_STABILITY_INDEX")
-    drift_column = MONITOR_CONFIG.get("drift_column", "output_feature_1")
-
-    monitor_fqn = f"'{db}.{schema}.{monitor_name}'"
-    rows = session.sql(f"""
+    if not _has_baseline(session, db, schema, monitor_name):
+        return []
+    return session.sql(f"""
         SELECT * FROM TABLE(MODEL_MONITOR_DRIFT_METRIC(
-            {monitor_fqn}, '{drift_metric}', '{drift_column}', '1 DAY',
-            DATEADD('DAY', -{lookback_days}, CURRENT_TIMESTAMP()), CURRENT_TIMESTAMP()
+            '{db}.{schema}.{monitor_name}', '{MONITOR_CONFIG.get("drift_metric", "POPULATION_STABILITY_INDEX")}',
+            '{MONITOR_CONFIG["prediction_column"]}', '1 DAY',
+            DATEADD('DAY', -{int(lookback_days)}, CURRENT_TIMESTAMP()), CURRENT_TIMESTAMP()
         ))
     """).collect()
-    return rows
 
 
 def get_monitor_status(session, env: str = "prod") -> dict:
-    """Get the current monitor status and latest metrics."""
-    cfg = get_env_config(env)
-    db = os.getenv("SNOWFLAKE_DATABASE", cfg["database"])
-    schema = os.getenv("SNOWFLAKE_SCHEMA", "ML")
-    monitor_name = MONITOR_CONFIG["monitor_name"]
-
+    db, schema, _ = _target(env)
     try:
-        desc = session.sql(f"DESC MODEL MONITOR {db}.{schema}.{monitor_name}").collect()
+        desc = session.sql(f"DESC MODEL MONITOR {db}.{schema}.{MONITOR_CONFIG['monitor_name']}").collect()
         if not desc:
             return {"exists": False}
         row = desc[0]
@@ -272,20 +302,10 @@ def get_monitor_status(session, env: str = "prod") -> dict:
 
 
 def suspend_monitor(session, env: str = "prod"):
-    """Suspend the monitor (e.g., during maintenance)."""
-    cfg = get_env_config(env)
-    db = os.getenv("SNOWFLAKE_DATABASE", cfg["database"])
-    schema = os.getenv("SNOWFLAKE_SCHEMA", "ML")
-    monitor_name = MONITOR_CONFIG["monitor_name"]
-    session.sql(f"ALTER MODEL MONITOR {db}.{schema}.{monitor_name} SUSPEND").collect()
-    print(f"  Monitor {monitor_name} suspended.")
+    db, schema, _ = _target(env)
+    session.sql(f"ALTER MODEL MONITOR {db}.{schema}.{MONITOR_CONFIG['monitor_name']} SUSPEND").collect()
 
 
 def resume_monitor(session, env: str = "prod"):
-    """Resume a suspended monitor."""
-    cfg = get_env_config(env)
-    db = os.getenv("SNOWFLAKE_DATABASE", cfg["database"])
-    schema = os.getenv("SNOWFLAKE_SCHEMA", "ML")
-    monitor_name = MONITOR_CONFIG["monitor_name"]
-    session.sql(f"ALTER MODEL MONITOR {db}.{schema}.{monitor_name} RESUME").collect()
-    print(f"  Monitor {monitor_name} resumed.")
+    db, schema, _ = _target(env)
+    session.sql(f"ALTER MODEL MONITOR {db}.{schema}.{MONITOR_CONFIG['monitor_name']} RESUME").collect()

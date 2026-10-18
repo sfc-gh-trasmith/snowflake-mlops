@@ -59,10 +59,10 @@ jobs:
         run: uv sync
 
       - name: Lint (ruff)
-        run: uv run ruff check source/ scripts/
+        run: uv run ruff check source/ scripts/ deploy/ tests/
 
       - name: Format check (ruff)
-        run: uv run ruff format --check source/ scripts/
+        run: uv run ruff format --check source/ scripts/ deploy/ tests/
 
       - name: Run unit tests
         run: uv run pytest tests/ -v --ignore=tests/test_endpoint.py
@@ -104,35 +104,45 @@ jobs:
         run: uv python install 3.12
 
       - name: Install dependencies
-        run: uv sync --group snow --no-default-groups
+        run: uv sync --group snow --group ml-runtime --no-default-groups
 
       - name: Deploy Task DAG (creates stage + results table + tasks)
-        run: uv run python source/pipeline/ml_pipeline_dag.py --deploy --env stage
+        run: uv run python source/pipeline/train_dag.py --deploy --env stage
 
       - name: Trigger ML training pipeline
-        run: uv run python source/pipeline/ml_pipeline_dag.py --execute --env stage
+        run: uv run python source/pipeline/train_dag.py --execute --env stage
 
       - name: Wait for training pipeline completion
-        run: uv run python scripts/wait_for_task.py
+        run: uv run python source/utils/wait_for_task.py
         timeout-minutes: 30
         env:
           METRICS_FILE: ${{ runner.temp }}/pipeline_metrics.json
 
-      - name: "Quality gate: evaluate metrics"
+      - name: "Quality gate: read candidate (gate ran in EVALUATE)"
         id: quality_gate
-        run: uv run python scripts/quality_gate_and_register.py
+        run: uv run python source/utils/read_candidate.py
         timeout-minutes: 10
         env:
           METRICS_FILE: ${{ runner.temp }}/pipeline_metrics.json
 
-      - name: Run batch inference (validate)
-        run: uv run python scripts/run_batch_inference.py
+      - name: Read serving modes from config
+        id: serving
+        run: uv run python source/utils/serving_flags.py
+
+      - name: Validate batch inference (candidate)
+        if: steps.serving.outputs.batch_enabled == 'true'
+        run: uv run python source/pipeline/batch_inference_dag.py --validate --env stage
         timeout-minutes: 10
+        env:
+          # Validate the candidate that just passed the gate, not the prior default
+          MODEL_VERSION: ${{ steps.quality_gate.outputs.model_version }}
 
       - name: "Validate model monitor (create, verify, drop)"
-        if: vars.ENABLE_MODEL_MONITOR == 'true'
-        run: uv run python scripts/setup_model_monitor.py --env stage --validate-only
+        if: vars.ENABLE_MODEL_MONITOR == 'true' && steps.serving.outputs.monitor_enabled == 'true'
+        run: uv run python source/utils/setup_model_monitor.py --env stage --validate-only
         timeout-minutes: 5
+        env:
+          MODEL_VERSION: ${{ steps.quality_gate.outputs.model_version }}
 
   # ──────────────────────────────────────────────────────────────────────
   # PROD: Model deployment (requires approval)
@@ -172,7 +182,7 @@ jobs:
         run: uv python install 3.12
 
       - name: Install dependencies
-        run: uv sync --group snow --no-default-groups
+        run: uv sync --group snow --group ml-runtime --no-default-groups
 
       - name: "Promote model to PROD (replicate from STAGE)"
         run: |
@@ -185,23 +195,34 @@ jobs:
           BLESSED_VERSION: ${{ needs.deploy-stage.outputs.model_version || inputs.model_version }}
         timeout-minutes: 5
 
-      - name: Register Feature Views in PROD
-        run: uv run python -c "import sys; sys.path.insert(0, 'source'); from features.feature_views import register_feature_views; from snowpark_session import create_snowpark_session; session = create_snowpark_session(); register_feature_views(session=session, database='SNOW_MLOPS_PROD', schema='ML', warehouse='SNOW_MLOPS_PROD_WH'); session.close()"
-        timeout-minutes: 5
+      - name: Read serving modes from config
+        id: serving
+        run: uv run python source/utils/serving_flags.py
 
-      - name: "Deploy batch inference (validate model.run())"
-        run: uv run python scripts/run_batch_inference.py
+      # Registers PROD Feature Views (idempotent) and validates model.run()
+      # with the promoted version before anything is scheduled or served.
+      - name: "Validate batch inference (promoted version)"
+        if: steps.serving.outputs.batch_enabled == 'true'
+        run: uv run python source/pipeline/batch_inference_dag.py --validate --env prod
+        timeout-minutes: 10
+
+      - name: "Deploy scheduled batch scoring task"
+        if: steps.serving.outputs.batch_enabled == 'true'
+        run: uv run python source/pipeline/batch_inference_dag.py --deploy --env prod
         timeout-minutes: 10
 
       - name: "Deploy real-time service (SPCS canary)"
+        if: steps.serving.outputs.realtime_enabled == 'true'
         run: uv run python scripts/deploy_prod_service.py
         timeout-minutes: 20
 
       - name: "Apply gateway traffic split"
+        if: steps.serving.outputs.realtime_enabled == 'true'
         run: uv run python scripts/apply_gateway_config.py
         timeout-minutes: 5
 
       - name: "Sync gateway-config.yml to repo"
+        if: steps.serving.outputs.realtime_enabled == 'true'
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
@@ -217,15 +238,16 @@ jobs:
           fi
 
       - name: Set up model monitor
-        if: vars.ENABLE_MODEL_MONITOR == 'true'
-        run: uv run python scripts/setup_model_monitor.py --env prod
+        if: vars.ENABLE_MODEL_MONITOR == 'true' && steps.serving.outputs.monitor_enabled == 'true'
+        run: uv run python source/utils/setup_model_monitor.py --env prod
         timeout-minutes: 5
 
       - name: Tag production release
         env:
           GH_TOKEN: ${{ github.token }}
+          BLESSED_VERSION: ${{ needs.deploy-stage.outputs.model_version || inputs.model_version }}
         run: |
-          MODEL_VERSION=$(snow sql -q "SHOW MODELS LIKE 'MLOPS_FRAUD_DETECTOR' IN SNOW_MLOPS_PROD.ML" --format json -x | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['default_version_name'])" 2>/dev/null || echo "unknown")
+          MODEL_VERSION="${BLESSED_VERSION:-unknown}"
           TAG="prod/${MODEL_VERSION}-$(date +%Y%m%d-%H%M%S)"
           gh api repos/${{ github.repository }}/git/refs -f ref="refs/tags/${TAG}" -f sha="${GITHUB_SHA}"
           echo "Tagged release: $TAG"

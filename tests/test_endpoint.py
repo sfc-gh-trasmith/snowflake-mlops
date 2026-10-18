@@ -17,13 +17,13 @@ import pandas as pd
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "source"))
+from config import MODEL_NAME, REALTIME_CONFIG, SCHEMA, env_setting
 from snowpark_session import create_snowpark_session
 
-PROD_DATABASE = "SNOW_MLOPS_PROD"
-PROD_SCHEMA = "ML"
-PROD_WAREHOUSE = "SNOW_MLOPS_PROD_WH"
-MODEL_NAME = "MLOPS_FRAUD_DETECTOR"
-GATEWAY_NAME = "FRAUD_DETECTOR_GATEWAY"
+PROD_DATABASE = env_setting("prod", "database")
+PROD_SCHEMA = SCHEMA
+PROD_WAREHOUSE = env_setting("prod", "warehouse")
+GATEWAY_NAME = REALTIME_CONFIG.get("gateway_name", f"{MODEL_NAME}_GATEWAY")
 
 
 @pytest.fixture(scope="module")

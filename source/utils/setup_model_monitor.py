@@ -1,10 +1,11 @@
 """Set up Model Monitor — CI entry point.
 
 Creates or updates the model monitor in the target environment.
-Called by deploy-prod after batch inference has populated BATCH_PREDICTIONS.
+Called by deploy-prod after batch inference validation has scored the promoted
+version. MODEL_VERSION pins the version to monitor (default: the model default).
 
 Optionally creates a Snowflake Alert for drift threshold breaches when
-a baseline table is configured.
+the monitor has a baseline (monitor.baseline in config).
 
 Usage:
     uv run python scripts/setup_model_monitor.py [--env prod]
@@ -16,7 +17,7 @@ import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "source"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from config import MONITOR_CONFIG
 from monitoring.model_monitor import (
     create_drift_alert,

@@ -12,13 +12,16 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "source"))
+import os
+
+from config import MODEL_NAME, SCHEMA, env_database
 from snowpark_session import create_snowpark_session
 
-STAGE_DATABASE = "SNOW_MLOPS_STAGE"
-STAGE_SCHEMA = "ML"
-PROD_DATABASE = "SNOW_MLOPS_PROD"
-PROD_SCHEMA = "ML"
-MODEL_NAME = "MLOPS_FRAUD_DETECTOR"
+# Source and target registries come from source/configs/config.yml. CI can
+# override them with the GitHub variables passed as these env vars.
+STAGE_DATABASE = os.getenv("SNOWFLAKE_DATABASE_STAGE", env_database("stage"))
+PROD_DATABASE = os.getenv("SNOWFLAKE_DATABASE_PROD", env_database("prod"))
+STAGE_SCHEMA = PROD_SCHEMA = os.getenv("SNOWFLAKE_SCHEMA", SCHEMA)
 
 
 def promote(version: str, session=None):
