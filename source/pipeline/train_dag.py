@@ -104,12 +104,29 @@ def build_source_zip(out_dir: Path) -> Path:
 # wrapper pins them to the target environment before importing the step.
 
 
+def _git_sha() -> str:
+    """Commit the DAG is deployed from (CI: GITHUB_SHA; local: git HEAD)."""
+    if os.getenv("GITHUB_SHA"):
+        return os.environ["GITHUB_SHA"]
+    try:
+        import subprocess
+
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True, cwd=_SOURCE_DIR
+        ).stdout.strip()
+    except Exception:
+        return "local"
+
+
 def runtime_env(cfg: dict) -> dict:
+    # Steps run in Snowflake (ML Job / stored procedure), not on the CI runner,
+    # so anything they read from the environment must be forwarded here.
     return {
         "SNOWFLAKE_DATABASE": cfg["database"],
         "SNOWFLAKE_SCHEMA": cfg["schema"],
         "SNOWFLAKE_WAREHOUSE": cfg["warehouse"],
         "SNOWFLAKE_COMPUTE_POOL": cfg["compute_pool"],
+        "GITHUB_SHA": _git_sha(),  # model version lineage: code -> model
     }
 
 
