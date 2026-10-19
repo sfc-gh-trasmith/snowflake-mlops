@@ -4,1705 +4,831 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="snowflake-source" content="cortex-agent-authored" />
-  <title>MLOps on Snowflake | End-to-End ML Operations Framework</title>
+  <title>MLOps on Snowflake | Snowflake ML</title>
   <script type="application/json" id="snowflake-report-metadata">
   {
-    "generated": "2026-09-09",
-    "intent": "Production-ready MLOps framework documentation — covers what MLOps is, Snowflake ML capabilities, Task DAG orchestration (Python SDK), ML Jobs (@remote), Feature Store, Model Training, Model Registry, batch and real-time inference, Gateway deployment, model monitoring, experiment tracking, CI/CD pipeline, rollback, RBAC, required GitHub variables, interactive notebooks, testing, and configuration",
+    "generated": "2026-10-19",
+    "intent": "Developer-guide style documentation for MLOps on Snowflake and the snowflake-mlops template, structured like docs.snowflake.com/en/developer-guide/snowflake-ml so sections can be reused in the official Snowflake ML docs.",
+    "dataSources": [
+      { "type": "repository", "path": "source/configs/config.yml", "notes": "All configuration keys and defaults quoted in the docs" },
+      { "type": "repository", "path": ".github/workflows/", "notes": "deploy.yml, scheduled-retrain.yml, rollback.yml, traffic-shift.yml" },
+      { "type": "repository", "path": "scripts/setup.sh, scripts/setup_cicd.sh", "notes": "Infrastructure, roles, OIDC users" },
+      { "type": "end-to-end-run", "notes": "Clean-slate DEV -> STAGE -> PROD run on 2026-10-18; troubleshooting entries come from failures fixed in that run" }
+    ],
     "sections": [
-      { "id": "overview", "title": "Overview", "producerNotes": "What is MLOps, Snowflake ML capabilities table, framework positioning, pipeline flow diagram, environment layout, project structure" },
-      { "id": "task-dag", "title": "Task DAG Orchestration", "producerNotes": "Python SDK DAG, configurable compute per step (SPCS vs warehouse), ML Jobs vs warehouse, PIPELINE_STAGE note, flow diagram" },
-      { "id": "feature-store", "title": "Feature Store", "producerNotes": "Dynamic Tables, entity registration, CUSTOMER_RISK_FEATURES + TRANSACTION_CONTEXT_FEATURES, versioning, refresh strategies, note on which FV is used in training" },
-      { "id": "model-training", "title": "Model Training", "producerNotes": "ML Jobs with @remote, cloudpickle, XGBoost, grouped holdout, champion scoring, in-step registration, ML_RUNTIME_DEPS single source of truth, dataset versioning" },
-      { "id": "model-registry", "title": "Model Registry", "producerNotes": "Auto-versioning, quality gate (template defaults 0.01), dual-platform registration, conda deps" },
-      { "id": "inference", "title": "Inference", "producerNotes": "Warehouse-based batch, SPCS services, Gateway canary deployment, autocapture" },
-      { "id": "monitoring", "title": "Model Monitoring", "producerNotes": "ML Observability, CREATE MODEL MONITOR, data flow, drift detection, lifecycle, ENABLE_MODEL_MONITOR" },
-      { "id": "experiment-tracking", "title": "Experiment Tracking", "producerNotes": "ExperimentTracking API, log_params, log_metrics, run management" },
-      { "id": "cicd", "title": "CI/CD Pipeline", "producerNotes": "deploy.yml jobs, two promotion paths, promote_only dispatch, scheduled retraining, notification channels, OIDC auth, release tagging" },
-      { "id": "rollback", "title": "Rollback", "producerNotes": "Manual workflow, version revert, service redeploy via gateway-config.yml" },
-      { "id": "rbac", "title": "RBAC & Security", "producerNotes": "MLOPS_STAGE_ROLE, MLOPS_PROD_ROLE, service users, network policy, branch protection, required GitHub variables table" },
-      { "id": "notebooks", "title": "Interactive Notebooks", "producerNotes": "Five notebooks (01-05), purpose of each, prerequisite chain, notebooks vs CI pipeline" },
-      { "id": "testing", "title": "Testing", "producerNotes": "test_config.py unit tests (no Snowflake), test_endpoint.py integration tests (live PROD), how to run each" },
-      { "id": "config", "title": "Configuration", "producerNotes": "config.py structure, compute mode, threshold defaults, deployment toggles, environment overrides, adding new pipeline steps" }
+      { "id": "overview", "title": "MLOps on Snowflake", "producerNotes": "Product-neutral overview; reusable in official docs" },
+      { "id": "lifecycle", "title": "The ML lifecycle on Snowflake", "producerNotes": "Lifecycle stage to Snowflake feature mapping" },
+      { "id": "reference-architecture", "title": "Reference architecture: environments and Git workflow", "producerNotes": "SVG diagram 1 (dev/stage/prod + Git)" },
+      { "id": "personas", "title": "Personas and responsibilities", "producerNotes": "SVG diagram 4 swimlane, responsibilities table" },
+      { "id": "template", "title": "The MLOps template", "producerNotes": "What the template provides" },
+      { "id": "template-architecture", "title": "Template architecture", "producerNotes": "SVG diagram 2" },
+      { "id": "training-pipeline", "title": "Training pipeline", "producerNotes": "SVG diagram 3, step table" },
+      { "id": "promotion", "title": "Promotion workflow", "producerNotes": "deploy.yml job steps" },
+      { "id": "journeys", "title": "Persona journeys", "producerNotes": "Step-by-step DS and MLE journeys" },
+      { "id": "get-started", "title": "Get started", "producerNotes": "setup.sh, generate_dataset.py, setup_cicd.sh, GitHub variables" },
+      { "id": "bring-your-own-model", "title": "Bring your own model", "producerNotes": "model block, build_dataset, train_model" },
+      { "id": "versioning", "title": "Versioning and lineage", "producerNotes": "Feature view immutability, per-run Dataset, model versions, git SHA" },
+      { "id": "quality-gate", "title": "Quality gate", "producerNotes": "Rules + champion/challenger; job summary" },
+      { "id": "serving", "title": "Serving", "producerNotes": "Batch Task, real-time services + gateway, REST" },
+      { "id": "monitoring", "title": "Monitoring", "producerNotes": "Model monitor, actuals, baseline, drift alert" },
+      { "id": "workflows", "title": "CI/CD workflows reference", "producerNotes": "Four workflows" },
+      { "id": "access-control", "title": "Access control", "producerNotes": "Roles from setup_cicd.sh" },
+      { "id": "multi-account", "title": "Multi-account setup", "producerNotes": "Out of template scope; steps based on Snowflake replication + CREATE MODEL FROM MODEL docs" },
+      { "id": "configuration", "title": "Configuration reference", "producerNotes": "config.yml sections" },
+      { "id": "troubleshooting", "title": "Troubleshooting", "producerNotes": "Issues found and fixed in the clean-slate run" }
     ]
   }
   </script>
   <style>
-    :root { color-scheme: light dark; }
+    :root {
+      color-scheme: light dark;
+      --fg: light-dark(#1e252f, #e3e8ef);
+      --muted: light-dark(#5b6675, #9aa6b5);
+      --bg: light-dark(#ffffff, #0f1724);
+      --panel: light-dark(#f6f8fb, #172235);
+      --border: light-dark(#d9dfe7, #2c3a50);
+      --accent: light-dark(#1a6ce7, #5aa2ff);
+      --accent-soft: light-dark(#e8f1fe, #16294a);
+      --note: light-dark(#eef6ff, #132a45);
+      --warn: light-dark(#fff6e5, #3a2a10);
+      --warn-border: light-dark(#f0b648, #a87720);
+      --dev: light-dark(#e9f7ef, #12301f);
+      --dev-b: light-dark(#3aa86b, #4cc483);
+      --stage: light-dark(#fff3e2, #3a2a12);
+      --stage-b: light-dark(#e38b1c, #f0a640);
+      --prod: light-dark(#eaf0ff, #17264a);
+      --prod-b: light-dark(#3a64d8, #6f93ff);
+      --git: light-dark(#f2eefc, #261c40);
+      --git-b: light-dark(#7a52cc, #a588ef);
+      --code-bg: light-dark(#f3f5f8, #111b2b);
+    }
+    * { box-sizing: border-box; }
     body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-      max-width: 880px; margin: 0 auto; padding: 48px 24px 48px 280px;
-      color: light-dark(#222, #e0e0e0);
-      background: light-dark(#fff, #0F1B2D);
-      line-height: 1.75;
-      font-size: 16px;
+      margin: 0; background: var(--bg); color: var(--fg);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      font-size: 16px; line-height: 1.65;
     }
-    /* Fixed left sidebar nav */
-    .sidebar {
-      position: fixed; top: 0; left: 0;
-      width: 250px; height: 100vh;
-      overflow-y: auto;
-      padding: 24px 16px;
-      background: light-dark(#f8fafc, #091420);
-      border-right: 1px solid light-dark(#e2e8f0, #1e3a5f);
-      z-index: 100;
+    .layout {
+      display: grid; grid-template-columns: minmax(0, 1fr); gap: 32px;
+      max-width: 1200px; margin: 0 auto; padding: clamp(16px, 4vw, 40px);
     }
-    .sidebar-title {
-      font-size: 0.75rem; font-weight: 700; text-transform: uppercase;
-      letter-spacing: 0.05em; color: light-dark(#11567F, #29B5E8);
-      margin: 0 0 12px 0; padding: 0;
+    @media (min-width: 1100px) {
+      .layout { grid-template-columns: minmax(0, 1fr) 240px; }
+      .toc { position: sticky; top: 24px; align-self: start; max-height: calc(100vh - 48px); overflow-y: auto; }
     }
-    .sidebar-list { list-style: none; padding: 0; margin: 0; }
-    .sidebar-list li { margin: 0; }
-    .sidebar-list a {
-      display: block; padding: 6px 10px; border-radius: 6px;
-      font-size: 0.88em; color: light-dark(#333, #ccc);
-      text-decoration: none; line-height: 1.4;
-    }
-    .sidebar-list a:hover {
-      background: light-dark(#e2e8f0, #1e3a5f);
-      color: light-dark(#11567F, #29B5E8);
-      text-decoration: none;
-    }
-    .back-to-top {
-      position: fixed; bottom: 24px; right: 24px;
-      width: 40px; height: 40px; border-radius: 50%;
-      background: #29B5E8; color: #fff;
-      border: none; cursor: pointer;
-      font-size: 1.2em; line-height: 40px; text-align: center;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.2);
-      z-index: 100; text-decoration: none;
-      display: flex; align-items: center; justify-content: center;
-    }
-    .back-to-top:hover { background: #11567F; text-decoration: none; }
-    @media (max-width: 900px) {
-      .sidebar { position: static; width: 100%; height: auto; border-right: none; border-bottom: 1px solid light-dark(#e2e8f0, #1e3a5f); }
-      body { padding: 24px 16px; max-width: 100%; }
-    }
-    h1 { font-size: 2rem; font-weight: 700; margin: 0 0 8px; color: light-dark(#111, #f0f0f0); }
-    h2 { font-size: 1.5rem; font-weight: 700; margin: 56px 0 18px; color: light-dark(#111, #f0f0f0); padding-bottom: 10px; border-bottom: 2px solid light-dark(#e2e8f0, #1e3a5f); }
-    h3 { font-size: 1.15rem; font-weight: 600; margin: 36px 0 12px; color: light-dark(#111, #e0e0e0); }
-    h4 { font-size: 1rem; font-weight: 600; margin: 24px 0 8px; color: light-dark(#333, #ccc); }
-    p { margin: 14px 0; }
-    a { color: light-dark(#11567F, #29B5E8); text-decoration: none; }
-    a:hover { text-decoration: underline; }
-    code { font-family: 'SF Mono', SFMono-Regular, Consolas, 'Liberation Mono', Menlo, monospace; background: light-dark(#f0f0f0, #2a2a3e); padding: 2px 6px; border-radius: 4px; font-size: 0.87em; }
-    pre { background: light-dark(#f5f7fa, #0a1420); border: 1px solid light-dark(#e0e0e0, #1e3a5f); padding: 16px 18px; overflow-x: auto; font-size: 0.85em; line-height: 1.55; border-radius: 8px; }
+    main { min-width: 0; max-width: 880px; }
+    .breadcrumb { font-size: 13px; color: var(--muted); margin-bottom: 8px; }
+    .breadcrumb span + span::before { content: " / "; }
+    h1 { font-size: clamp(28px, 4vw, 36px); line-height: 1.2; margin: 0 0 12px; }
+    h2 { font-size: 26px; margin: 56px 0 12px; padding-top: 8px; border-top: 1px solid var(--border); }
+    h3 { font-size: 20px; margin: 32px 0 8px; }
+    h4 { font-size: 16px; margin: 24px 0 6px; }
+    h2, h3, h4 { scroll-margin-top: 16px; }
+    .part { font-size: 13px; letter-spacing: .08em; text-transform: uppercase; color: var(--accent); margin: 64px 0 -40px; font-weight: 600; }
+    a { color: var(--accent); }
+    p, li { max-width: 78ch; }
+    .lead { font-size: 18px; color: var(--muted); }
+    .badge { display: inline-block; font-size: 12px; font-weight: 600; padding: 2px 10px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); margin: 0 6px 12px 0; }
+    .toc { font-size: 14px; border-left: 2px solid var(--border); padding-left: 16px; }
+    .toc strong { display: block; margin-bottom: 8px; font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+    .toc ol { list-style: none; padding: 0; margin: 0; }
+    .toc li { margin: 4px 0; }
+    .toc li.sub { padding-left: 12px; }
+    .toc a { color: var(--fg); text-decoration: none; }
+    .toc a:hover { color: var(--accent); }
+    .toc .grp { margin-top: 14px; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+    .callout { border-left: 4px solid var(--accent); background: var(--note); padding: 12px 16px; border-radius: 4px; margin: 16px 0; }
+    .callout.warn { border-color: var(--warn-border); background: var(--warn); }
+    .callout p { margin: 4px 0; }
+    .callout .t { font-weight: 700; display: block; margin-bottom: 2px; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .9em; background: var(--code-bg); padding: 1px 5px; border-radius: 4px; overflow-wrap: anywhere; }
+    pre code { overflow-wrap: normal; }
+    td:first-child code { white-space: nowrap; overflow-wrap: normal; }
+    pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 6px; padding: 14px 16px; overflow-x: auto; font-size: 13.5px; line-height: 1.5; }
     pre code { background: none; padding: 0; }
-    table { border-collapse: collapse; width: 100%; margin: 16px 0; font-size: 0.92em; }
-    th, td { border: 1px solid light-dark(#e0e0e0, #444); padding: 10px 14px; text-align: left; vertical-align: top; }
-    th { background: light-dark(#EDF7FC, #11293D); font-weight: 600; }
-    .note { background: light-dark(#EDF7FC, #0F1B2D); border-left: 4px solid #29B5E8; border-radius: 8px; padding: 16px 20px; margin: 20px 0; }
-    .note strong { display: block; margin-bottom: 6px; font-weight: 700; color: light-dark(#111, #e0e0e0); }
-    .subtitle { color: light-dark(#555, #aaa); font-size: 1.05rem; margin-bottom: 32px; }
-    .diagram { background: light-dark(#f8fafc, #1e1e30); border: 1px solid light-dark(#e2e8f0, #333); border-radius: 8px; padding: 20px; margin: 20px 0; font-family: 'SF Mono', monospace; font-size: 0.85em; line-height: 1.6; white-space: pre; overflow-x: auto; }
-    .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.8em; font-weight: 600; }
-    .badge-spcs { background: light-dark(#E0F4FC, #0F2A3D); color: light-dark(#11567F, #29B5E8); }
-    .badge-wh { background: light-dark(#E8F5E9, #1a3a2a); color: light-dark(#166534, #86efac); }
-
-    /* Workflow diagram — card-based S-pattern */
-    .workflow-diagram { margin: 28px -24px 36px; padding: 0 24px; overflow-x: auto; }
-    .wf-row { display: flex; align-items: stretch; gap: 10px; margin: 0; flex-wrap: nowrap; }
-    .wf-row-reverse { flex-direction: row-reverse; }
-    .wf-row-final { align-items: stretch; }
-    .wf-card {
-      flex: 1 1 0; min-width: 0;
-      background: light-dark(#f8fafc, #0F1B2D);
-      border: 1px solid light-dark(#e2e8f0, #1e3a5f);
-      border-radius: 10px; padding: 14px 16px;
-      display: flex; flex-direction: column;
-      overflow-wrap: break-word; word-break: break-word;
-    }
-    .wf-card code { font-size: 0.82em; word-break: break-all; }
-    .wf-card-approval {
-      flex: 1 1 0;
-      background: light-dark(#FFFDF5, #1a1a0f);
-      border: 2px dashed light-dark(#E8A317, #92700c);
-    }
-    .wf-card-prod {
-      flex: 1.8 1 0;
-      background: light-dark(#F0FDF9, #0a1f1a);
-      border: 2px dashed light-dark(#11567F, #29B5E8);
-    }
-    .wf-num {
-      display: inline-block; width: 28px; height: 28px; line-height: 28px;
-      border-radius: 50%; text-align: center;
-      background: #29B5E8;
-      color: #fff; font-size: 0.72em; font-weight: 700;
-      margin-bottom: 6px;
-    }
-    .wf-card-approval .wf-num { background: #E8A317; }
-    .wf-card-prod .wf-num { background: #11567F; }
-    .wf-title { font-weight: 700; font-size: 0.88em; margin-bottom: 4px; color: light-dark(#111, #f0f0f0); }
-    .wf-desc { font-size: 0.78em; color: light-dark(#555, #aaa); line-height: 1.45; flex: 1; }
-    .wf-desc-list { font-size: 0.78em; color: light-dark(#555, #aaa); line-height: 1.45; }
-    .wf-desc-list ul { margin: 4px 0 0 16px; padding: 0; }
-    .wf-desc-list li { margin: 2px 0; }
-    .wf-arrow { font-size: 1.3em; color: light-dark(#94a3b8, #4a6a8a); flex-shrink: 0; padding: 0 2px; display: flex; align-items: center; }
-    .wf-arrow-left { transform: scaleX(1); }
-    .wf-row-connector { font-size: 1.3em; color: light-dark(#94a3b8, #4a6a8a); padding: 6px 0; margin: 0; line-height: 1; }
-    .wf-connector-right { text-align: right; padding-right: 40px; }
-    .wf-connector-left { text-align: left; padding-left: 40px; }
-    /* Syntax highlighting */
-    .hljs { background: transparent !important; padding: 0; }
-    .hl-kw { color: light-dark(#11567F, #29B5E8); font-weight: 600; }
-    .hl-str { color: light-dark(#22863a, #7ee787); }
-    .hl-cm { color: light-dark(#6a737d, #8b949e); font-style: italic; }
-    .hl-fn { color: light-dark(#6f42c1, #d2a8ff); }
-    .hl-num { color: light-dark(#005cc5, #79c0ff); }
-    .hl-dec { color: light-dark(#e36209, #ffa657); }
-    .hl-op { color: light-dark(#d73a49, #ff7b72); }
+    .table-wrap { overflow-x: auto; margin: 16px 0; }
+    table { border-collapse: collapse; width: 100%; font-size: 14.5px; }
+    th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; vertical-align: top; }
+    th { background: var(--panel); font-weight: 600; }
+    figure { margin: 24px 0; }
+    figure .diagram { border: 1px solid var(--border); border-radius: 8px; background: var(--panel); padding: 12px; overflow-x: auto; }
+    figure svg { display: block; width: 100%; min-width: 640px; height: auto; }
+    figcaption { font-size: 13.5px; color: var(--muted); margin-top: 8px; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin: 16px 0; }
+    .card { border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; background: var(--panel); }
+    .card h4 { margin: 0 0 6px; }
+    .card p { margin: 0; font-size: 14.5px; }
+    ol.steps { counter-reset: s; list-style: none; padding-left: 0; }
+    ol.steps > li { counter-increment: s; position: relative; padding-left: 40px; margin: 12px 0; }
+    ol.steps > li::before { content: counter(s); position: absolute; left: 0; top: 0; width: 26px; height: 26px; border-radius: 50%; background: var(--accent); color: light-dark(#fff, #0f1724); font-size: 13px; font-weight: 700; display: flex; align-items: center; justify-content: center; }
+    /* SVG diagram styles (theme-aware) */
+    .d-text { fill: var(--fg); font: 13px -apple-system, "Segoe UI", sans-serif; }
+    .d-small { fill: var(--muted); font: 11.5px -apple-system, "Segoe UI", sans-serif; }
+    .d-title { fill: var(--fg); font: 600 14px -apple-system, "Segoe UI", sans-serif; }
+    .d-lane { fill: var(--fg); font: 700 12px -apple-system, "Segoe UI", sans-serif; letter-spacing: .06em; }
+    .d-box { fill: var(--bg); stroke: var(--border); stroke-width: 1.2; }
+    .d-dev { fill: var(--dev); stroke: var(--dev-b); stroke-width: 1.4; }
+    .d-stage { fill: var(--stage); stroke: var(--stage-b); stroke-width: 1.4; }
+    .d-prod { fill: var(--prod); stroke: var(--prod-b); stroke-width: 1.4; }
+    .d-git { fill: var(--git); stroke: var(--git-b); stroke-width: 1.4; }
+    .d-acct { fill: none; stroke: var(--muted); stroke-width: 1.2; stroke-dasharray: 6 4; }
+    .d-arrow { stroke: var(--fg); stroke-width: 1.6; fill: none; }
+    .d-arrow-dash { stroke: var(--muted); stroke-width: 1.4; fill: none; stroke-dasharray: 5 4; }
+    .d-ok { stroke: var(--dev-b); stroke-width: 1.6; fill: none; }
+    .d-bad { stroke: light-dark(#c9372c, #ff6b5e); stroke-width: 1.6; fill: none; }
+    .d-head { fill: var(--fg); }
+    .d-head-muted { fill: var(--muted); }
+    .d-diamond { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.4; }
+    .d-step { fill: var(--accent); }
+    .d-step-t { fill: light-dark(#ffffff, #0f1724); font: 700 11px -apple-system, "Segoe UI", sans-serif; }
   </style>
-  <link rel="stylesheet" href="/libs/highlight.js@11.10.0/github.min.css">
 </head>
 <body>
+<div class="layout">
+<main>
 
-  <nav class="sidebar">
-    <p class="sidebar-title">Contents</p>
-    <ul class="sidebar-list">
-      <li><a href="#overview">Overview</a></li>
-      <li><a href="#task-dag">Task DAG Orchestration</a></li>
-      <li><a href="#feature-store">Feature Store</a></li>
-      <li><a href="#model-training">Model Training</a></li>
-      <li><a href="#model-registry">Model Registry</a></li>
-      <li><a href="#inference">Inference</a></li>
-      <li><a href="#monitoring">Model Monitoring</a></li>
-      <li><a href="#experiment-tracking">Experiment Tracking</a></li>
-      <li><a href="#cicd">CI/CD Pipeline</a></li>
-      <li><a href="#rollback">Rollback</a></li>
-      <li><a href="#rbac">RBAC &amp; Security</a></li>
-      <li><a href="#notebooks">Notebooks</a></li>
-      <li><a href="#testing">Testing</a></li>
-      <li><a href="#config">Configuration</a></li>
-    </ul>
-  </nav>
+  <div class="breadcrumb"><span>Developer</span><span>Snowflake ML</span><span>MLOps on Snowflake</span></div>
+  <h1 id="overview">MLOps on Snowflake</h1>
+  <span class="badge">Guide</span><span class="badge">Open-source template</span>
+  <p class="lead">Build, validate, promote, serve, and monitor machine learning models across development, staging, and production environments, with Git as the system of record and Snowflake as the platform where data, features, models, and inference live together.</p>
 
-  <h1 id="top">MLOps on Snowflake</h1>
-  <p class="subtitle">End-to-End Machine Learning Operations Framework</p>
+  <p>MLOps is the set of practices that makes machine learning repeatable and safe in production: every model is traceable to the code and data that produced it, every promotion passes automated checks and a human approval, and production models are monitored and can be rolled back. On Snowflake, these practices run where the data already is: feature pipelines, training jobs, the model registry, inference, and monitoring are Snowflake objects, governed by the same roles and policies as your data.</p>
 
-  <h2 id="overview">Overview</h2>
-
-  <h3>What is MLOps?</h3>
-  <p>MLOps (Machine Learning Operations) is the set of practices that combines ML system development with reliable deployment and ongoing operations. It bridges the gap between data science experimentation and production-grade ML systems by standardizing how models are trained, validated, deployed, monitored, and retrained over time.</p>
-
-  <p>In practice, MLOps solves several critical challenges that ML teams face when moving from notebook prototypes to production:</p>
+  <p>This guide has two parts:</p>
   <ul>
-    <li><strong>Reproducibility</strong> &mdash; every training run is tracked with parameters, metrics, and data lineage</li>
-    <li><strong>Automation</strong> &mdash; pipelines run on schedule or on code change without manual intervention</li>
-    <li><strong>Quality gates</strong> &mdash; models must pass metric thresholds before reaching production</li>
-    <li><strong>Governance</strong> &mdash; human approval required for production deployments, with full audit trail</li>
-    <li><strong>Observability</strong> &mdash; drift detection and performance monitoring catch degradation early</li>
+    <li><strong>MLOps on Snowflake</strong>: the lifecycle, a reference architecture for dev/stage/prod with a Git workflow, and how responsibilities split between personas.</li>
+    <li><strong>The MLOps template</strong>: an open-source project that implements that architecture end to end, with an in-depth look at how it orchestrates training, gating, promotion, serving, and monitoring, and how to adopt it.</li>
   </ul>
 
-  <h3>End-to-End ML on Snowflake</h3>
-  <p><a href="https://docs.snowflake.com/en/developer-guide/snowflake-ml/overview">Snowflake ML</a> provides an integrated set of capabilities for the full machine learning lifecycle &mdash; from feature engineering through model serving and monitoring &mdash; all running on top of your governed data. Key platform capabilities this framework uses:</p>
-
-  <table>
-    <thead><tr><th>Capability</th><th>Snowflake Service</th><th>What It Does</th></tr></thead>
+  <h2 id="lifecycle">The ML lifecycle on Snowflake</h2>
+  <p>Each stage of the lifecycle maps to a Snowflake ML capability. Because they share one platform, the handoffs between stages (features to training, training to registry, registry to inference, inference to monitoring) are object references rather than file exports.</p>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Lifecycle stage</th><th>Snowflake capability</th><th>What it gives you for MLOps</th></tr></thead>
     <tbody>
-      <tr><td>Feature Engineering</td><td><a href="https://docs.snowflake.com/developer-guide/snowflake-ml/feature-store/overview">Feature Store</a></td><td>Dynamic Tables with incremental refresh, point-in-time correct dataset generation</td></tr>
-      <tr><td>Pipeline Orchestration</td><td><a href="https://docs.snowflake.com/en/user-guide/tasks-intro">Snowflake Tasks</a> (DAG)</td><td>Serverless or warehouse-based task graphs that schedule and sequence pipeline steps with dependencies, retries, and cron scheduling</td></tr>
-      <tr><td>ML Compute</td><td><a href="https://docs.snowflake.com/developer-guide/snowflake-ml/ml-jobs/overview">ML Jobs</a> (<code>@remote</code>)</td><td>Execute Python functions on GPU/CPU compute pools (SPCS) for training and feature engineering</td></tr>
-      <tr><td>Experiment Tracking</td><td><a href="https://docs.snowflake.com/developer-guide/snowflake-ml/experiments">Experiments</a></td><td>Log parameters, metrics, and artifacts for every training run</td></tr>
-      <tr><td>Model Management</td><td><a href="https://docs.snowflake.com/developer-guide/snowflake-ml/model-registry/overview">Model Registry</a></td><td>Versioned model storage with conda dependencies, cross-environment replication</td></tr>
-      <tr><td>Batch Inference</td><td>Model Registry <code>run()</code></td><td>Score datasets at warehouse scale using registered models</td></tr>
-      <tr><td>Real-Time Inference</td><td><a href="https://docs.snowflake.com/en/developer-guide/snowpark-container-services/overview">SPCS</a> + Gateway</td><td>Container services with canary deployment and git-driven traffic management</td></tr>
-      <tr><td>Monitoring</td><td><a href="https://docs.snowflake.com/developer-guide/snowflake-ml/model-registry/model-observability">ML Observability</a></td><td>Prediction drift, feature distribution shift, automated alerting</td></tr>
-      <tr><td>Lineage</td><td><a href="https://docs.snowflake.com/developer-guide/snowflake-ml/ml-lineage">ML Lineage</a></td><td>Trace data &rarr; features &rarr; datasets &rarr; models for reproducibility and compliance</td></tr>
+      <tr><td>Data validation</td><td>SQL over source tables</td><td>Fail a pipeline early on row counts, null rates, or stale data</td></tr>
+      <tr><td>Feature engineering</td><td>Snowflake Feature Store (feature views on dynamic tables)</td><td>Versioned, incrementally refreshed features; point-in-time correct training sets</td></tr>
+      <tr><td>Training data</td><td>Datasets</td><td>Immutable, versioned snapshots that a model version can be traced back to</td></tr>
+      <tr><td>Training</td><td>ML Jobs on compute pools, or stored procedures on warehouses</td><td>Training runs inside Snowflake with no data movement; choose compute per step</td></tr>
+      <tr><td>Experiment tracking</td><td>Experiment tracking</td><td>Parameters, metrics, and models logged per run</td></tr>
+      <tr><td>Model management</td><td>Snowflake Model Registry</td><td>Versioned models with metrics, lineage, aliases, and a default version; copy versions across databases</td></tr>
+      <tr><td>Batch inference</td><td><code>ModelVersion.run</code> in a scheduled task</td><td>Scored tables that record which model version produced each prediction</td></tr>
+      <tr><td>Real-time inference</td><td>Model services on Snowpark Container Services, gateways</td><td>HTTPS REST endpoints; one stable URL with weighted traffic across versions for canary rollouts</td></tr>
+      <tr><td>Monitoring</td><td>ML Observability (model monitors), alerts</td><td>Drift and performance metrics over time, with alerting</td></tr>
+      <tr><td>Orchestration</td><td>Tasks and task graphs (Python API)</td><td>Multi-step pipelines that run inside Snowflake on a schedule or on demand</td></tr>
+      <tr><td>Governance</td><td>Role-based access control, workload identity federation</td><td>Least-privilege roles per environment; CI authenticates with OIDC instead of stored secrets</td></tr>
     </tbody>
-  </table>
+  </table></div>
+  <p>See <a href="https://docs.snowflake.com/en/developer-guide/snowflake-ml/overview">Snowflake ML overview</a> for the full set of capabilities.</p>
 
-  <h3>About This Framework</h3>
-  <p>This is an <strong>open-source, production-ready template</strong> for building end-to-end ML pipelines on Snowflake. It provides starter code that data science teams can plug their own model logic into, while giving ML engineering teams a standardized process for training, validating, deploying, and monitoring models.</p>
-
-  <div class="note">
-    <strong>Extensible by design</strong>
-    The framework is intentionally modular. Swap in your own training algorithm, add new feature engineering steps, adjust quality gate thresholds, or extend the CI/CD workflows &mdash; the surrounding infrastructure (orchestration, versioning, deployment, monitoring) stays the same. Use it as a bootstrap for your MLOps workflows, or as a baseline to extend with <a href="https://docs.snowflake.com/en/user-guide/cortex-code/cortex-code">Cortex Code</a> for agentic ML.
+  <h2 id="reference-architecture">Reference architecture: environments and Git workflow</h2>
+  <p>A common, robust pattern separates three environments, each with its own database, warehouse, and compute pool, and drives every change through Git:</p>
+  <div class="cards">
+    <div class="card"><h4>DEV</h4><p>Data scientists explore data, iterate on features and models in notebooks, and run the pipeline on demand. Nothing here serves traffic.</p></div>
+    <div class="card"><h4>STAGE</h4><p>Every merge to <code>main</code> retrains the model from the committed code, gates it on quality and against the production champion, and validates batch and monitoring end to end.</p></div>
+    <div class="card"><h4>PROD</h4><p>After a human approves, the gated version is promoted, scheduled batch scoring and real-time endpoints are updated, monitoring is attached, and the release is tagged in Git.</p></div>
   </div>
 
-  <p><strong>For data science teams:</strong> replace the training function, update feature engineering, adjust thresholds. Everything else (CI/CD, versioning, deployment, monitoring) works automatically.</p>
-  <p><strong>For ML engineering teams:</strong> standardized pipeline structure, automated CI/CD with approval gates, environment isolation (DEV &rarr; STAGE &rarr; PROD), reproducible deployments, and one-click rollback.</p>
-
-  <h3>Pipeline Flow</h3>
-  <div class="workflow-diagram">
-    <!-- Row 1: Steps 01-04 (left to right) -->
-    <div class="wf-row">
-      <div class="wf-card">
-        <div class="wf-num">01</div>
-        <div class="wf-title">Feature Engineering</div>
-        <div class="wf-desc">Dynamic Tables refresh features from raw transactions. Configurable refresh intervals via Feature Store.</div>
-      </div>
-      <div class="wf-arrow">&rarr;</div>
-      <div class="wf-card">
-        <div class="wf-num">02</div>
-        <div class="wf-title">Generate Dataset</div>
-        <div class="wf-desc">Create a versioned training dataset from the Feature View. Version mirrors the Feature View version (V1, V2, ...) &mdash; reuses existing on reruns, creates new on schema changes.</div>
-      </div>
-      <div class="wf-arrow">&rarr;</div>
-      <div class="wf-card">
-        <div class="wf-num">03</div>
-        <div class="wf-title">Train Model</div>
-        <div class="wf-desc">ML Job runs XGBoost on a compute pool. Experiment tracking logs params and metrics for every run.</div>
-      </div>
-      <div class="wf-arrow">&rarr;</div>
-      <div class="wf-card">
-        <div class="wf-num">04</div>
-        <div class="wf-title">Evaluate</div>
-        <div class="wf-desc">Compute precision, recall, F1, and AUC. Compare against threshold to determine pass/fail.</div>
-      </div>
+  <figure>
+    <div class="diagram">
+    <svg viewBox="0 0 1000 480" role="img" aria-labelledby="d1t">
+      <title id="d1t">MLOps reference architecture: Git workflow driving DEV, STAGE, and PROD environments</title>
+      <defs>
+        <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="d-head"/></marker>
+        <marker id="ahm" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="d-head-muted"/></marker>
+      </defs>
+      <!-- Git lane -->
+      <rect x="10" y="10" width="980" height="140" rx="10" class="d-git" opacity=".55"/>
+      <text x="26" y="34" class="d-lane">GIT (GITHUB)</text>
+      <rect x="40" y="58" width="160" height="62" rx="8" class="d-box"/>
+      <text x="120" y="84" text-anchor="middle" class="d-title">Feature branch</text>
+      <text x="120" y="104" text-anchor="middle" class="d-small">code, features, config</text>
+      <rect x="232" y="58" width="170" height="62" rx="8" class="d-box"/>
+      <text x="317" y="84" text-anchor="middle" class="d-title">Pull request</text>
+      <text x="317" y="104" text-anchor="middle" class="d-small">lint, unit tests, review</text>
+      <rect x="434" y="58" width="150" height="62" rx="8" class="d-box"/>
+      <text x="509" y="84" text-anchor="middle" class="d-title">Merge to main</text>
+      <text x="509" y="104" text-anchor="middle" class="d-small">triggers deploy</text>
+      <rect x="616" y="58" width="170" height="62" rx="8" class="d-box"/>
+      <text x="701" y="84" text-anchor="middle" class="d-title">PROD approval</text>
+      <text x="701" y="104" text-anchor="middle" class="d-small">human reviewer gate</text>
+      <rect x="818" y="58" width="150" height="62" rx="8" class="d-box"/>
+      <text x="893" y="84" text-anchor="middle" class="d-title">Release tag</text>
+      <text x="893" y="104" text-anchor="middle" class="d-small">prod/V&lt;n&gt;-&lt;ts&gt;</text>
+      <path d="M200 89 H228" class="d-arrow" marker-end="url(#ah)"/>
+      <path d="M402 89 H430" class="d-arrow" marker-end="url(#ah)"/>
+      <path d="M584 89 H612" class="d-arrow" marker-end="url(#ah)"/>
+      <path d="M786 89 H814" class="d-arrow" marker-end="url(#ah)"/>
+      <!-- Environments -->
+      <rect x="10" y="190" width="310" height="230" rx="10" class="d-dev"/>
+      <text x="26" y="214" class="d-lane">DEV</text>
+      <text x="26" y="242" class="d-text">Explore data, notebooks</text>
+      <text x="26" y="264" class="d-text">Iterate on features and model</text>
+      <text x="26" y="286" class="d-text">Run the pipeline on demand</text>
+      <text x="26" y="308" class="d-text">Experiment tracking</text>
+      <text x="26" y="400" class="d-small">Database, warehouse, compute pool per env</text>
+      <rect x="345" y="190" width="310" height="230" rx="10" class="d-stage"/>
+      <text x="361" y="214" class="d-lane">STAGE</text>
+      <text x="361" y="242" class="d-text">Retrain from committed code</text>
+      <text x="361" y="264" class="d-text">Register candidate version</text>
+      <text x="361" y="286" class="d-text">Quality gate + champion check</text>
+      <text x="361" y="308" class="d-text">Validate batch scoring + monitor</text>
+      <text x="361" y="400" class="d-small">Runs automatically on every merge</text>
+      <rect x="680" y="190" width="310" height="230" rx="10" class="d-prod"/>
+      <text x="696" y="214" class="d-lane">PROD</text>
+      <text x="696" y="242" class="d-text">Promote gated version (registry copy)</text>
+      <text x="696" y="264" class="d-text">Batch: scheduled scoring task</text>
+      <text x="696" y="286" class="d-text">Real-time: service + gateway canary</text>
+      <text x="696" y="308" class="d-text">Monitor drift and performance</text>
+      <text x="696" y="400" class="d-small">Changes only after approval</text>
+      <!-- Git -> env -->
+      <path d="M120 120 V186" class="d-arrow-dash" marker-end="url(#ahm)"/>
+      <text x="128" y="160" class="d-small">develop</text>
+      <path d="M509 120 V186" class="d-arrow" marker-end="url(#ah)"/>
+      <text x="517" y="160" class="d-small">deploy-stage</text>
+      <path d="M701 120 V186" class="d-arrow" marker-end="url(#ah)"/>
+      <text x="709" y="160" class="d-small">deploy-prod</text>
+      <!-- STAGE -> PROD -->
+      <path d="M655 340 H676" class="d-arrow" marker-end="url(#ah)"/>
+      <text x="667" y="364" class="d-small" text-anchor="middle">promote</text>
+      <!-- PROD champion -> STAGE -->
+      <path d="M690 378 H660" class="d-arrow-dash" marker-end="url(#ahm)"/>
+      <text x="560" y="380" class="d-small">champion</text>
+      <!-- Feedback loop -->
+      <path d="M835 420 V458 H165 V424" class="d-arrow-dash" marker-end="url(#ahm)"/>
+      <text x="500" y="474" text-anchor="middle" class="d-small">monitoring signals and scheduled retraining feed the next iteration</text>
+    </svg>
     </div>
+    <figcaption>Figure 1. Git drives every change. STAGE retrains and gates each merge against the PROD champion; PROD changes only after a human approval, and monitoring feeds the next iteration.</figcaption>
+  </figure>
 
-    <!-- Connector: row 1 to row 2 -->
-    <div class="wf-row-connector wf-connector-right">&darr;</div>
-
-    <!-- Row 2: Steps 05-08 (right to left) -->
-    <div class="wf-row wf-row-reverse">
-      <div class="wf-card">
-        <div class="wf-num">08</div>
-        <div class="wf-title">Real-Time Inference</div>
-        <div class="wf-desc">Canary SPCS service deployment behind a Gateway. Health check before traffic split. Autocapture enabled.</div>
-      </div>
-      <div class="wf-arrow wf-arrow-left">&larr;</div>
-      <div class="wf-card">
-        <div class="wf-num">07</div>
-        <div class="wf-title">Batch Inference</div>
-        <div class="wf-desc">Run predictions on the full dataset. Write results with timestamps to the predictions table for monitoring.</div>
-      </div>
-      <div class="wf-arrow wf-arrow-left">&larr;</div>
-      <div class="wf-card">
-        <div class="wf-num">06</div>
-        <div class="wf-title">Register Model</div>
-        <div class="wf-desc">Quality gate passes &rarr; register versioned model in STAGE registry with conda dependencies.</div>
-      </div>
-      <div class="wf-arrow wf-arrow-left">&larr;</div>
-      <div class="wf-card">
-        <div class="wf-num">05</div>
-        <div class="wf-title">Quality Gate</div>
-        <div class="wf-desc">Metrics must meet thresholds (configurable in <code>config.py</code>). Fails the pipeline if not met — model stays unregistered.</div>
-      </div>
-    </div>
-
-    <!-- Connector: row 2 to row 3 -->
-    <div class="wf-row-connector wf-connector-left">&darr;</div>
-
-    <!-- Row 3: Steps 09-10 -->
-    <div class="wf-row wf-row-final">
-      <div class="wf-card wf-card-approval">
-        <div class="wf-num">09</div>
-        <div class="wf-title">Human Approval</div>
-        <div class="wf-desc">GitHub Environment protection rule requires a reviewer. Scheduled retrain notifies via a configurable channel (GitHub Issue by default; swap for Slack, Teams, email, etc.).</div>
-      </div>
-      <div class="wf-arrow">&rarr;</div>
-      <div class="wf-card wf-card-prod">
-        <div class="wf-num">10</div>
-        <div class="wf-title">PROD Deployment</div>
-        <div class="wf-desc-list">
-          <ul>
-            <li>Replicate model from STAGE to PROD</li>
-            <li>Refresh Feature Views in PROD</li>
-            <li>Run batch inference on production data</li>
-            <li>Canary SPCS service deploy (80/20 default)</li>
-            <li>Set up model monitoring</li>
-            <li>Create git tag <code>prod/VN-TIMESTAMP</code></li>
-          </ul>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <h3>Environment Layout</h3>
-  <table>
-    <thead><tr><th>Environment</th><th>Database</th><th>Purpose</th><th>Compute Pool</th><th>Warehouse</th></tr></thead>
-    <tbody>
-      <tr><td>DEV</td><td><code>SNOW_MLOPS_DEV</code></td><td>Developer experimentation</td><td><code>SNOW_MLOPS_DEV_POOL</code></td><td><code>SNOW_MLOPS_DEV_WH</code></td></tr>
-      <tr><td>STAGE</td><td><code>SNOW_MLOPS_STAGE</code></td><td>Automated CI validation</td><td><code>SNOW_MLOPS_STAGE_POOL</code></td><td><code>SNOW_MLOPS_STAGE_WH</code></td></tr>
-      <tr><td>PROD</td><td><code>SNOW_MLOPS_PROD</code></td><td>Production serving</td><td><code>SNOW_MLOPS_PROD_POOL</code></td><td><code>SNOW_MLOPS_PROD_WH</code></td></tr>
-    </tbody>
-  </table>
-
-  <p>Source data always resides in <code>SNOW_MLOPS_PROD.ML</code>. DEV and STAGE read from it for training but write all artifacts (features, models, results) to their own databases.</p>
-
-  <h3>Project Structure</h3>
-  <pre><code class="language-plaintext">snowflake-mlops/
-├── .github/workflows/
-│   ├── deploy.yml                 # Main: code-quality → deploy-stage → deploy-prod (also runs on PRs)
-│   ├── scheduled-retrain.yml      # Cron (Mon 6AM PT): retrain → register candidate → notify
-│   ├── traffic-shift.yml          # Gateway traffic allocation (gateway-config.yml or dispatch)
-│   └── rollback.yml               # Manual: rollback to previous model version
-├── deploy/                        # Promotion (single-account) + rollback helper
-│   ├── promote.py
-│   ├── set_default_version.py     # Set model DEFAULT version (rollback)
-│   └── strategies/
-│       └── single_account.py      # Cross-DB replication STAGE → PROD
-├── gateway-config.yml             # Real-time gateway traffic targets
-├── scripts/
-│   ├── setup.sh                   # Infrastructure provisioning
-│   ├── setup_cicd.sh              # OIDC users + network policy
-│   ├── generate_dataset.py        # Synthetic fraud data
-│   ├── apply_gateway_config.py    # Gateway traffic allocation
-│   └── deploy_prod_service.py     # PROD canary gateway deploy
-├── source/
-│   ├── configs/config.yml         # Pipeline configuration (YAML, single source of truth)
-│   ├── config.py                  # YAML loader + resolve_env_config() / step_compute()
-│   ├── snowpark_session.py        # Session helper (SSO + OIDC)
-│   ├── feature_engineering/       # Step package: feature engineering
-│   │   ├── entrypoint.py          # CLI: calls feature_engineering.run(session)
-│   │   ├── feature_engineering.py # run(session) -> dict
-│   │   ├── data_checks.py         # Upstream data checks (run first)
-│   │   └── feature_views.py       # Feature View definitions (canonical schema)
-│   ├── model_training/            # Step package: model training + registration
-│   │   ├── entrypoint.py
-│   │   ├── training.py            # build_dataset / train_model / register
-│   │   └── metrics.py             # Metrics per task_type
-│   ├── evaluate/                  # Step package: evaluation + quality gate
-│   │   ├── entrypoint.py
-│   │   ├── evaluation.py
-│   │   └── gate.py                # Absolute rules + champion comparison
-│   ├── pipeline/
-│   │   ├── train_dag.py           # Training Task DAG (per-step warehouse/SPCS)
-│   │   └── batch_inference_dag.py # Scheduled batch scoring Task + CI validation
-│   ├── monitoring/
-│   │   └── model_monitor.py       # Model Monitor lifecycle management
-│   ├── serving/
-│   │   ├── batch_inference.py     # Batch inference utilities
-│   │   └── signature.py           # Signature-driven casting + output validation
-│   └── utils/                     # CI helpers
-│       ├── wait_for_task.py           # Poll task DAG completion, export evaluation result
-│       ├── read_candidate.py          # Gate result -> Job Summary + model_version
-│       ├── serving_flags.py           # batch/realtime/monitor flags for CI
-│       ├── setup_model_monitor.py     # Create/validate model monitor
-│       └── notify_candidate.py        # GitHub Issue for retrain candidates
-├── tests/
-│   ├── test_config.py             # Config + quality gate / champion tests
-│   ├── test_pipeline_steps.py     # DAG wiring / step contract tests
-│   ├── test_gap_fillers.py        # Metrics, validation, data checks, serving, gateway, monitor
-│   └── test_endpoint.py           # Integration tests
-└── notebooks/                     # Educational Jupyter notebooks (01-05)</code></pre>
-
-  <h3>One-Time Setup</h3>
-  <p>Before the CI pipeline can run, three setup steps must be completed <strong>once</strong> by an account admin:</p>
-  <table>
-    <thead><tr><th>Step</th><th>Script</th><th>What It Does</th></tr></thead>
-    <tbody>
-      <tr>
-        <td>1. Infrastructure</td>
-        <td><code>bash scripts/setup.sh</code></td>
-        <td>Creates DEV / STAGE / PROD databases, schemas, warehouses (<code>MEDIUM</code>, auto-suspend 120s), compute pools (<code>CPU_X64_M</code>, 1–3 nodes), and three general-purpose stages per environment: <code>ML_ARTIFACTS</code>, <code>DAG_STAGE</code>, <code>JOB_STAGE</code>. Also grants <code>EXECUTE TASK</code>, <code>EXECUTE MANAGED TASK</code>, and <code>BIND SERVICE ENDPOINT</code> at the account level.</td>
-      </tr>
-      <tr>
-        <td>2. Synthetic data</td>
-        <td><code>uv run python scripts/generate_dataset.py</code></td>
-        <td>Generates synthetic fraud data in <code>SNOW_MLOPS_PROD.ML</code> (and a mirror in DEV): <strong>5,000 customers</strong>, <strong>500 merchants</strong> across 12 risk-weighted categories, <strong>100,000 transactions</strong> over 90 days at <strong>~3% fraud rate</strong>. Fraud is injected with correlated signals (high amounts, late-night hours, high-risk merchants). Seeds are fixed (42/43/44) for reproducibility. Creates tables: <code>CUSTOMER_PROFILES</code>, <code>MERCHANT_DATA</code>, <code>RAW_TRANSACTIONS</code>.</td>
-      </tr>
-      <tr>
-        <td>3. CI/CD users &amp; OIDC</td>
-        <td><code>bash scripts/setup_cicd.sh</code></td>
-        <td>Creates OIDC service users (<code>SVC_GITHUB_ACTIONS_STAGE</code>, <code>SVC_GITHUB_ACTIONS</code>), attaches roles, sets up a network policy for GitHub Actions IP ranges, and configures branch protection. <strong>Edit the script first</strong> — it contains <code>&lt;your-github-...&gt;</code> placeholders for your org and repo. The script self-checks and exits with an error if any placeholder is still present.</td>
-      </tr>
-    </tbody>
-  </table>
-  <p>After these three steps: set the required GitHub variables (see <a href="#rbac">RBAC &amp; Security</a>), push to <code>main</code>, and the first CI run will proceed automatically.</p>
-
-  <h3>Source Table Schemas</h3>
-  <p>All pipeline source data lives in <code>SNOW_MLOPS_PROD.ML</code>. These tables are created by <code>generate_dataset.py</code>; adapt them to your own data when customizing the template:</p>
-  <table>
-    <thead><tr><th>Table</th><th>Key Columns</th><th>Notes</th></tr></thead>
-    <tbody>
-      <tr><td><code>RAW_TRANSACTIONS</code></td><td><code>TXN_ID</code>, <code>CUSTOMER_ID</code>, <code>MERCHANT_ID</code>, <code>AMOUNT</code>, <code>TIMESTAMP</code>, <code>DEVICE_TYPE</code>, <code>IS_FRAUD</code> (label)</td><td>~100K rows; used as the Feature Store spine and provides labels for training</td></tr>
-      <tr><td><code>CUSTOMER_PROFILES</code></td><td><code>CUSTOMER_ID</code>, <code>CREDIT_SCORE</code>, <code>ACCOUNT_AGE_DAYS</code>, <code>ANNUAL_INCOME</code></td><td>One row per customer; joined in feature engineering for profile enrichment</td></tr>
-      <tr><td><code>MERCHANT_DATA</code></td><td><code>MERCHANT_ID</code>, <code>CATEGORY</code>, <code>RISK_SCORE</code></td><td>One row per merchant; joined to derive <code>IS_HIGH_RISK_MERCHANT</code> and <code>MERCHANT_RISK_SCORE</code></td></tr>
-    </tbody>
-  </table>
-
-
-  <h2 id="task-dag">Task DAG Orchestration</h2>
-
-  <p>The pipeline is defined using the <strong>Python SDK</strong> (<code>snowflake.core.task.dagv1</code>) which provides a programmatic interface for creating and managing Snowflake Tasks. This approach is preferred over raw SQL because it's easier to modify, test, and integrate with CI/CD.</p>
-
-  <h3>How Code Gets from GitHub to Snowflake</h3>
-  <p>Understanding the deployment flow is critical. Nothing runs "on" GitHub except orchestration commands:</p>
-  <pre><code class="language-plaintext">GitHub Actions CI Runner                    Snowflake
-─────────────────────────                    ─────────────────────────────────
-1. Checkout repo code
-2. Connect to Snowflake (OIDC)
-3. Run: train_dag.py --deploy
-   ├─ resolve_env_config(env) picks the
-   │  target DB / schema / WH / pool
-   ├─ Zips step packages + config.py    ──▶  PUT source.zip to @PIPELINE_STAGE
-   │  + configs/config.yml                   (imported by both compute modes)
-   └─ DAG SDK creates tasks             ──▶  CREATE OR REPLACE TASK per step
-      (one wrapper per step, chosen by       (@remote ML Job payload, or an
-       pipeline_steps.&lt;step&gt;.compute)         anonymous stored procedure)
-
-4. Run: train_dag.py --execute
-   └─ dag_op.run(dag)                     ──▶  EXECUTE TASK MLOPS_DEMO_TASK
-
-5. Poll: utils/wait_for_task.py           ◀──  Reads TASK_HISTORY every 30s
-   (blocks until all 3 tasks complete,
-    exports the evaluation result)
-
-                                               Snowflake Task Scheduler fires:
-                                               ├─ FEATURE_ENG: ML Job on compute pool
-                                               │   → feature_engineering.run(session)
-                                               ├─ TRAIN_MODEL: ML Job on compute pool
-                                               │   → model_training.training.run(session)
-                                               │     (trains, scores champion, registers)
-                                               └─ EVALUATE: anonymous sproc on warehouse
-                                                   (IMPORTS=('@PIPELINE_STAGE/source.zip'))
-                                                   → evaluate.evaluation.run(session)
-                                                     (quality gate; drops version on fail)
-
-6. Run: utils/read_candidate.py           ◀──  Gate result → Job Summary, model_version
-7. Run: pipeline/batch_inference_dag.py   ──▶  mv.run() scores on warehouse
-        --validate --env stage</code></pre>
-
-  <div class="note">
-    <strong>Key insight:</strong> The ML logic does not live in the DAG file. Each step is a package under <code>source/</code> whose logic module exposes one function, <code>run(session)</code>. The DAG builds a thin wrapper around it whose only job is to import the step module, call <code>run()</code>, and return JSON. For <strong>SPCS</strong>, that wrapper is an <code>@remote</code> ML Job; <code>cloudpickle</code> serializes only the wrapper, so <code>source.zip</code> is mounted into the container explicitly via <code>imports=</code>. For <strong>warehouse</strong>, the wrapper is an anonymous stored procedure whose <code>IMPORTS</code> clause points at the same staged <code>source.zip</code>.
-  </div>
-
-  <div class="note">
-    <strong>The same config ships with the code</strong>
-    <code>source.zip</code> contains <code>config.py</code> and <code>configs/config.yml</code>, so step modules import settings at module level exactly as they do locally (<code>from config import MODEL_NAME, TRAINING_PARAMS</code>). <code>config.py</code> reads the YAML through the module loader, which works whether it is on disk or inside a zip import. The one thing that differs per run is the target environment: each wrapper sets <code>SNOWFLAKE_DATABASE</code> / <code>SCHEMA</code> / <code>WAREHOUSE</code> / <code>COMPUTE_POOL</code> from <code>resolve_env_config(env)</code> <em>before</em> importing the step. This matters on SPCS, where the container sets its own <code>SNOWFLAKE_DATABASE</code> to the ML Job stage's database.
-  </div>
-
-  <div class="note">
-    <strong><code>PIPELINE_STAGE</code> vs <code>setup.sh</code> stages</strong>
-    <code>scripts/setup.sh</code> creates three stages for general use: <code>ML_ARTIFACTS</code>, <code>DAG_STAGE</code>, and <code>JOB_STAGE</code>. The pipeline uses a separate stage called <code>PIPELINE_STAGE</code>, which is <strong>created automatically</strong> by <code>train_dag.py --deploy</code> at CI time. You do not need to create <code>PIPELINE_STAGE</code> manually — it is provisioned idempotently on every deploy run.
-  </div>
-
-  <h3>Alternative: submit_file vs @remote</h3>
-  <table>
-    <thead><tr><th>Approach</th><th>How code reaches Snowflake</th><th>Best for</th></tr></thead>
-    <tbody>
-      <tr><td><code>@remote</code> (this template, SPCS steps)</td><td>Cloudpickle serializes the step wrapper; <code>source.zip</code> mounted via <code>imports=</code></td><td>Uniform step contract, per-step pip deps, GPU options</td></tr>
-      <tr><td><code>submit_file("train.py")</code></td><td>Uploads raw .py file to stage</td><td>Standalone scripts, simpler debugging</td></tr>
-      <tr><td><code>submit_directory("src/")</code></td><td>Uploads entire directory + requirements.txt</td><td>Complex multi-file projects with cross-imports</td></tr>
-    </tbody>
-  </table>
-
-  <h3>DAG Flow</h3>
-  <div class="workflow-diagram">
-    <div class="wf-row">
-      <div class="wf-card">
-        <div class="wf-num">R</div>
-        <div class="wf-title">MLOPS_DEMO_TASK</div>
-        <div class="wf-desc">Root task. Orchestrates the DAG. Cron schedule (configurable) or triggered via <code>EXECUTE TASK</code> from CI.</div>
-      </div>
-      <div class="wf-arrow">&rarr;</div>
-      <div class="wf-card">
-        <div class="wf-num">1</div>
-        <div class="wf-title">FEATURE_ENG</div>
-        <div class="wf-desc">Registers both Feature Views in the Feature Store via <code>source/feature_engineering/feature_views.py</code>. Creates the <code>CUSTOMER</code> entity with join key <code>CUSTOMER_ID</code>. Refresh intervals come from config. <span class="badge badge-spcs">SPCS</span></div>
-      </div>
-      <div class="wf-arrow">&rarr;</div>
-      <div class="wf-card">
-        <div class="wf-num">2</div>
-        <div class="wf-title">TRAIN_MODEL</div>
-        <div class="wf-desc">Builds the training Dataset (Feature View + labels). Trains on a grouped holdout split, scores the PROD champion on the same holdout, and registers the candidate in the Model Registry (via Experiment Tracking when enabled). <span class="badge badge-spcs">SPCS</span></div>
-      </div>
-      <div class="wf-arrow">&rarr;</div>
-      <div class="wf-card">
-        <div class="wf-num">3</div>
-        <div class="wf-title">EVALUATE</div>
-        <div class="wf-desc">Runs the quality gate: absolute metric rules plus champion comparison. Pass: tags the version and marks <code>READY_FOR_REVIEW</code>. Fail: drops the candidate version and fails the DAG. <span class="badge badge-wh">WH</span></div>
-      </div>
-    </div>
-  </div>
-
-  <h3>Key Components</h3>
-  <table>
-    <thead><tr><th>SDK Class</th><th>Purpose</th></tr></thead>
-    <tbody>
-      <tr><td><code>DAG</code></td><td>Container for the task graph; defines root task name and warehouse</td></tr>
-      <tr><td><code>DAGTask</code></td><td>Individual task (step) within the DAG</td></tr>
-      <tr><td><code>DAGOperation</code></td><td>Operations on the DAG: deploy, run, get status</td></tr>
-      <tr><td>Anonymous stored procedure</td><td>Warehouse-mode task definition (<code>WITH ... AS PROCEDURE () ... CALL</code>)</td></tr>
-      <tr><td><code>@remote</code></td><td>ML Job definition (runs on compute pool via SPCS)</td></tr>
-      <tr><td><code>STEPS</code></td><td><code>source/pipeline/train_dag.py</code>: maps each task name to its step module and pip deps</td></tr>
-    </tbody>
-  </table>
-
-  <h3>Configurable Compute Per Step</h3>
-  <p>Each pipeline step independently runs on either a <strong>warehouse</strong> <span class="badge badge-wh">WH</span> or a <strong>compute pool</strong> <span class="badge badge-spcs">SPCS</span>, configured in <code>source/configs/config.yml</code>:</p>
-
-  <pre><code class="language-yaml">pipeline_steps:
-  feature_eng:
-    compute: spcs        # "warehouse" or "spcs"
-  train_model:
-    compute: spcs
-  evaluate:
-    compute: warehouse   # lightweight eval runs on warehouse</code></pre>
-
-  <table>
-    <thead><tr><th>Mode</th><th>When to Use</th><th>Implementation</th></tr></thead>
-    <tbody>
-      <tr><td><span class="badge badge-spcs">SPCS</span></td><td>GPU training, arbitrary pip packages, long-running compute</td><td><code>@remote</code> ML Job on the compute pool, <code>source.zip</code> mounted via <code>imports=</code></td></tr>
-      <tr><td><span class="badge badge-wh">WH</span></td><td>SQL-heavy, lightweight Python, cost-sensitive, no container cold start</td><td>Anonymous stored procedure with <code>IMPORTS=('@PIPELINE_STAGE/source.zip')</code></td></tr>
-    </tbody>
-  </table>
-
-  <div class="note">
-    <strong>Switching compute is a config change, never a code change</strong>
-    Both modes call the same <code>run(session)</code> function in the step's logic module. Because the step contract is uniform, the two wrappers in <code>train_dag.py</code> are generic — adding a step requires no new dispatch code, only an entry in <code>STEPS</code>. All-warehouse mode is fully supported for every step, including training.
-  </div>
-
-  <h3>DAG Definition Pattern</h3>
-  <p>The DAG is built generically from <code>STEPS</code>. <code>_task_def()</code> reads each step's configured compute and returns either an <code>@remote</code> ML Job or an anonymous stored procedure body:</p>
-  <pre><code class="language-python">from snowflake.core.task.dagv1 import DAG, DAGOperation, DAGTask
-from config import resolve_env_config, step_compute
-
-cfg = resolve_env_config(env)   # target DB / schema / WH / pool for this env
-
-def _task_def(task_name, cfg, ...):
-    mode = step_compute(STEPS[task_name]["config_key"])
-    if mode == "spcs":
-        return _remote_def(task_name, cfg, job_stage, source_zip)   # ML Job
-    return _sproc_def(task_name, cfg, imports, packages)           # anonymous sproc
-
-with DAG(DAG_NAME, warehouse=wh, stage_location=pipeline_stage) as dag:
-    tasks = {
-        name: DAGTask(name, definition=_task_def(name, cfg, ...), warehouse=wh)
-        for name in STEP_ORDER
-    }
-    for upstream, downstream in zip(STEP_ORDER, STEP_ORDER[1:]):
-        tasks[upstream] >> tasks[downstream]
-
-# Deploy to Snowflake
-schema_ref = root.databases[db].schemas[schema]
-DAGOperation(schema_ref).deploy(dag, mode=CreateMode.or_replace)</code></pre>
-
-  <p>Each wrapper body is the same few lines regardless of compute mode:</p>
-  <pre><code class="language-python">os.environ.update(env)   # pin target DB / schema / WH
-step = importlib.import_module(module)   # e.g. "model_training.training"
-return json.dumps(step.run(session))</code></pre>
-
-  <h3>Task Naming Convention</h3>
-  <p>The Python SDK prefixes child task names with the DAG name:</p>
+  <h3 id="principles">Design principles</h3>
   <ul>
-    <li>Root: <code>MLOPS_DEMO_TASK</code></li>
-    <li>Children: <code>MLOPS_DEMO_TASK$FEATURE_ENG</code>, <code>MLOPS_DEMO_TASK$TRAIN_MODEL</code>, <code>MLOPS_DEMO_TASK$EVALUATE</code></li>
+    <li><strong>Git is the source of truth.</strong> Feature logic, training code, configuration, and real-time traffic weights are all committed. Environments are rebuilt from the repository, not edited by hand.</li>
+    <li><strong>Train where you deploy from.</strong> The candidate promoted to PROD is the exact model version trained and validated in STAGE; promotion copies that version rather than retraining it.</li>
+    <li><strong>Automated checks, human decisions.</strong> Code quality, data checks, metric thresholds, and champion comparison are automated. Promotion to production requires an explicit approval.</li>
+    <li><strong>Everything is versioned and traceable.</strong> A production model version links back to its training dataset version, feature view version, experiment run, and Git commit.</li>
+    <li><strong>Least privilege per environment.</strong> CI uses separate roles for STAGE and PROD and authenticates with OIDC, so there are no long-lived credentials in the repository.</li>
   </ul>
 
-  <h3>CLI Usage</h3>
-  <pre><code class="language-python"># Deploy the DAG (creates/replaces tasks)
-python source/pipeline/train_dag.py --deploy --env stage
-
-# Execute (triggers the root task)
-python source/pipeline/train_dag.py --execute --env stage
-
-# Show recent task history
-python source/pipeline/train_dag.py --status --env stage</code></pre>
-  <p><code>--env</code> accepts <code>dev</code>, <code>stage</code>, or <code>prod</code>.</p>
-
-  <h3>Running a Single Step</h3>
-  <p>Each step package ships an <code>entrypoint.py</code> that calls the same <code>run(session)</code> the DAG invokes, so local behavior matches the pipeline exactly. The target environment comes from <code>SNOWFLAKE_DATABASE</code> / <code>SNOWFLAKE_SCHEMA</code> / <code>SNOWFLAKE_WAREHOUSE</code> (default: DEV):</p>
-  <pre><code class="language-bash">uv run python source/feature_engineering/entrypoint.py
-uv run --group ml-runtime python source/model_training/entrypoint.py
-uv run python source/evaluate/entrypoint.py</code></pre>
-
-
-  <h2 id="feature-store">Feature Store</h2>
-
-  <h3>Data Checks</h3>
-  <p>The <code>FEATURE_ENG</code> step first runs <code>source/feature_engineering/data_checks.py</code> against the source database/schema, using the <code>data_checks:</code> block in config. Each table key supports <code>min_rows</code>, <code>max_null_pct</code> (<code>{column: pct}</code>), and <code>freshness_column</code> + <code>max_age_hours</code>. All rules are optional; the step raises listing every failure, so bad upstream data stops the pipeline before features are built.</p>
-
-  <p>Features are managed via Snowflake's native <strong>Feature Store</strong> with Dynamic Tables for automatic refresh. The feature engineering step registers entities and feature views, then materializes 5000 rows of customer risk features.</p>
-
-  <h3>Feature View: CUSTOMER_RISK_FEATURES</h3>
-  <table>
-    <thead><tr><th>Feature</th><th>Type</th><th>Description</th></tr></thead>
+  <h2 id="personas">Personas and responsibilities</h2>
+  <p>MLOps works when each persona owns a clear part of the workflow and the handoffs are explicit. The template is organized so data scientists change only model-specific code and configuration, while ML engineers own the shared platform.</p>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Persona</th><th>Owns</th><th>Works in</th><th>Typical changes</th></tr></thead>
     <tbody>
-      <tr><td>TOTAL_TXN_COUNT</td><td>INT</td><td>Total transaction count</td></tr>
-      <tr><td>AVG_TXN_AMOUNT</td><td>FLOAT</td><td>Average transaction amount</td></tr>
-      <tr><td>MAX_TXN_AMOUNT</td><td>FLOAT</td><td>Maximum transaction amount</td></tr>
-      <tr><td>STDDEV_TXN_AMOUNT</td><td>FLOAT</td><td>Standard deviation of amounts</td></tr>
-      <tr><td>UNIQUE_MERCHANTS</td><td>INT</td><td>Number of unique merchants</td></tr>
-      <tr><td>ACTIVE_DAYS</td><td>INT</td><td>Days with activity</td></tr>
-      <tr><td>LATE_NIGHT_TXN_RATIO</td><td>FLOAT</td><td>Ratio of late-night transactions</td></tr>
-      <tr><td>CREDIT_SCORE</td><td>INT</td><td>Customer credit score</td></tr>
-      <tr><td>ACCOUNT_AGE_DAYS</td><td>INT</td><td>Account age in days</td></tr>
-      <tr><td>ANNUAL_INCOME</td><td>FLOAT</td><td>Annual income</td></tr>
+      <tr><td><strong>Data scientist</strong></td><td>Features, model, evaluation criteria</td><td>DEV, feature branches, pull requests</td><td><code>feature_views.py</code>, <code>training.py</code> (<code>build_dataset</code>, <code>train_model</code>), <code>model:</code> and <code>quality_gate:</code> in <code>config.yml</code>, notebooks</td></tr>
+      <tr><td><strong>ML engineer</strong></td><td>Pipeline, CI/CD, serving, monitoring</td><td>All environments, workflows, infrastructure scripts</td><td>Task DAG, serving and monitoring code, workflows, compute choices, roles, gateway traffic</td></tr>
+      <tr><td><strong>Model approver</strong> (model owner, risk, or lead)</td><td>The decision to put a version in production</td><td>GitHub (PROD environment approval), job summary</td><td>Approve or reject a deployment; request a rollback</td></tr>
+      <tr><td><strong>Platform administrator</strong></td><td>Accounts, roles, network policy, compute</td><td>Snowflake account, repository settings</td><td>Run setup scripts, manage grants, branch protection, budgets</td></tr>
     </tbody>
-  </table>
+  </table></div>
 
-  <p>Join key: <code>CUSTOMER_ID</code>. Version: <code>V1</code> (bump when feature SQL changes).</p>
+  <figure>
+    <div class="diagram">
+    <svg viewBox="0 0 1000 400" role="img" aria-labelledby="d4t">
+      <title id="d4t">Persona swimlanes across one model release</title>
+      <defs>
+        <marker id="ah4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="d-head"/></marker>
+      </defs>
+      <rect x="10" y="10" width="980" height="90" rx="8" class="d-dev" opacity=".7"/>
+      <text x="22" y="34" class="d-lane">DATA SCIENTIST</text>
+      <rect x="10" y="108" width="980" height="90" rx="8" class="d-stage" opacity=".7"/>
+      <text x="22" y="132" class="d-lane">AUTOMATION (CI + SNOWFLAKE)</text>
+      <rect x="10" y="206" width="980" height="90" rx="8" class="d-git" opacity=".7"/>
+      <text x="22" y="230" class="d-lane">MODEL APPROVER</text>
+      <rect x="10" y="304" width="980" height="86" rx="8" class="d-prod" opacity=".7"/>
+      <text x="22" y="328" class="d-lane">ML ENGINEER</text>
+      <!-- DS steps -->
+      <rect x="40" y="44" width="150" height="46" rx="6" class="d-box"/><text x="115" y="64" text-anchor="middle" class="d-text">Explore + prototype</text><text x="115" y="80" text-anchor="middle" class="d-small">DEV notebooks</text>
+      <rect x="215" y="44" width="150" height="46" rx="6" class="d-box"/><text x="290" y="64" text-anchor="middle" class="d-text">Change features/model</text><text x="290" y="80" text-anchor="middle" class="d-small">feature branch + PR</text>
+      <rect x="560" y="44" width="160" height="46" rx="6" class="d-box"/><text x="640" y="64" text-anchor="middle" class="d-text">Review job summary</text><text x="640" y="80" text-anchor="middle" class="d-small">candidate vs champion</text>
+      <!-- Automation -->
+      <rect x="215" y="142" width="150" height="46" rx="6" class="d-box"/><text x="290" y="162" text-anchor="middle" class="d-text">PR checks</text><text x="290" y="178" text-anchor="middle" class="d-small">lint + unit tests</text>
+      <rect x="390" y="142" width="150" height="46" rx="6" class="d-box"/><text x="465" y="162" text-anchor="middle" class="d-text">deploy-stage</text><text x="465" y="178" text-anchor="middle" class="d-small">train, gate, validate</text>
+      <rect x="745" y="142" width="150" height="46" rx="6" class="d-box"/><text x="820" y="162" text-anchor="middle" class="d-text">deploy-prod</text><text x="820" y="178" text-anchor="middle" class="d-small">promote, serve, monitor</text>
+      <!-- Approver -->
+      <rect x="745" y="240" width="150" height="46" rx="6" class="d-box"/><text x="820" y="260" text-anchor="middle" class="d-text">Approve PROD</text><text x="820" y="276" text-anchor="middle" class="d-small">or reject / roll back</text>
+      <!-- MLE -->
+      <rect x="40" y="336" width="200" height="44" rx="6" class="d-box"/><text x="140" y="355" text-anchor="middle" class="d-text">Own pipeline + workflows</text><text x="140" y="370" text-anchor="middle" class="d-small">compute, roles, serving</text>
+      <rect x="560" y="336" width="160" height="44" rx="6" class="d-box"/><text x="640" y="355" text-anchor="middle" class="d-text">Shift canary traffic</text><text x="640" y="370" text-anchor="middle" class="d-small">gateway-config.yml</text>
+      <rect x="745" y="336" width="150" height="44" rx="6" class="d-box"/><text x="820" y="355" text-anchor="middle" class="d-text">Watch monitors</text><text x="820" y="370" text-anchor="middle" class="d-small">drift alerts, rollback</text>
+      <!-- flow -->
+      <path d="M190 67 H211" class="d-arrow" marker-end="url(#ah4)"/>
+      <path d="M290 90 V138" class="d-arrow" marker-end="url(#ah4)"/>
+      <path d="M365 165 H386" class="d-arrow" marker-end="url(#ah4)"/>
+      <path d="M540 160 L600 92" class="d-arrow" marker-end="url(#ah4)"/>
+      <path d="M640 90 V263 H741" class="d-arrow" marker-end="url(#ah4)"/>
+      <path d="M820 240 V192" class="d-arrow" marker-end="url(#ah4)"/>
+      <path d="M895 170 H970 V358 H899" class="d-arrow" marker-end="url(#ah4)"/>
+      <path d="M745 358 H724" class="d-arrow" marker-end="url(#ah4)"/>
+    </svg>
+    </div>
+    <figcaption>Figure 2. One release across personas. Data scientists change model code through a pull request; automation trains and gates in STAGE; an approver promotes; ML engineers own the pipeline, shift canary traffic, and watch monitors.</figcaption>
+  </figure>
 
-  <h3>Feature View: TRANSACTION_CONTEXT_FEATURES</h3>
-  <table>
-    <thead><tr><th>Feature</th><th>Type</th><th>Description</th></tr></thead>
+  <p class="part">Part 2</p>
+  <h2 id="template">The MLOps template</h2>
+  <p>The <strong>snowflake-mlops</strong> template is an open-source repository that implements the reference architecture above with GitHub Actions and Snowflake ML. It ships with a working example (a fraud classifier on synthetic data) and is model-agnostic: you swap in your own features and model, and the platform pieces (versioning, gating, promotion, serving, monitoring, rollback) keep working.</p>
+  <div class="cards">
+    <div class="card"><h4>Pipeline</h4><p>A Snowflake task graph: data checks and feature engineering, training and registration, evaluation and gating. Each step runs on a warehouse or a compute pool, chosen in config.</p></div>
+    <div class="card"><h4>Promotion</h4><p>Code-driven (merge to main) and data-driven (weekly retrain). PROD requires approval and receives the exact STAGE version.</p></div>
+    <div class="card"><h4>Serving</h4><p>Batch, real-time, or both. A scheduled scoring task, and per-version inference services behind a gateway with canary weights in Git.</p></div>
+    <div class="card"><h4>Operations</h4><p>Model monitor with ground truth, drift alerts, one-click rollback, release tags, and a job summary comparing every candidate with the champion.</p></div>
+  </div>
+  <div class="callout"><span class="t">Scope</span><p>The template targets a single Snowflake account with one database per environment. For separate accounts per environment, see <a href="#multi-account">Multi-account setup</a>.</p></div>
+
+  <h2 id="template-architecture">Template architecture</h2>
+  <p>GitHub Actions orchestrates releases; all ML work runs in Snowflake. CI authenticates to Snowflake with OIDC workload identity, using a STAGE role for training and validation and a PROD role for promotion and serving. Source data lives in PROD and is read by every environment; each environment writes its own feature views, datasets, models, and results.</p>
+
+  <figure>
+    <div class="diagram">
+    <svg viewBox="0 0 1000 690" role="img" aria-labelledby="d2t">
+      <title id="d2t">Template architecture: GitHub Actions, STAGE and PROD databases, registry promotion, serving, and monitoring</title>
+      <defs>
+        <marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="d-head"/></marker>
+        <marker id="ah2m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="d-head-muted"/></marker>
+      </defs>
+      <!-- GitHub -->
+      <rect x="10" y="20" width="200" height="600" rx="10" class="d-git"/>
+      <text x="24" y="46" class="d-lane">GITHUB ACTIONS</text>
+      <rect x="24" y="62" width="172" height="74" rx="6" class="d-box"/>
+      <text x="110" y="84" text-anchor="middle" class="d-title">deploy.yml</text>
+      <text x="110" y="102" text-anchor="middle" class="d-small">code-quality</text>
+      <text x="110" y="117" text-anchor="middle" class="d-small">deploy-stage, deploy-prod</text>
+      <rect x="24" y="148" width="172" height="48" rx="6" class="d-box"/>
+      <text x="110" y="168" text-anchor="middle" class="d-title">scheduled-retrain.yml</text>
+      <text x="110" y="185" text-anchor="middle" class="d-small">weekly, STAGE only</text>
+      <rect x="24" y="208" width="172" height="48" rx="6" class="d-box"/>
+      <text x="110" y="228" text-anchor="middle" class="d-title">rollback.yml</text>
+      <text x="110" y="245" text-anchor="middle" class="d-small">revert default version</text>
+      <rect x="24" y="268" width="172" height="48" rx="6" class="d-box"/>
+      <text x="110" y="288" text-anchor="middle" class="d-title">traffic-shift.yml</text>
+      <text x="110" y="305" text-anchor="middle" class="d-small">gateway-config.yml</text>
+      <rect x="24" y="340" width="172" height="86" rx="6" class="d-box"/>
+      <text x="110" y="362" text-anchor="middle" class="d-title">OIDC auth</text>
+      <text x="110" y="380" text-anchor="middle" class="d-small">one service user</text>
+      <text x="110" y="395" text-anchor="middle" class="d-small">per environment</text>
+      <text x="110" y="412" text-anchor="middle" class="d-small">no stored secrets</text>
+      <rect x="24" y="440" width="172" height="76" rx="6" class="d-box"/>
+      <text x="110" y="462" text-anchor="middle" class="d-title">Job summary</text>
+      <text x="110" y="480" text-anchor="middle" class="d-small">candidate vs champion</text>
+      <text x="110" y="495" text-anchor="middle" class="d-small">gate rules, lineage</text>
+      <text x="110" y="560" text-anchor="middle" class="d-small">Environments: STAGE, PROD</text>
+      <text x="110" y="576" text-anchor="middle" class="d-small">(PROD requires reviewer)</text>
+      <!-- Snowflake account -->
+      <rect x="235" y="10" width="755" height="640" rx="12" class="d-acct"/>
+      <text x="250" y="32" class="d-lane">SNOWFLAKE ACCOUNT</text>
+      <!-- Source -->
+      <rect x="250" y="44" width="725" height="44" rx="6" class="d-box"/>
+      <text x="612" y="64" text-anchor="middle" class="d-title">Source data (PROD database)</text>
+      <text x="612" y="80" text-anchor="middle" class="d-small">RAW_TRANSACTIONS, CUSTOMER_PROFILES, MERCHANT_DATA: read by every environment</text>
+      <!-- STAGE -->
+      <rect x="250" y="104" width="350" height="516" rx="10" class="d-stage"/>
+      <text x="264" y="128" class="d-lane">STAGE DATABASE</text>
+      <text x="264" y="148" class="d-small">MLOPS_STAGE_ROLE</text>
+      <rect x="266" y="160" width="318" height="232" rx="8" class="d-box"/>
+      <text x="425" y="182" text-anchor="middle" class="d-title">Training task graph</text>
+      <rect x="282" y="194" width="286" height="50" rx="6" class="d-stage"/>
+      <text x="425" y="214" text-anchor="middle" class="d-text">FEATURE_ENG</text>
+      <text x="425" y="231" text-anchor="middle" class="d-small">data checks, feature views (reuse or new version)</text>
+      <rect x="282" y="262" width="286" height="50" rx="6" class="d-stage"/>
+      <text x="425" y="282" text-anchor="middle" class="d-text">TRAIN_MODEL (ML Job)</text>
+      <text x="425" y="299" text-anchor="middle" class="d-small">Dataset snapshot, train, score champion, register</text>
+      <rect x="282" y="330" width="286" height="50" rx="6" class="d-stage"/>
+      <text x="425" y="350" text-anchor="middle" class="d-text">EVALUATE (warehouse)</text>
+      <text x="425" y="367" text-anchor="middle" class="d-small">metric rules + champion comparison</text>
+      <path d="M425 244 V258" class="d-arrow" marker-end="url(#ah2)"/>
+      <path d="M425 312 V326" class="d-arrow" marker-end="url(#ah2)"/>
+      <rect x="266" y="408" width="152" height="60" rx="6" class="d-box"/>
+      <text x="342" y="430" text-anchor="middle" class="d-text">Feature Store</text>
+      <text x="342" y="447" text-anchor="middle" class="d-small">feature views, entities</text>
+      <rect x="432" y="408" width="152" height="60" rx="6" class="d-box"/>
+      <text x="508" y="430" text-anchor="middle" class="d-text">Datasets</text>
+      <text x="508" y="447" text-anchor="middle" class="d-small">one version per run</text>
+      <rect x="266" y="480" width="152" height="60" rx="6" class="d-box"/>
+      <text x="342" y="502" text-anchor="middle" class="d-text">Experiments</text>
+      <text x="342" y="519" text-anchor="middle" class="d-small">params, metrics</text>
+      <rect x="432" y="480" width="152" height="60" rx="6" class="d-box"/>
+      <text x="508" y="502" text-anchor="middle" class="d-text">Model Registry</text>
+      <text x="508" y="519" text-anchor="middle" class="d-small">candidate versions</text>
+      <text x="425" y="570" text-anchor="middle" class="d-small">Validation: batch scoring on candidate,</text>
+      <text x="425" y="586" text-anchor="middle" class="d-small">monitor create + verify + drop</text>
+      <!-- PROD -->
+      <rect x="645" y="104" width="330" height="516" rx="10" class="d-prod"/>
+      <text x="659" y="128" class="d-lane">PROD DATABASE</text>
+      <text x="659" y="148" class="d-small">MLOPS_PROD_ROLE</text>
+      <rect x="661" y="160" width="298" height="62" rx="6" class="d-box"/>
+      <text x="810" y="182" text-anchor="middle" class="d-text">Model Registry</text>
+      <text x="810" y="199" text-anchor="middle" class="d-small">promoted versions; default = champion</text>
+      <text x="810" y="213" text-anchor="middle" class="d-small">lineage comment copied from STAGE</text>
+      <rect x="661" y="236" width="298" height="62" rx="6" class="d-box"/>
+      <text x="810" y="258" text-anchor="middle" class="d-text">Batch scoring task</text>
+      <text x="810" y="275" text-anchor="middle" class="d-small">cron -&gt; BATCH_PREDICTIONS (append)</text>
+      <text x="810" y="290" text-anchor="middle" class="d-small">MODEL_VERSION, SCORED_AT, RUN_ID</text>
+      <rect x="661" y="312" width="298" height="112" rx="6" class="d-box"/>
+      <text x="810" y="334" text-anchor="middle" class="d-text">Real-time serving</text>
+      <rect x="677" y="346" width="130" height="34" rx="5" class="d-prod"/>
+      <text x="742" y="368" text-anchor="middle" class="d-small">SERVICE_V(n-1) 80%</text>
+      <rect x="817" y="346" width="126" height="34" rx="5" class="d-prod"/>
+      <text x="880" y="368" text-anchor="middle" class="d-small">SERVICE_V(n) 20%</text>
+      <rect x="677" y="388" width="266" height="28" rx="5" class="d-box"/>
+      <text x="810" y="407" text-anchor="middle" class="d-small">Gateway: one stable HTTPS URL (REST)</text>
+      <rect x="661" y="438" width="298" height="62" rx="6" class="d-box"/>
+      <text x="810" y="460" text-anchor="middle" class="d-text">Model monitor + drift alert</text>
+      <text x="810" y="477" text-anchor="middle" class="d-small">predictions joined to actuals; baseline</text>
+      <text x="810" y="492" text-anchor="middle" class="d-small">PSI &gt; threshold -&gt; DRIFT_ALERTS</text>
+      <rect x="661" y="514" width="298" height="48" rx="6" class="d-box"/>
+      <text x="810" y="535" text-anchor="middle" class="d-text">Feature Store (PROD)</text>
+      <text x="810" y="551" text-anchor="middle" class="d-small">features for scoring and clients</text>
+      <!-- arrows -->
+      <path d="M196 100 H262" class="d-arrow" marker-end="url(#ah2)"/>
+      <path d="M110 620 V668 H810 V624" class="d-arrow" marker-end="url(#ah2)"/>
+      <text x="455" y="684" class="d-small" text-anchor="middle">deploy-prod after PROD approval (MLOPS_PROD_ROLE)</text>
+      <path d="M584 500 H606 V191 H657" class="d-arrow" marker-end="url(#ah2)"/>
+      <text x="618" y="430" class="d-small" text-anchor="middle" transform="rotate(-90 618 430)">promote (FROM MODEL)</text>
+      <path d="M661 212 H632 V355 H572" class="d-arrow-dash" marker-end="url(#ah2m)"/>
+      <text x="642" y="290" class="d-small" text-anchor="middle" transform="rotate(-90 642 290)">champion</text>
+    </svg>
+    </div>
+    <figcaption>Figure 3. Template architecture. deploy-stage runs the training task graph in STAGE; the PROD default version is scored as the champion during training; deploy-prod copies the gated version into the PROD registry and updates batch scoring, real-time services, and monitoring.</figcaption>
+  </figure>
+
+  <h3 id="project-layout">Project layout</h3>
+<pre><code>.github/workflows/      deploy.yml, scheduled-retrain.yml, rollback.yml, traffic-shift.yml
+deploy/                 promote.py, set_default_version.py, strategies/single_account.py
+scripts/                setup.sh, setup_cicd.sh, generate_dataset.py,
+                        deploy_prod_service.py, apply_gateway_config.py
+source/
+  configs/config.yml    single source of truth for pipeline settings
+  config.py             loads config.yml, resolves per-environment names
+  feature_engineering/  data_checks.py, feature_views.py, feature_engineering.py
+  model_training/       training.py (your model), metrics.py
+  evaluate/             evaluation.py, gate.py
+  serving/              batch_inference.py, signature.py
+  monitoring/           model_monitor.py
+  pipeline/             train_dag.py, batch_inference_dag.py
+  utils/                CI helpers (wait_for_task, read_candidate, serving_flags, ...)
+gateway-config.yml      real-time traffic weights (edit + merge to shift traffic)
+notebooks/              01-06: setup, feature store, training, registry, DAG, REST inference
+tests/                  unit tests (no Snowflake) + endpoint integration tests</code></pre>
+
+  <h2 id="training-pipeline">Training pipeline</h2>
+  <p>The training pipeline is a Snowflake task graph named <code>MLOPS_DEMO_TASK</code>, deployed and run by <code>source/pipeline/train_dag.py</code>. Each step is a package under <code>source/</code> exposing <code>run(session) -&gt; dict</code>. At deploy time the step code and configuration are zipped and staged; each step then runs either as an <strong>ML Job</strong> on a compute pool or as a <strong>stored procedure</strong> on a warehouse, according to <code>pipeline_steps</code> in <code>config.yml</code>. Steps hand results to each other through the <code>PIPELINE_RESULTS</code> table.</p>
+
+  <figure>
+    <div class="diagram">
+    <svg viewBox="0 0 1000 300" role="img" aria-labelledby="d3t">
+      <title id="d3t">Training pipeline flow from data checks to quality gate</title>
+      <defs>
+        <marker id="ah3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="d-head"/></marker>
+      </defs>
+      <text x="14" y="26" class="d-lane">FEATURE_ENG</text>
+      <text x="374" y="26" class="d-lane">TRAIN_MODEL</text>
+      <text x="734" y="26" class="d-lane">EVALUATE</text>
+      <rect x="10" y="40" width="160" height="80" rx="8" class="d-box"/>
+      <text x="90" y="68" text-anchor="middle" class="d-title">Data checks</text>
+      <text x="90" y="88" text-anchor="middle" class="d-small">rows, nulls, freshness</text>
+      <text x="90" y="104" text-anchor="middle" class="d-small">fail fast</text>
+      <rect x="190" y="40" width="160" height="80" rx="8" class="d-box"/>
+      <text x="270" y="68" text-anchor="middle" class="d-title">Feature views</text>
+      <text x="270" y="88" text-anchor="middle" class="d-small">same schema: reuse</text>
+      <text x="270" y="104" text-anchor="middle" class="d-small">new version: create</text>
+      <rect x="370" y="40" width="160" height="80" rx="8" class="d-box"/>
+      <text x="450" y="68" text-anchor="middle" class="d-title">Dataset snapshot</text>
+      <text x="450" y="88" text-anchor="middle" class="d-small">V1_&lt;UTC timestamp&gt;</text>
+      <text x="450" y="104" text-anchor="middle" class="d-small">point-in-time join</text>
+      <rect x="550" y="40" width="160" height="80" rx="8" class="d-box"/>
+      <text x="630" y="62" text-anchor="middle" class="d-title">Train + register</text>
+      <text x="630" y="82" text-anchor="middle" class="d-small">grouped holdout</text>
+      <text x="630" y="98" text-anchor="middle" class="d-small">score PROD champion</text>
+      <text x="630" y="114" text-anchor="middle" class="d-small">log version V&lt;n+1&gt;</text>
+      <polygon points="820,40 900,80 820,120 740,80" class="d-diamond"/>
+      <text x="820" y="76" text-anchor="middle" class="d-title">Gate</text>
+      <text x="820" y="93" text-anchor="middle" class="d-small">rules + champion</text>
+      <path d="M170 80 H186" class="d-arrow" marker-end="url(#ah3)"/>
+      <path d="M350 80 H366" class="d-arrow" marker-end="url(#ah3)"/>
+      <path d="M530 80 H546" class="d-arrow" marker-end="url(#ah3)"/>
+      <path d="M710 80 H736" class="d-arrow" marker-end="url(#ah3)"/>
+      <rect x="700" y="176" width="140" height="74" rx="8" class="d-dev"/>
+      <text x="770" y="200" text-anchor="middle" class="d-title">Pass</text>
+      <text x="770" y="219" text-anchor="middle" class="d-small">quality_gate=PASSED</text>
+      <text x="770" y="235" text-anchor="middle" class="d-small">candidate ready</text>
+      <rect x="852" y="176" width="140" height="74" rx="8" class="d-box" style="stroke: light-dark(#c9372c, #ff6b5e)"/>
+      <text x="922" y="200" text-anchor="middle" class="d-title">Fail</text>
+      <text x="922" y="219" text-anchor="middle" class="d-small">version dropped</text>
+      <text x="922" y="235" text-anchor="middle" class="d-small">task fails, CI stops</text>
+      <path d="M800 112 L775 172" class="d-ok" marker-end="url(#ah3)"/>
+      <path d="M842 112 L912 172" class="d-bad" marker-end="url(#ah3)"/>
+      <text x="10" y="200" class="d-small">Every step reads config.yml and runs the same run(session) on a warehouse or compute pool.</text>
+      <text x="10" y="220" class="d-small">The model version records metrics, task type, Dataset lineage, experiment run, and git commit.</text>
+      <text x="10" y="240" class="d-small">Champion = default version of the PROD model, scored on the candidate's holdout.</text>
+    </svg>
+    </div>
+    <figcaption>Figure 4. Training pipeline. A failed gate removes the candidate from the registry, so STAGE only ever holds versions that passed.</figcaption>
+  </figure>
+
+  <div class="table-wrap"><table>
+    <thead><tr><th>Step</th><th>Default compute</th><th>What it does</th></tr></thead>
     <tbody>
-      <tr><td>AMOUNT_TO_AVG_RATIO</td><td>FLOAT</td><td>Transaction amount relative to customer average</td></tr>
-      <tr><td>IS_HIGH_RISK_MERCHANT</td><td>BOOLEAN</td><td>Whether merchant is flagged as high-risk</td></tr>
-      <tr><td>MERCHANT_RISK_SCORE</td><td>FLOAT</td><td>Risk score assigned to the merchant</td></tr>
-      <tr><td>HOUR_OF_DAY</td><td>INT</td><td>Hour when the transaction occurred (0-23)</td></tr>
-      <tr><td>IS_WEEKEND</td><td>BOOLEAN</td><td>Whether transaction occurred on a weekend</td></tr>
-      <tr><td>IS_LATE_NIGHT</td><td>BOOLEAN</td><td>Whether transaction occurred between 11PM-5AM</td></tr>
-      <tr><td>DEVICE_TYPE</td><td>VARCHAR</td><td>Device used for the transaction</td></tr>
-      <tr><td>MERCHANT_CATEGORY</td><td>VARCHAR</td><td>Merchant category code</td></tr>
+      <tr><td><code>FEATURE_ENG</code></td><td>Compute pool (ML Job)</td><td>Runs <code>data_checks</code> on source tables, then registers the entities and feature views. A feature view version is immutable: if it exists with the same schema it is reused; if the columns changed without a version bump, the step fails.</td></tr>
+      <tr><td><code>TRAIN_MODEL</code></td><td>Compute pool (ML Job)</td><td>Generates a new Dataset version from the feature view, trains on a grouped split, computes task-appropriate metrics, scores the PROD champion on the same holdout, and logs a new model version with lineage, metrics, and <code>task=</code> for ML Observability.</td></tr>
+      <tr><td><code>EVALUATE</code></td><td>Warehouse (stored procedure)</td><td>Applies <code>quality_gate.metrics</code> rules and the champion comparison. On pass, records the decision on the version; on fail, drops the version and fails the task.</td></tr>
     </tbody>
-  </table>
+  </table></div>
+  <p>Run the pipeline on demand from your machine:</p>
+<pre><code>uv run python source/pipeline/train_dag.py --deploy --env dev
+uv run python source/pipeline/train_dag.py --execute --env dev</code></pre>
 
-  <p>Join key: <code>TXN_ID</code> (entity: <code>TRANSACTION</code>). Provides per-transaction context features that complement the customer-level aggregates above.</p>
-
-  <div class="note">
-    <strong>Which feature view is used in training?</strong>
-    Both feature views are registered by <code>source/feature_engineering/feature_views.py</code>, which the <code>FEATURE_ENG</code> step calls via <code>register_feature_views(session=session)</code> — the single implementation for both compute modes. The pipeline currently trains on <strong><code>CUSTOMER_RISK_FEATURES</code> only</strong>. <code>TRANSACTION_CONTEXT_FEATURES</code> is registered and kept fresh, but not yet wired into the training spine. To include it: change <code>build_dataset(session)</code> in <code>source/model_training/training.py</code> to add the <code>TRANSACTION</code> entity to the spine and join both feature views via <code>fs.generate_dataset(..., features=[cust_fv, txn_fv], ...)</code>.
+  <h2 id="promotion">Promotion workflow</h2>
+  <p>The template supports two promotion paths. Both end with a human approval before anything changes in PROD.</p>
+  <div class="cards">
+    <div class="card"><h4>Code-driven</h4><p>A merge to <code>main</code> runs <code>deploy.yml</code>: STAGE trains and gates the new code, then PROD waits for approval.</p></div>
+    <div class="card"><h4>Data-driven</h4><p><code>scheduled-retrain.yml</code> retrains weekly on fresh data in STAGE and opens a GitHub issue. A reviewer promotes the candidate with <code>deploy.yml</code> (<code>promote_only</code>).</p></div>
   </div>
 
-  <h3>Refresh Strategy</h3>
-  <p>Both feature views use configurable refresh intervals, set in <code>source/configs/config.yml</code>:</p>
-  <pre><code class="language-yaml">feature_store:
-  view_name: CUSTOMER_RISK_FEATURES
-  view_version: V1              # Bump when feature SQL changes
-  customer_features_refresh: "1 hour"
-  transaction_features_refresh: "1 hour"</code></pre>
-  <p>Dynamic Tables automatically refresh on this cadence, ensuring features are fresh without manual intervention.</p>
+  <h3 id="deploy-stage">deploy-stage</h3>
+  <ol class="steps">
+    <li>Deploy the training task graph to STAGE and trigger it.</li>
+    <li>Wait for completion; read this run's evaluation from <code>PIPELINE_RESULTS</code>.</li>
+    <li>Write the <strong>job summary</strong>: every metric for the candidate and the PROD champion side by side, the change, the decision metric, per-rule results, and lineage. It is written even if the pipeline fails, so rejections are reported.</li>
+    <li>If batch serving is enabled, score with the candidate and validate the outputs.</li>
+    <li>If monitoring is enabled, create the monitor and drift alert, verify them, then drop them.</li>
+  </ol>
 
+  <h3 id="deploy-prod">deploy-prod (after approval)</h3>
+  <ol class="steps">
+    <li><strong>Promote</strong>: copy the gated version into the PROD registry with <code>CREATE MODEL ... FROM MODEL</code> or <code>ALTER MODEL ... ADD VERSION ... FROM MODEL</code>, copy the lineage comment, and set it as the default version. Re-running is safe: an identical version already in PROD is kept.</li>
+    <li><strong>Batch</strong>: register PROD feature views, validate scoring with the promoted version, and deploy the scheduled scoring task.</li>
+    <li><strong>Real-time</strong>: create <code>&lt;MODEL&gt;_SERVICE_&lt;VERSION&gt;</code>, health-check it (valid outputs, parity with warehouse scoring within 1e-4, agreement with the incumbent), then route <code>canary_weight</code>% of gateway traffic to it. The first deploy creates the gateway with 100% to the new version.</li>
+    <li>Commit the new weights to <code>gateway-config.yml</code>.</li>
+    <li>Create or update the PROD model monitor and drift alert.</li>
+    <li>Tag the release as <code>prod/&lt;VERSION&gt;-&lt;timestamp&gt;</code>.</li>
+  </ol>
 
-  <h2 id="model-training">Model Training</h2>
+  <h2 id="journeys">Persona journeys</h2>
+  <h3 id="journey-ds">Data scientist: ship a model improvement</h3>
+  <ol class="steps">
+    <li><strong>Explore in DEV.</strong> Use notebooks <code>01</code>–<code>03</code> to explore source data, prototype features, and train locally against Snowflake data.</li>
+    <li><strong>Change the code.</strong> On a feature branch, edit <code>feature_views.py</code> and <code>training.py</code>. If you changed feature columns or logic, bump <code>feature_store.view_version</code>.</li>
+    <li><strong>Run the pipeline in DEV.</strong> <code>train_dag.py --deploy --execute --env dev</code> runs the same task graph CI uses, so problems show up before review.</li>
+    <li><strong>Open a pull request.</strong> Lint and unit tests run; a teammate reviews.</li>
+    <li><strong>Read the STAGE job summary</strong> after merge: your candidate's metrics next to the PROD champion's, scored on the same holdout.</li>
+    <li><strong>Hand off for approval.</strong> If the gate passed, the approver promotes it; if not, the summary lists the failed rules.</li>
+  </ol>
 
-  <p>Training logic lives in <code>source/model_training/training.py</code> as a single <code>run(session)</code> function. When the step is configured for <code>spcs</code>, the DAG wraps it in an <strong>ML Job</strong> on a compute pool using the <code>@remote</code> decorator from <code>snowflake.ml.jobs</code>; when configured for <code>warehouse</code>, the same function runs inside an anonymous stored procedure. The step itself is identical in both cases.</p>
+  <h3 id="journey-mle">ML engineer: operate the platform</h3>
+  <ol class="steps">
+    <li><strong>Provision.</strong> Run <code>setup.sh</code> and <code>setup_cicd.sh</code>; set the GitHub variables and environments.</li>
+    <li><strong>Choose compute and serving.</strong> Set <code>pipeline_steps.*.compute</code>, <code>serving.batch</code>, and <code>serving.realtime</code> in <code>config.yml</code>.</li>
+    <li><strong>Set the bar with the data scientist.</strong> Agree on <code>quality_gate.metrics</code> and the champion metric and margin.</li>
+    <li><strong>Manage the canary.</strong> After deploy-prod, raise the new version's weight in <code>gateway-config.yml</code> through a pull request; <code>traffic-shift.yml</code> applies it and drops services you remove.</li>
+    <li><strong>Watch production.</strong> Review model monitor dashboards and <code>DRIFT_ALERTS</code>; run <code>rollback.yml</code> to revert to a previous version.</li>
+  </ol>
 
-  <h3>What You Replace</h3>
-  <p>Two example functions in <code>training.py</code> are the customization points:</p>
+  <h2 id="get-started">Get started</h2>
+  <h3 id="prerequisites">Prerequisites</h3>
   <ul>
-    <li><code>build_dataset(session)</code> &mdash; builds the training Dataset from the Feature Store</li>
-    <li><code>train_model(X_train, y_train)</code> &mdash; fits and returns the model</li>
+    <li>A Snowflake account and a role that can create databases, warehouses, compute pools, roles, and users (the setup scripts use ACCOUNTADMIN).</li>
+    <li>Python 3.11 or 3.12, <a href="https://docs.astral.sh/uv/">uv</a>, the Snowflake CLI (<code>snow</code>) with a configured connection, and the GitHub CLI (<code>gh</code>) with admin access to your repository.</li>
   </ul>
-  <p>Everything else (holdout split, metrics, champion scoring, registration) is generic and driven by the <code>model:</code> contract in config:</p>
-  <pre><code class="language-yaml">model:
-  name: MLOPS_FRAUD_DETECTOR
+  <h3 id="setup-steps">Setup</h3>
+  <ol class="steps">
+    <li><strong>Install.</strong>
+<pre><code>git clone &lt;your-copy-of-the-template&gt; &amp;&amp; cd snowflake-mlops
+uv sync --group ml-runtime</code></pre></li>
+    <li><strong>Create infrastructure</strong> (DEV, STAGE, and PROD databases, warehouses, and compute pools):
+<pre><code>bash scripts/setup.sh</code></pre></li>
+    <li><strong>Load sample data</strong> (skip when using your own source tables):
+<pre><code>uv run python scripts/generate_dataset.py</code></pre></li>
+    <li><strong>Run in DEV</strong>:
+<pre><code>uv run python source/pipeline/train_dag.py --deploy --env dev
+uv run python source/pipeline/train_dag.py --execute --env dev</code></pre></li>
+    <li><strong>Set up CI/CD.</strong> The repository IDs form the OIDC subject each service user trusts.
+<pre><code># gh api repos/&lt;owner&gt;/&lt;repo&gt; --jq '.id, .owner.id'
+GITHUB_OWNER=&lt;owner&gt; GITHUB_OWNER_ID=&lt;owner_id&gt; GITHUB_REPO=&lt;repo&gt; GITHUB_REPO_ID=&lt;repo_id&gt; \
+  bash scripts/setup_cicd.sh</code></pre>
+    This creates the roles, OIDC service users, network policy, branch protection, and the <code>STAGE</code> and <code>PROD</code> GitHub environments. It is idempotent.</li>
+    <li><strong>Set repository variables</strong> (Settings, Secrets and variables, Actions, Variables):
+      <div class="table-wrap"><table>
+        <thead><tr><th>Variable</th><th>Example</th></tr></thead>
+        <tbody>
+          <tr><td><code>SNOWFLAKE_ACCOUNT</code></td><td><code>MYORG-MYACCOUNT</code></td></tr>
+          <tr><td><code>SNOWFLAKE_DATABASE_STAGE</code> / <code>SNOWFLAKE_DATABASE_PROD</code></td><td><code>SNOW_MLOPS_STAGE</code> / <code>SNOW_MLOPS_PROD</code></td></tr>
+          <tr><td><code>SNOWFLAKE_SCHEMA</code></td><td><code>ML</code></td></tr>
+          <tr><td><code>SNOWFLAKE_USER_STAGE</code> / <code>SNOWFLAKE_USER_PROD</code></td><td><code>SVC_GITHUB_ACTIONS_STAGE</code> / <code>SVC_GITHUB_ACTIONS</code></td></tr>
+          <tr><td><code>TOPOLOGY</code></td><td><code>single-account</code></td></tr>
+          <tr><td><code>ENABLE_MODEL_MONITOR</code></td><td><code>true</code></td></tr>
+        </tbody>
+      </table></div></li>
+    <li><strong>Ship a change.</strong> Open a pull request, merge it, review the STAGE job summary, and approve the <code>PROD</code> deployment.</li>
+  </ol>
+  <p>To call the deployed model from an application, see <a href="#serving">Serving</a> and notebook <code>06_feature_store_and_rest_inference.ipynb</code>.</p>
+
+  <h2 id="bring-your-own-model">Bring your own model</h2>
+  <p>Registration, gating, batch scoring, real-time health checks, and monitoring read the model's signature and configuration; they contain no model-specific code. To adopt the template:</p>
+  <ol class="steps">
+    <li><strong>Describe the model</strong> in <code>config.yml</code>:
+<pre><code>model:
+  name: MY_MODEL
   task_type: binary_classification   # binary_classification | multiclass | regression
-  predict_function: predict_proba     # predict_proba for classifiers, predict for regressors
-  id_columns: [CUSTOMER_ID]           # carried through to predictions
-  label_column: IS_FRAUD</code></pre>
-  <p>Metrics come from <code>source/model_training/metrics.py</code> per task type:</p>
-  <table>
-    <thead><tr><th>Task type</th><th>Metrics</th></tr></thead>
-    <tbody>
-      <tr><td><code>binary_classification</code></td><td><code>auc_roc</code>, <code>pr_auc</code>, <code>precision</code>, <code>recall</code>, <code>f1</code>, <code>log_loss</code></td></tr>
-      <tr><td><code>multiclass</code></td><td><code>accuracy</code>, <code>f1_macro</code>, <code>log_loss</code></td></tr>
-      <tr><td><code>regression</code></td><td><code>rmse</code>, <code>mae</code>, <code>r2</code></td></tr>
-    </tbody>
-  </table>
-
-  <h3>ML Runtime Dependency Management</h3>
-  <p>Training and serving dependencies are pinned in <code>pyproject.toml</code> under the <code>[dependency-groups] ml-runtime</code> group:</p>
-  <pre><code class="language-toml">[dependency-groups]
-ml-runtime = ["xgboost==3.3.0", "scikit-learn==1.8.0"]</code></pre>
-  <p><code>config.py</code> reads this group at import time via <code>tomllib</code>, producing <code>ML_RUNTIME_DEPS</code>. This single source of truth feeds both:</p>
-  <ul>
-    <li><strong>Training on SPCS (ML Job):</strong> <code>pip_requirements=ML_RUNTIME_DEPS + ["snowflake-ml-python"]</code></li>
-    <li><strong>Training on a warehouse (stored procedure):</strong> <code>PACKAGES=(... + ML_RUNTIME_DEPS)</code> from the Snowflake Anaconda channel</li>
-    <li><strong>Serving (Model Registry):</strong> <code>conda_dependencies=ML_RUNTIME_DEPS</code></li>
-  </ul>
-  <div class="note">
-    <strong>Pins match the ML Job runtime image</strong>
-    SPCS containers have no internet access by default. The pins are set to the versions already preinstalled in the ML Job runtime image (scikit-learn 1.8.0, xgboost 3.3.0 on Python 3.12), so <code>pip</code> finds them already satisfied and never needs PyPI. Both versions are also published in the Snowflake Anaconda channel, so warehouse training and Registry serving resolve the same versions. Installing a version the image doesn't ship would require an external access integration to PyPI on the ML Job.
-  </div>
-  <p>To update versions: check the runtime image's versions, edit <code>pyproject.toml</code>, run <code>uv lock</code>, commit. Use <code>uv sync --group ml-runtime</code> for local dev parity.</p>
-
-  <h3>Dataset Versioning</h3>
-  <p>The training dataset version is tied to the Feature View version:</p>
-  <p>The Dataset is named <code>&lt;MODEL_NAME&gt;_TRAINING_DATA</code> (e.g. <code>MLOPS_FRAUD_DETECTOR_TRAINING_DATA</code>) and its version equals the Feature View version (<code>feature_store.view_version</code>, e.g. <code>V1</code>).</p>
-  <ul>
-    <li><strong>Same FV version (reruns):</strong> Reuses existing dataset &mdash; fast, no regeneration</li>
-    <li><strong>New FV version (schema change):</strong> Creates new dataset version automatically</li>
-    <li><strong>Lineage:</strong> Model V3 &rarr; Dataset V1 &rarr; Feature View V1 (traceable end-to-end). The model is logged with <code>sample_input_data</code> derived from the Dataset, which records the model&rarr;Dataset link.</li>
-  </ul>
-
-  <h3>Step Wrapper Pattern</h3>
-  <p>The DAG builds this wrapper around the training step when its compute is <code>spcs</code>. Note that the wrapper carries no ML logic — it only pins the environment, imports the step, and calls it:</p>
-  <pre><code class="language-python">@remote(
-    pool_name,
-    stage_name="@DB.SCHEMA.PIPELINE_STAGE",
-    pip_requirements=ML_RUNTIME_DEPS + ["snowflake-ml-python", "pyyaml"],
-    imports=[str(source_zip)],   # step packages + config.py + configs/config.yml
-    name="TRAIN_MODEL",          # readable ML Job name
-)
-def run_step() -> str:
-    import importlib
-    import json
-    import os
-    from snowflake.snowpark import Session
-
-    os.environ.update(env)       # SNOWFLAKE_DATABASE / SCHEMA / WAREHOUSE / COMPUTE_POOL
-    session = Session.builder.getOrCreate()
-    session.sql(f"USE WAREHOUSE {env['SNOWFLAKE_WAREHOUSE']}").collect()
-
-    mod = importlib.import_module("model_training.training")
-    return json.dumps(mod.run(session))</code></pre>
-
-  <div class="note">
-    <strong>Important: cloudpickle Serialization Rules</strong>
-    <p>All imports MUST be inside the <code>@remote</code> function body. Module references from outer scope may not serialize correctly. Closure variables (strings, dicts) are captured fine — which is how the target environment reaches the container. Step <em>packages</em> are not pickled at all; they are mounted into the container via <code>imports=</code>.</p>
-  </div>
-
-  <h3>Training Details</h3>
-  <ul>
-    <li><strong>Algorithm (example):</strong> XGBoost (<code>XGBClassifier</code>)</li>
-    <li><strong>Validation:</strong> single grouped holdout (1 of 5 folds, ~20%), grouped by <code>model.id_columns[0]</code> so no entity appears in both train and test. <code>StratifiedGroupKFold</code> for classification, <code>GroupKFold</code> for regression.</li>
-    <li><strong>Champion scoring:</strong> the default version in <code>quality_gate.champion.source_env</code> (PROD) is scored on the same holdout via <code>ModelVersion.run()</code>. If there is no champion or it can't score the holdout, the result records a reason and comparison is skipped.</li>
-    <li><strong>Class imbalance:</strong> <code>scale_pos_weight=33</code> (~3% fraud rate)</li>
-    <li><strong>Hyperparameters:</strong> from <code>training_params</code> in <code>source/configs/config.yml</code> (<code>n_estimators: 100</code>, <code>max_depth: 6</code>, <code>learning_rate: 0.1</code>)</li>
-    <li><strong>Registration:</strong> in this step, to the target environment's Model Registry (no model files are staged)</li>
-    <li><strong>Results written to:</strong> <code>PIPELINE_RESULTS</code> (<code>STEP='training'</code>: model version, metrics, champion)</li>
-  </ul>
-
-  <h3>SQL for Results Table</h3>
-  <pre><code class="language-sql">-- PARSE_JSON() not allowed in VALUES clause; use INSERT...SELECT
-INSERT INTO DB.SCHEMA.PIPELINE_RESULTS (STEP, STATUS, RESULT, CREATED_AT)
-SELECT 'training', 'SUCCESS', PARSE_JSON('{"metrics": {...}}'), CURRENT_TIMESTAMP()</code></pre>
-
-
-  <h2 id="model-registry">Model Registry</h2>
-
-  <p>The training step registers the candidate directly in the target environment's Model Registry with auto-incremented versioning. The <code>EVALUATE</code> step then keeps or removes it based on the quality gate. CI does not register models.</p>
-
-  <h3>Registration Flow</h3>
-  <ol>
-    <li>Query existing versions and auto-increment: V11 &rarr; V12</li>
-    <li>Log the model with <code>ExperimentTracking.log_model</code> (when <code>experiment.enabled</code>) or <code>Registry.log_model</code></li>
-    <li>Pass <code>sample_input_data</code> = a Snowpark DataFrame from the training Dataset (model&rarr;Dataset lineage), <code>metrics=...</code>, and <code>conda_dependencies=ML_RUNTIME_DEPS</code></li>
-    <li>EVALUATE runs the gate: pass keeps the version; fail drops it</li>
-    <li>The version becomes DEFAULT in PROD when promoted by <code>deploy-prod</code></li>
+  predict_function: predict_proba    # predict for regressors
+  id_columns: [CUSTOMER_ID]          # carried through to predictions
+  label_column: LABEL</code></pre></li>
+    <li><strong>Replace two functions</strong> in <code>source/model_training/training.py</code>: <code>build_dataset(session)</code> (returns the Dataset and a pandas frame) and <code>train_model(X_train, y_train)</code> (returns a fitted model). Any model type the Model Registry supports works.</li>
+    <li><strong>Define your features</strong> in <code>source/feature_engineering/feature_views.py</code>.</li>
+    <li><strong>Set your bar</strong> under <code>quality_gate</code>. The shipped thresholds are deliberately low so the synthetic demo passes; replace them before production use.</li>
+    <li><strong>Pin training libraries</strong> in the <code>ml-runtime</code> dependency group of <code>pyproject.toml</code>. The same pins are used for training and for the registered model's serving environment.</li>
   </ol>
 
-  <div class="note">
-    <strong>Conda Version Pinning</strong>
-    <p>The <code>conda_dependencies</code> must reference versions available in Snowflake's Anaconda channel. Pin to a specific version (e.g., <code>xgboost==3.3.0</code>) rather than relying on automatic resolution which may pick an unavailable version.</p>
-  </div>
-
-  <h3>Quality Gate Thresholds</h3>
-
-  <div class="note">
-    <strong>Template defaults are intentionally low</strong>
-    The <code>auc_roc</code>, <code>precision</code>, and <code>recall</code> minimums under <code>quality_gate.metrics</code> are all set to <code>0.01</code> in the template so the pipeline succeeds end-to-end with synthetic data out of the box. Set these to meaningful values before using this template in production.
-  </div>
-
-  <table>
-    <thead><tr><th>Metric</th><th>Template Default</th><th>Suggested Production Value</th><th>Purpose</th></tr></thead>
+  <h2 id="versioning">Versioning and lineage</h2>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Artifact</th><th>Version scheme</th><th>Behavior</th></tr></thead>
     <tbody>
-      <tr><td>AUC-ROC</td><td><code>0.01</code></td><td>&ge; 0.85</td><td>Discriminative power</td></tr>
-      <tr><td>Precision</td><td><code>0.01</code></td><td>&ge; 0.70</td><td>False positive control</td></tr>
-      <tr><td>Recall</td><td><code>0.01</code></td><td>&ge; 0.60</td><td>Fraud detection coverage</td></tr>
+      <tr><td>Feature view</td><td><code>feature_store.view_version</code> (<code>V1</code>, <code>V2</code>, ...)</td><td>Immutable. Reused when the definition is unchanged (no rebuild). Changing the output columns without bumping the version fails the run with a clear message. Bump it for any change to feature logic, including changes that keep the same columns.</td></tr>
+      <tr><td>Training Dataset</td><td><code>&lt;view_version&gt;_&lt;UTC timestamp&gt;</code></td><td>A new point-in-time snapshot per training run, so retraining sees new data.</td></tr>
+      <tr><td>Model</td><td><code>V1</code>, <code>V2</code>, ... per environment</td><td>Incremented on each run; rejected candidates are dropped. PROD receives the same version name as the STAGE candidate it promotes, and its default version is the champion.</td></tr>
+      <tr><td>Release</td><td>Git tag <code>prod/&lt;VERSION&gt;-&lt;timestamp&gt;</code></td><td>Marks the commit that produced each production version.</td></tr>
     </tbody>
-  </table>
+  </table></div>
+  <p>Each model version carries a comment such as <code>features:CUSTOMER_RISK_FEATURES$V1 | dataset:MLOPS_FRAUD_DETECTOR_TRAINING_DATA/V1_20261018_235217 | git:6878199</code>, its metrics, the gate decision, and registry lineage to the Dataset. Promotion copies the comment to PROD.</p>
 
-  <p>The gate runs in the <code>EVALUATE</code> step (<code>source/evaluate/evaluation.py</code> + <code>gate.py</code>) and is configured under <code>quality_gate:</code> in <code>source/configs/config.yml</code>:</p>
-  <pre><code class="language-yaml">quality_gate:
-  metrics:                 # {metric: {min: x} | {max: x}}; names from metrics.py
-    auc_roc: {min: 0.01}
-    precision: {min: 0.01}
-    recall: {min: 0.01}
-  champion:
-    enabled: true
-    source_env: prod       # champion = default version in this env
-    metric: auc_roc
-    higher_is_better: true
-    min_improvement: -0.01 # small negative value tolerates noise</code></pre>
+  <h2 id="quality-gate">Quality gate</h2>
+  <p>A candidate must pass two checks, both evaluated in the <code>EVALUATE</code> step:</p>
   <ul>
-    <li><strong>Absolute rules:</strong> every metric in <code>quality_gate.metrics</code> must meet its <code>min</code> / <code>max</code>.</li>
-    <li><strong>Champion comparison:</strong> the candidate must beat the PROD default version, scored on the same holdout, by at least <code>min_improvement</code> on <code>champion.metric</code>. If there is no champion or it can't score, the comparison is skipped (passes) with a reason.</li>
-    <li><strong>On pass:</strong> <code>set_metric('quality_gate', 'PASSED')</code> and <code>champion_comparison</code> are stored on the version.</li>
-    <li><strong>On fail:</strong> the candidate version is dropped from the registry (<code>DROP MODEL</code> if it was the only version), an evaluation row with <code>gate_failures</code> is written to <code>PIPELINE_RESULTS</code>, and the step raises so the DAG and CI fail.</li>
+    <li><strong>Metric rules</strong>: absolute bars, for example <code>auc_roc: {min: 0.80}</code> or <code>log_loss: {max: 0.4}</code>. Metric names come from <code>model_training/metrics.py</code> for the configured task type.</li>
+    <li><strong>Champion comparison</strong>: the default version of the PROD model is scored on the candidate's holdout. The candidate must beat it on <code>champion.metric</code> by at least <code>min_improvement</code>. A small negative margin tolerates noise when retraining on similar data. With no PROD model yet, only the rules apply.</li>
   </ul>
-  <p>In CI, <code>source/utils/read_candidate.py</code> reads the evaluation result exported by <code>wait_for_task.py</code>, writes a Job Summary with candidate vs champion metrics and the gate rules, emits <code>model_version</code> to <code>GITHUB_OUTPUT</code>, and exits 1 if the gate failed.</p>
-
-  <h3>Dual-Platform Registration</h3>
-  <p>Models are registered with <code>target_platforms=["WAREHOUSE", "SNOWPARK_CONTAINER_SERVICES"]</code>. This tells Snowflake to prepare the model for both serving modes:</p>
-  <table>
-    <thead><tr><th>Platform</th><th>How Used</th></tr></thead>
-    <tbody>
-      <tr><td><code>WAREHOUSE</code></td><td>Enables <code>mv.run()</code> for batch SQL inference — runs as a vectorized UDF inside the warehouse</td></tr>
-      <tr><td><code>SNOWPARK_CONTAINER_SERVICES</code></td><td>Enables <code>mv.create_service()</code> for real-time SPCS deployment</td></tr>
-    </tbody>
-  </table>
-  <p>Both platforms are prepared at registration time, so the same model version can serve both batch and real-time workloads without re-registration.</p>
-
-
-  <h2 id="inference">Inference</h2>
-
-  <h3>Batch Inference</h3>
-  <p>Batch inference runs as a scheduled Snowflake Task in PROD and scores <code>serving.batch.input_table</code> (or, when null, the training Feature View table) with the model's <strong>default version</strong>. It runs on a <strong>warehouse</strong> (no SPCS service needed) and <strong>appends</strong> predictions to <code>serving.batch.output_table</code> (default <code>BATCH_PREDICTIONS</code>). Enable or disable it with <code>serving.batch.enabled</code>.</p>
-
-  <h4>Architecture</h4>
-  <div class="workflow-diagram">
-    <div class="wf-row">
-      <div class="wf-card">
-        <div class="wf-num" style="background: #11567F;">1</div>
-        <div class="wf-title">Input Table</div>
-        <div class="wf-desc"><code>serving.batch.input_table</code>, or the Feature View table (<code>CUSTOMER_RISK_FEATURES$V1</code>). Inputs are cast to the model signature.</div>
-      </div>
-      <div class="wf-arrow">&rarr;</div>
-      <div class="wf-card">
-        <div class="wf-num" style="background: #11567F;">2</div>
-        <div class="wf-title">Model Registry</div>
-        <div class="wf-desc"><code>MLOPS_FRAUD_DETECTOR.default</code> &mdash; <code>mv.run(input_df, model.predict_function)</code> on warehouse compute</div>
-      </div>
-      <div class="wf-arrow">&rarr;</div>
-      <div class="wf-card">
-        <div class="wf-num" style="background: #11567F;">3</div>
-        <div class="wf-title">Output Table</div>
-        <div class="wf-desc"><code>BATCH_PREDICTIONS</code> (append) &mdash; input features + model outputs + <code>MODEL_VERSION</code>, <code>SCORED_AT</code>, <code>RUN_ID</code></div>
-      </div>
-      <div class="wf-arrow">&rarr;</div>
-      <div class="wf-card">
-        <div class="wf-num" style="background: #11567F;">4</div>
-        <div class="wf-title">Validation</div>
-        <div class="wf-desc">Rows of this <code>RUN_ID</code>: no NULL outputs; for classifiers, probabilities in [0, 1] summing to 1</div>
-      </div>
-    </div>
-  </div>
-
-  <h4>When It Runs</h4>
-  <table>
-    <thead><tr><th>CI/CD Stage</th><th>Environment</th><th>Purpose</th></tr></thead>
-    <tbody>
-      <tr><td>deploy-stage</td><td>STAGE</td><td><code>--validate --env stage</code>: validate the candidate scores correctly</td></tr>
-      <tr><td>deploy-prod</td><td>PROD</td><td><code>--validate --env prod</code> on the promoted version, then <code>--deploy --env prod</code> creates and resumes the scheduled Task</td></tr>
-      <tr><td>Schedule</td><td>PROD</td><td><code>serving.batch.schedule</code> (default <code>USING CRON 0 7 * * * America/Los_Angeles</code>): appends to the output table</td></tr>
-      <tr><td>rollback.yml</td><td>PROD</td><td><code>--validate --env prod</code> on the rolled-back version</td></tr>
-    </tbody>
-  </table>
-
-  <h4>Scheduled Task</h4>
-  <p><code>source/pipeline/batch_inference_dag.py</code> defines a Task DAG named <code>&lt;MODEL_NAME&gt;_BATCH_INFERENCE</code> with a single task, <code>SCORE</code>: a warehouse anonymous stored procedure that imports <code>@PIPELINE_STAGE/batch_inference/source.zip</code> and calls <code>serving.batch_inference.run(session)</code>.</p>
-  <pre><code class="language-bash"># Create + resume the Task on serving.batch.schedule
-uv run python source/pipeline/batch_inference_dag.py --deploy --env prod
-
-# Trigger a run now / show recent history
-uv run python source/pipeline/batch_inference_dag.py --execute --env prod
-uv run python source/pipeline/batch_inference_dag.py --status --env prod
-
-# CI validation: score into &lt;output_table&gt;_VALIDATION (overwrite), validate,
-# write Job Summary, exit 1 on failure. MODEL_VERSION pins the version.
-MODEL_VERSION=V12 uv run python source/pipeline/batch_inference_dag.py --validate --env prod</code></pre>
-
-  <h4>Code Pattern</h4>
-  <pre><code class="language-python">from serving.batch_inference import run_batch_inference, validate_predictions
-
-# version=None -> model default; mode="append" for scheduled scoring,
-# "overwrite" for CI validation tables
-result = run_batch_inference(session, version=None, mode="append", ...)
-validate_predictions(session, result)   # checks rows WHERE RUN_ID = result["run_id"]</code></pre>
-
-  <h4>Output Schema</h4>
-  <table>
-    <thead><tr><th>Column</th><th>Type</th><th>Description</th></tr></thead>
-    <tbody>
-      <tr><td><em>(input features)</em></td><td>original input types</td><td>Written with the input table's types, so history keeps one schema across model versions</td></tr>
-      <tr><td><em>(model outputs)</em></td><td>FLOAT</td><td>From the model signature, e.g. <code>output_feature_0</code> / <code>output_feature_1</code> = P(legitimate) / P(fraud) for this example</td></tr>
-      <tr><td><code>MODEL_VERSION</code></td><td>VARCHAR</td><td>Version that produced the row</td></tr>
-      <tr><td><code>SCORED_AT</code></td><td>TIMESTAMP_NTZ</td><td>Scoring time (monitor timestamp column)</td></tr>
-      <tr><td><code>RUN_ID</code></td><td>VARCHAR</td><td>UUID of the scoring run</td></tr>
-    </tbody>
-  </table>
-
-  <h4>Validation Checks</h4>
-  <ul>
-    <li><strong>No NULLs:</strong> If any output is NULL, the model failed to score that row (exit code 1)</li>
-    <li><strong>Probability sanity (classifiers):</strong> each probability in [0, 1] and each row summing to 1 within 0.01</li>
-  </ul>
-  <p>Checks come from <code>source/serving/signature.py</code> (<code>validate_outputs</code> / <code>validate_outputs_sql</code>), which also casts inputs to the model signature for Snowpark and pandas and derives <code>output_columns</code>. There are no hardcoded feature lists.</p>
-
-  <h4>How It Works Under the Hood</h4>
-  <p>When the model was registered with <code>conda_dependencies=ML_RUNTIME_DEPS</code>, Snowflake created a <strong>vectorized Python UDF</strong> backed by the serialized model. <code>mv.run()</code> invokes that UDF over the input DataFrame — all computation stays inside the warehouse, no data leaves Snowflake, no SPCS service needed.</p>
-
-  <h4>Files</h4>
-  <table>
-    <thead><tr><th>File</th><th>Role</th></tr></thead>
-    <tbody>
-      <tr><td><code>source/pipeline/batch_inference_dag.py</code></td><td>Scheduled Task definition + CLI (<code>--deploy</code>, <code>--execute</code>, <code>--status</code>, <code>--validate</code>)</td></tr>
-      <tr><td><code>source/serving/batch_inference.py</code></td><td>Core logic: <code>run()</code>, <code>run_batch_inference()</code>, <code>validate_predictions()</code></td></tr>
-      <tr><td><code>source/serving/signature.py</code></td><td>Signature-driven casting and output validation</td></tr>
-    </tbody>
-  </table>
-
-  <h3>Real-Time Inference (SPCS + Gateway)</h3>
-  <p>The latest model version is deployed as a <strong>containerized SPCS service</strong> behind a <strong>Snowflake Gateway</strong> for HTTP access. Uses a <strong>canary deployment</strong> strategy with git-driven traffic management via <code>gateway-config.yml</code>. Enable or disable it with <code>serving.realtime.enabled</code>; gateway name, instance counts, canary weight, and health-check row count come from <code>serving.realtime</code>, and PROD database/warehouse/pool from <code>environments.prod</code>.</p>
-  <pre><code class="language-yaml">serving:
-  realtime:
-    enabled: true
-    gateway_name: FRAUD_DETECTOR_GATEWAY
-    min_instances: 1
-    max_instances: 2
-    canary_weight: 20        # initial traffic % for a new version
-    health_check_rows: 20    # rows from the batch input table</code></pre>
-
-  <h4>Architecture</h4>
-  <div class="workflow-diagram">
-    <div class="wf-row">
-      <div class="wf-card">
-        <div class="wf-num" style="background: #249EDB;">1</div>
-        <div class="wf-title">Model Registry</div>
-        <div class="wf-desc"><code>MLOPS_FRAUD_DETECTOR</code> default version &rarr; <code>mv.create_service()</code> builds container image</div>
-      </div>
-      <div class="wf-arrow">&rarr;</div>
-      <div class="wf-card">
-        <div class="wf-num" style="background: #249EDB;">2</div>
-        <div class="wf-title">SPCS Compute Pool</div>
-        <div class="wf-desc">New versioned service: <code>..._SERVICE_V12</code>. XGBoost model loaded, REST endpoint at <code>/inference</code></div>
-      </div>
-      <div class="wf-arrow">&rarr;</div>
-      <div class="wf-card">
-        <div class="wf-num" style="background: #249EDB;">3</div>
-        <div class="wf-title">Health Check</div>
-        <div class="wf-desc">Real rows from the batch input table: valid outputs, parity with warehouse <code>mv.run()</code>, agreement with incumbent reported.</div>
-      </div>
-      <div class="wf-arrow">&rarr;</div>
-      <div class="wf-card">
-        <div class="wf-num" style="background: #249EDB;">4</div>
-        <div class="wf-title">Canary Traffic Split</div>
-        <div class="wf-desc"><code>apply_gateway_config.py</code> applies the canary split (default 80/20); CI syncs <code>gateway-config.yml</code> to the repo.</div>
-      </div>
-    </div>
-  </div>
-
-  <h4>Canary Deployment Flow (5 steps)</h4>
-  <table>
-    <thead><tr><th>Step</th><th>Action</th><th>Detail</th></tr></thead>
-    <tbody>
-      <tr><td>1</td><td>Get latest model version</td><td><code>SHOW MODELS</code> &rarr; reads <code>default_version_name</code> (e.g., V12)</td></tr>
-      <tr><td>2</td><td>Determine service names</td><td>New: <code>MLOPS_FRAUD_DETECTOR_SERVICE_V12</code>, Old: <code>..._V11</code></td></tr>
-      <tr><td>3</td><td>Create new versioned service</td><td><code>mv.create_service()</code> &mdash; builds container image on compute pool</td></tr>
-      <tr><td>4</td><td>Wait for READY + health check</td><td>Polls <code>SYSTEM$GET_SERVICE_STATUS()</code>, then runs the health check below</td></tr>
-      <tr><td>5</td><td>Apply canary split</td><td>New version at <code>canary_weight</code>%, remainder to the incumbent. <code>apply_gateway_config.py</code> applies it and CI commits <code>gateway-config.yml</code>.</td></tr>
-    </tbody>
-  </table>
-
-  <h4>Service Creation</h4>
-  <pre><code class="language-python">from snowflake.ml.registry import Registry
-
-reg = Registry(session, database_name="SNOW_MLOPS_PROD", schema_name="ML")
-mv = reg.get_model("MLOPS_FRAUD_DETECTOR").version("V12")
-
-mv.create_service(
-    service_name="MLOPS_FRAUD_DETECTOR_SERVICE_V12",
-    service_compute_pool="SNOW_MLOPS_PROD_POOL",
-    image_build_compute_pool="SNOW_MLOPS_PROD_POOL",
-    ingress_enabled=True,
-    min_instances=1,          # serving.realtime.min_instances
-    max_instances=2,          # serving.realtime.max_instances
-    autocapture=True,
-)</code></pre>
-
-  <h4>Health Check</h4>
-  <p>Before shifting traffic, <code>health_check_rows</code> real rows from the batch input table are sent directly to the new service (bypassing the gateway):</p>
-  <ol>
-    <li><strong>Valid outputs</strong> for the task type (no NULLs; probabilities valid for classifiers)</li>
-    <li><strong>Parity:</strong> service output matches warehouse <code>mv.run()</code> for the same version within <code>1e-4</code></li>
-    <li><strong>Incumbent agreement:</strong> agreement / mean abs diff vs the current service is reported in the Job Summary (not gated)</li>
-  </ol>
-
-  <h4>Gateway Traffic Management</h4>
-  <p>Traffic state lives in <code>gateway-config.yml</code> &mdash; the single source of truth. The deploy script writes the canary split; the engineer edits it to complete the cutover.</p>
-  <pre><code class="language-yaml"># gateway-config.yml (repo root, after deploy creates V12 service)
-targets:
-  - service: MLOPS_FRAUD_DETECTOR_SERVICE_V11
-    weight: 80
-  - service: MLOPS_FRAUD_DETECTOR_SERVICE_V12
-    weight: 20</code></pre>
-  <p><strong>To complete cutover:</strong> edit <code>gateway-config.yml</code> to set V12 at 100%, remove V11, merge to main. The <code>traffic-shift.yml</code> workflow applies the gateway change and drops V11.</p>
-  <pre><code class="language-yaml"># After cutover (engineer edits and merges)
-targets:
-  - service: MLOPS_FRAUD_DETECTOR_SERVICE_V12
-    weight: 100</code></pre>
-  <p>Set <code>serving.realtime.canary_weight: 100</code> in <code>config.yml</code> to skip the canary period and get instant cutover (same as a traditional blue/green deploy).</p>
-
-  <h4>Calling the Endpoint</h4>
-  <pre><code class="language-sql">-- Get the ingress_url
-SHOW ENDPOINTS IN SERVICE SNOW_MLOPS_PROD.ML.MLOPS_FRAUD_DETECTOR_SERVICE_V12;</code></pre>
-  <pre><code class="language-bash"># Method paths use dashes for underscores (predict_proba -> /predict-proba)
-curl -X POST "https://&lt;ingress-url&gt;/predict-proba" \
-  -H 'Authorization: Snowflake Token="&lt;pat&gt;"' \
-  -H "Content-Type: application/json" \
-  -d '{"dataframe_split": {
-        "index": [0],
-        "columns": ["TOTAL_TXN_COUNT", "AVG_TXN_AMOUNT", "MAX_TXN_AMOUNT", "STDDEV_TXN_AMOUNT",
-                    "UNIQUE_MERCHANTS", "ACTIVE_DAYS", "LATE_NIGHT_TXN_RATIO", "CREDIT_SCORE",
-                    "ACCOUNT_AGE_DAYS", "ANNUAL_INCOME"],
-        "data": [[20, 150.5, 500.0, 100.0, 10, 30, 0.05, 700, 365, 80000]]}}'</code></pre>
-  <p>By default only the service owner can call the endpoint; grant another role access with the service role <code>ALL_ENDPOINTS_USAGE</code>. Authorization failures return 404. Callers supply the feature values themselves; Snowflake also offers request-time feature lookup from an online feature store (<code>create_service(feature_sources_per_function=...)</code>, public preview), which this template does not configure.</p>
-
-  <h4>Key Details</h4>
-  <table>
-    <thead><tr><th>Aspect</th><th>Value</th></tr></thead>
-    <tbody>
-      <tr><td>Compute</td><td>SPCS (<code>SNOW_MLOPS_PROD_POOL</code>, CPU_X64_M, 1-3 nodes)</td></tr>
-      <tr><td>Service naming</td><td><code>MLOPS_FRAUD_DETECTOR_SERVICE_{VERSION}</code></td></tr>
-      <tr><td>Container build time</td><td>~2-5 min (image built on compute pool)</td></tr>
-      <tr><td>Instances</td><td><code>min_instances</code> 1 / <code>max_instances</code> 2 (from <code>serving.realtime</code>)</td></tr>
-      <tr><td>Zero downtime</td><td>Old service stays live during canary period. Dropped only when removed from <code>gateway-config.yml</code></td></tr>
-      <tr><td>Canary default</td><td>80/20 split (configurable via <code>serving.realtime.canary_weight</code>)</td></tr>
-      <tr><td>Traffic config</td><td><code>gateway-config.yml</code> (single source of truth)</td></tr>
-      <tr><td>Cleanup</td><td>Services removed from <code>gateway-config.yml</code> are dropped by <code>traffic-shift.yml</code></td></tr>
-      <tr><td>READY timeout</td><td>10 minutes (configurable)</td></tr>
-      <tr><td>File</td><td><code>scripts/deploy_prod_service.py</code></td></tr>
-    </tbody>
-  </table>
-
-  <h4>Rollback</h4>
-  <p>If the real-time service has issues after deployment, the <code>rollback.yml</code> workflow:</p>
-  <ol>
-    <li>Sets model DEFAULT back to the previous version (e.g., V11) with <code>deploy/set_default_version.py</code></li>
-    <li>Runs <code>deploy_prod_service.py</code> (ensures the <code>_V11</code> service), then <code>apply_gateway_config.py --targets "V11:100"</code> to route all traffic to it</li>
-    <li>Syncs <code>gateway-config.yml</code> to the repo; services removed from it are dropped by <code>traffic-shift.yml</code></li>
-  </ol>
-
-
-  <h2 id="cicd">CI/CD Pipeline</h2>
-
-  <h3>Workflows Overview</h3>
-  <table>
-    <thead><tr><th>Workflow</th><th>Trigger</th><th>Purpose</th></tr></thead>
-    <tbody>
-      <tr><td><code>deploy.yml</code></td><td>Push to <code>main</code>, PR to <code>main</code>, or manual dispatch</td><td>Code quality (lint+tests) on every PR; full pipeline on push to main: train &rarr; promote &rarr; deploy to PROD</td></tr>
-      <tr><td><code>scheduled-retrain.yml</code></td><td>Weekly cron (Mon 6AM PT) or manual dispatch</td><td>Retrain on fresh data, register candidate in STAGE only</td></tr>
-      <tr><td><code>traffic-shift.yml</code></td><td>Merge to <code>main</code> touching <code>gateway-config.yml</code>, or manual dispatch</td><td>Apply gateway traffic allocation across model versions (e.g. complete a canary cutover)</td></tr>
-      <tr><td><code>rollback.yml</code></td><td>Manual dispatch</td><td>Revert PROD to a previous model version</td></tr>
-    </tbody>
-  </table>
-
-  <h3>Two Promotion Paths</h3>
-  <table>
-    <thead><tr><th>Path</th><th>When</th><th>What Happens</th><th>PROD Approval</th></tr></thead>
-    <tbody>
-      <tr><td><strong>Code Promotion</strong></td><td>Push to <code>main</code> (new features, hyperparams, pipeline changes)</td><td>lint &rarr; test &rarr; deploy-stage (train+register+promote) &rarr; deploy-prod</td><td>Required (PROD environment reviewer)</td></tr>
-      <tr><td><strong>Candidate Promotion</strong></td><td>Manual dispatch with <code>promote_only=true</code> (after reviewing scheduled retrain candidate)</td><td>lint &rarr; test &rarr; <em>skip stage</em> &rarr; deploy-prod directly</td><td>Required (PROD environment reviewer)</td></tr>
-    </tbody>
-  </table>
-
-  <h3>Approval Flow</h3>
-  <p>Every PROD deployment requires explicit human approval via the <strong>GitHub Environment protection rule</strong> on the <code>PROD</code> environment:</p>
-  <div class="workflow-diagram">
-    <div class="wf-row">
-      <div class="wf-card">
-        <div class="wf-num">1</div>
-        <div class="wf-title">deploy-stage completes</div>
-        <div class="wf-desc">Pipeline trains, registers, and gates the model in STAGE. Or skipped entirely if <code>promote_only=true</code>.</div>
-      </div>
-      <div class="wf-arrow">&rarr;</div>
-      <div class="wf-card" style="border: 2px dashed light-dark(#E8A317, #92700c);">
-        <div class="wf-num" style="background: #E8A317;">2</div>
-        <div class="wf-title">Waiting for Review</div>
-        <div class="wf-desc">deploy-prod pauses. Reviewer sees metrics in the Job Summary or notification (GitHub Issue, Slack, email, etc.). Actions &rarr; Review deployments &rarr; Approve.</div>
-      </div>
-      <div class="wf-arrow">&rarr;</div>
-      <div class="wf-card">
-        <div class="wf-num" style="background: #11567F;">3</div>
-        <div class="wf-title">deploy-prod runs</div>
-        <div class="wf-desc">Promote model &rarr; Validate batch &rarr; Deploy batch Task &rarr; SPCS canary deploy &rarr; Apply gateway &rarr; Sync gateway-config.yml &rarr; Monitor setup &rarr; Git tag.</div>
-      </div>
-    </div>
-  </div>
-
-  <h3>Workflow: deploy.yml (Main Pipeline)</h3>
-  <table>
-    <thead><tr><th>Job</th><th>Steps</th><th>Environment</th></tr></thead>
-    <tbody>
-      <tr><td><strong>lint</strong></td><td>ruff check + format check</td><td>-</td></tr>
-      <tr><td><strong>test</strong></td><td>pytest (unit tests only)</td><td>-</td></tr>
-      <tr><td><strong>deploy-stage</strong></td><td>Deploy DAG &rarr; Execute (train + register + gate in Snowflake) &rarr; Wait &rarr; Read candidate (<code>read_candidate.py</code>) &rarr; Serving flags &rarr; Validate batch &rarr; Validate monitor</td><td>STAGE</td></tr>
-      <tr><td><strong>deploy-prod</strong></td><td>Promote &rarr; Serving flags &rarr; Validate batch (<code>--validate --env prod</code>) &rarr; Deploy batch Task (<code>--deploy --env prod</code>) &rarr; Real-time service &rarr; Apply gateway &rarr; Sync <code>gateway-config.yml</code> &rarr; Monitor &rarr; Tag release</td><td>PROD (approval required)</td></tr>
-    </tbody>
-  </table>
-  <p><code>source/utils/serving_flags.py</code> writes <code>batch_enabled</code>, <code>realtime_enabled</code>, and <code>monitor_enabled</code> to <code>GITHUB_OUTPUT</code> from <code>serving.*.enabled</code>; <code>deploy.yml</code> and <code>rollback.yml</code> skip the steps for disabled modes, so a batch-only use case never provisions an inference service.</p>
-  <p><strong>Manual dispatch inputs:</strong></p>
-  <ul>
-    <li><code>promote_only</code> (boolean) &mdash; skip training, go straight to PROD deployment</li>
-    <li><code>reason</code> (string) &mdash; why this was triggered manually</li>
-  </ul>
-
-  <h3>Workflow: scheduled-retrain.yml (Periodic Retraining)</h3>
-  <p>Trains a new model on fresh data without promoting to PROD. Notifies a human so they can review metrics and decide whether to promote the candidate.</p>
-  <table>
-    <thead><tr><th>Step</th><th>Action</th></tr></thead>
-    <tbody>
-      <tr><td>1</td><td>Deploy Task DAG (with <code>RESUME_SCHEDULE=true</code> to enable cron)</td></tr>
-      <tr><td>2</td><td>Trigger pipeline (FEATURE_ENG &rarr; TRAIN &rarr; EVALUATE)</td></tr>
-      <tr><td>3</td><td>Wait for ML Jobs to complete</td></tr>
-      <tr><td>4</td><td>Read candidate (<code>read_candidate.py</code>): the gate already ran in EVALUATE; candidate stays in STAGE only (does NOT promote to PROD)</td></tr>
-      <tr><td>5</td><td>Notify: create GitHub Issue with model version and metrics table</td></tr>
-    </tbody>
-  </table>
-  <p><strong>To promote the candidate:</strong></p>
-  <ol>
-    <li>Review the notification (metrics, version)</li>
-    <li>Go to Actions &rarr; Deploy &rarr; Run workflow &rarr; check <code>promote_only: true</code></li>
-    <li>Approve the PROD deployment when prompted</li>
-  </ol>
-  <h4>Notification Channel</h4>
-  <p>The template ships with <code>source/utils/notify_candidate.py</code>, which creates a <strong>GitHub Issue</strong> by default. This is a pluggable step &mdash; swap it out for whatever notification channel your team uses:</p>
-  <table>
-    <thead><tr><th>Channel</th><th>How to Adapt</th></tr></thead>
-    <tbody>
-      <tr><td><strong>GitHub Issue</strong> (default)</td><td>Works out of the box. Uses <code>GITHUB_TOKEN</code> from the workflow.</td></tr>
-      <tr><td><strong>Slack</strong></td><td>Replace with a Slack webhook POST or <a href="https://github.com/slackapi/slack-github-action">slackapi/slack-github-action</a>.</td></tr>
-      <tr><td><strong>Microsoft Teams</strong></td><td>POST to an Incoming Webhook connector URL.</td></tr>
-      <tr><td><strong>Email</strong></td><td>Use <code>sendgrid</code>, <code>ses</code>, or your SMTP relay. Alternatively, use a Snowflake notification integration (<code>CREATE NOTIFICATION INTEGRATION</code>) to send email directly from Snowflake.</td></tr>
-      <tr><td><strong>PagerDuty / Opsgenie</strong></td><td>POST to the Events API for on-call routing.</td></tr>
-    </tbody>
-  </table>
-  <p>The key contract: the notification step receives the metrics file (<code>METRICS_FILE</code> env var) and the model version, and sends a human-readable summary to the right audience. The promotion workflow is the same regardless of notification channel.</p>
-
-  <h3>Authentication</h3>
-  <p>CI uses <strong>OIDC workload identity</strong> (zero secrets stored in GitHub). The Snowflake CLI action handles token exchange automatically.</p>
-  <table>
-    <thead><tr><th>Environment</th><th>Service User</th></tr></thead>
-    <tbody>
-      <tr><td>STAGE</td><td><code>SVC_GITHUB_ACTIONS_STAGE</code></td></tr>
-      <tr><td>PROD</td><td><code>SVC_GITHUB_ACTIONS</code></td></tr>
-    </tbody>
-  </table>
-
-  <h3>Release Tagging</h3>
-  <p>On successful PROD deployment, the workflow creates a git tag via GitHub API:</p>
-  <pre><code class="language-bash">prod/{MODEL_VERSION}-{YYYYMMDD}-{HHMMSS}
-# Example: prod/V1-20260812-031500</code></pre>
-  <p>This tag corresponds 1:1 with the model version set as DEFAULT in the PROD Model Registry.</p>
-
-
-  <h2 id="rollback">Rollback</h2>
-
-  <p>The <code>rollback.yml</code> workflow enables manual rollback to any previous model version.</p>
-
-  <h3>Inputs</h3>
-  <table>
-    <thead><tr><th>Input</th><th>Required</th><th>Example</th></tr></thead>
-    <tbody>
-      <tr><td><code>model_version</code></td><td>Yes</td><td>V11</td></tr>
-      <tr><td><code>reason</code></td><td>Yes</td><td>Regression in precision metric</td></tr>
-    </tbody>
-  </table>
-
-  <h3>Rollback Steps</h3>
-  <ol>
-    <li>Set DEFAULT version: <code>deploy/set_default_version.py --version V11</code></li>
-    <li>If real-time is enabled: <code>deploy_prod_service.py</code>, then <code>apply_gateway_config.py --targets "V11:100"</code>, then sync <code>gateway-config.yml</code></li>
-    <li>If batch is enabled: validate batch inference on the rolled-back version (<code>--validate --env prod</code>)</li>
-    <li>Tag rollback: <code>rollback/V11-{timestamp}</code></li>
-  </ol>
-
-  <h3>Trigger</h3>
-  <p>GitHub Actions &rarr; Rollback workflow &rarr; Run workflow (manual dispatch)</p>
-
-
-  <h2 id="rbac">RBAC &amp; Security</h2>
-
-  <h3>Role Hierarchy</h3>
-  <pre><code class="language-plaintext">ACCOUNTADMIN
-  ├── MLOPS_STAGE_ROLE (CI: STAGE + DEV)
-  │     ├── USAGE on SNOW_MLOPS_DEV / STAGE databases
-  │     ├── SELECT on SNOW_MLOPS_PROD.ML (read-only)
-  │     ├── USAGE on DEV + STAGE warehouses and compute pools
-  │     ├── OWNERSHIP on models in DEV.ML and STAGE.ML
-  │     ├── USAGE on PROD schema + ALL/FUTURE MODELS in PROD (champion read)
-  │     └── EXECUTE TASK, EXECUTE MANAGED TASK, EXECUTE ALERT
-  │
-  └── MLOPS_PROD_ROLE (CI: PROD)
-        ├── ALL on SNOW_MLOPS_PROD.ML (schema, tables, stages)
-        ├── OWNERSHIP on models in PROD.ML
-        ├── USAGE on STAGE schema + models (replication)
-        ├── USAGE on PROD warehouse and compute pool
-        ├── BIND SERVICE ENDPOINT
-        └── EXECUTE TASK, EXECUTE MANAGED TASK, EXECUTE ALERT</code></pre>
-
-  <h3>Branch Protection</h3>
-  <ul>
-    <li><code>main</code> branch: requires PR with passing <code>lint</code> + <code>test</code> checks</li>
-    <li><code>enforce_admins: true</code> &mdash; rules apply to all users including admins</li>
-    <li>Only <code>feature/*</code> branches can be merged to <code>main</code></li>
-  </ul>
-
-  <h3>Network Policy</h3>
-  <p>Service users are restricted to GitHub Actions IP ranges via a Snowflake network policy attached at the user level.</p>
-
-  <h3>Required GitHub Variables</h3>
-  <p>These repository-level variables (not secrets) must be set before the first CI run. Set them at <strong>Settings &rarr; Secrets and variables &rarr; Actions &rarr; Variables</strong>:</p>
-  <table>
-    <thead><tr><th>Variable</th><th>Example</th><th>Notes</th></tr></thead>
-    <tbody>
-      <tr><td><code>SNOWFLAKE_ACCOUNT</code></td><td><code>myorg-myaccount</code></td><td>Used by all three workflows</td></tr>
-      <tr><td><code>SNOWFLAKE_DATABASE_STAGE</code></td><td><code>SNOW_MLOPS_STAGE</code></td><td>STAGE environment target DB</td></tr>
-      <tr><td><code>SNOWFLAKE_DATABASE_PROD</code></td><td><code>SNOW_MLOPS_PROD</code></td><td>PROD environment target DB</td></tr>
-      <tr><td><code>SNOWFLAKE_SCHEMA</code></td><td><code>ML</code></td><td>Shared schema name across environments</td></tr>
-      <tr><td><code>SNOWFLAKE_USER_STAGE</code></td><td><code>SVC_GITHUB_ACTIONS_STAGE</code></td><td>OIDC service user for STAGE jobs</td></tr>
-      <tr><td><code>SNOWFLAKE_USER_PROD</code></td><td><code>SVC_GITHUB_ACTIONS</code></td><td>OIDC service user for PROD jobs</td></tr>
-      <tr><td><code>TOPOLOGY</code></td><td><code>single-account</code></td><td>Promotion strategy; only <code>single-account</code> is implemented</td></tr>
-      <tr><td><code>ENABLE_MODEL_MONITOR</code></td><td><code>true</code></td><td>Set to <code>true</code> to create a Model Monitor during deployment; omit or set <code>false</code> to skip (useful while iterating)</td></tr>
-    </tbody>
-  </table>
-
-
-  <h2 id="monitoring">Model Monitoring</h2>
-
-  <p>Snowflake <a href="https://docs.snowflake.com/developer-guide/snowflake-ml/model-registry/model-observability">ML Observability</a> tracks prediction drift and feature distribution shifts in production. This framework sets up a <code>MODEL MONITOR</code> during PROD deployment that continuously evaluates model health.</p>
-
-  <h3>Data Flow</h3>
-  <div class="workflow-diagram">
-    <div class="wf-row">
-      <div class="wf-card">
-        <div class="wf-num">1</div>
-        <div class="wf-title">Batch Inference</div>
-        <div class="wf-desc">Scheduled Task appends predictions + <code>MODEL_VERSION</code>, <code>SCORED_AT</code> (TIMESTAMP_NTZ), <code>RUN_ID</code> to <code>BATCH_PREDICTIONS</code>.</div>
-      </div>
-      <div class="wf-arrow">&rarr;</div>
-      <div class="wf-card">
-        <div class="wf-num">2</div>
-        <div class="wf-title">Monitor Source View</div>
-        <div class="wf-desc"><code>BATCH_PREDICTIONS_MONITOR_SOURCE</code>: predictions for the monitored version, LEFT JOINed to actuals when <code>monitor.actuals.table</code> is set. The monitor refreshes daily over a 7-day window.</div>
-      </div>
-      <div class="wf-arrow">&rarr;</div>
-      <div class="wf-card">
-        <div class="wf-num">3</div>
-        <div class="wf-title">Baseline</div>
-        <div class="wf-desc"><code>baseline: auto</code> snapshots the promotion-time validation scoring into <code>BATCH_PREDICTIONS_BASELINE</code>.</div>
-      </div>
-      <div class="wf-arrow">&rarr;</div>
-      <div class="wf-card">
-        <div class="wf-num">4</div>
-        <div class="wf-title">Drift Alert</div>
-        <div class="wf-desc">A Snowflake Alert logs to <code>DRIFT_ALERTS</code> when the drift metric (e.g., PSI) exceeds the threshold, and emails recipients when a notification integration is set.</div>
-      </div>
-    </div>
-  </div>
-
-  <h3>Monitor Configuration</h3>
-  <p>The monitor reads <code>serving.batch.output_table</code> through a source view and monitors <code>model.predict_function</code>. Settings live under <code>monitor:</code> in <code>source/configs/config.yml</code>:</p>
-  <pre><code class="language-yaml">monitor:
-  monitor_name: FRAUD_DETECTOR_MONITOR
-  timestamp_column: SCORED_AT
-  prediction_column: output_feature_1   # score column monitored and used for drift
-  refresh_interval: "1 day"
-  aggregation_window: "7 days"
-  actuals:                              # ground truth; enables performance metrics
-    table: RAW_TRANSACTIONS             # in the source database/schema
-    join_keys: [CUSTOMER_ID]
-    label_sql: "MAX(IS_FRAUD::INT)"
-  baseline: auto                        # auto | &lt;table name&gt; | null
-  drift_metric: POPULATION_STABILITY_INDEX
-  drift_threshold: 0.25
-  alert_name: FRAUD_DETECTOR_DRIFT_ALERT
-  alert_schedule: "1440 MINUTE"
-  notification_integration: null        # EMAIL notification integration (optional)
-  notification_recipients: []</code></pre>
-
-  <h3>Source View and Actuals</h3>
-  <p><code>source/monitoring/model_monitor.py</code> creates <code>&lt;output_table&gt;_MONITOR_SOURCE</code>, a view over the predictions filtered to the monitored version (<code>MODEL_VERSION</code> env var, or the model default). When <code>monitor.actuals.table</code> is set, the view LEFT JOINs <code>label_sql</code> (grouped by <code>join_keys</code>) as <code>ACTUAL_LABEL</code>, which the monitor uses as <code>ACTUAL_CLASS_COLUMNS</code> (binary) or <code>ACTUAL_SCORE_COLUMNS</code> (regression) so it reports performance metrics as well as drift. <code>ID_COLUMNS</code> are <code>model.id_columns</code> plus <code>RUN_ID</code>.</p>
-
-  <h3>Baseline</h3>
-  <p>The <code>baseline</code> setting controls whether drift detection is active:</p>
-  <table>
-    <thead><tr><th>Mode</th><th>Configuration</th><th>What Happens</th></tr></thead>
-    <tbody>
-      <tr><td><strong>Auto</strong> (default)</td><td><code>baseline: auto</code></td><td>Snapshots the promotion-time validation scoring (<code>&lt;output_table&gt;_VALIDATION</code>) into <code>&lt;output_table&gt;_BASELINE</code>, so drift metrics work from day one and the drift alert is created.</td></tr>
-      <tr><td><strong>Explicit table</strong></td><td><code>baseline: MY_BASELINE_TABLE</code></td><td>Uses the named table as the expected distribution.</td></tr>
-      <tr><td><strong>None</strong></td><td><code>baseline: null</code></td><td>Monitor collects prediction statistics over time. No drift metrics, no alert.</td></tr>
-    </tbody>
-  </table>
-
-  <h3>Drift Metrics</h3>
-  <p>When a baseline is configured, the monitor can compute any of these drift metrics via <code>MODEL_MONITOR_DRIFT_METRIC()</code>:</p>
-  <table>
-    <thead><tr><th>Metric</th><th>What It Measures</th><th>Best For</th></tr></thead>
-    <tbody>
-      <tr><td><strong>POPULATION_STABILITY_INDEX</strong> (PSI)</td><td>Distribution shift between baseline and current predictions (binned comparison)</td><td>Overall prediction drift. Industry standard for credit/fraud. &lt;0.1 = stable, 0.1&ndash;0.25 = investigate, &gt;0.25 = significant shift.</td></tr>
-      <tr><td><strong>JENSEN_SHANNON</strong></td><td>Symmetric divergence between two distributions (0 = identical, 1 = completely different)</td><td>Symmetric comparison. Works well for both continuous and categorical features.</td></tr>
-      <tr><td><strong>WASSERSTEIN</strong></td><td>&ldquo;Earth mover&rsquo;s distance&rdquo; &mdash; minimum cost to transform one distribution into another</td><td>Continuous distributions. Sensitive to shifts in the tails.</td></tr>
-      <tr><td><strong>DIFFERENCE_OF_MEANS</strong></td><td>Simple difference between average prediction values</td><td>Quick sanity check. Large shift in mean prediction is an obvious red flag.</td></tr>
-    </tbody>
-  </table>
-  <p>Set the metric with <code>monitor.drift_metric</code>. The default is <code>POPULATION_STABILITY_INDEX</code>.</p>
-
-  <h3>Threshold Alerts</h3>
-  <p>When a baseline is configured, the framework creates a <a href="https://docs.snowflake.com/en/sql-reference/sql/create-alert">Snowflake Alert</a> that checks the drift metric daily:</p>
-  <pre><code class="language-sql">-- Alert fires when PSI > 0.25 in the last 24 hours
-CREATE ALERT FRAUD_DETECTOR_DRIFT_ALERT
-    WAREHOUSE = SNOW_MLOPS_PROD_WH
-    SCHEDULE = '1440 MINUTE'
-    IF (EXISTS (
-        SELECT 1 FROM TABLE(MODEL_MONITOR_DRIFT_METRIC(
-            'FRAUD_DETECTOR_MONITOR', 'POPULATION_STABILITY_INDEX',
-            'output_feature_1', '1 DAY'
-        )) WHERE METRIC_VALUE > 0.25
-           AND EVENT_TIMESTAMP > DATEADD('DAY', -1, CURRENT_TIMESTAMP())
-    ))
-    THEN
-        INSERT INTO DRIFT_ALERTS (DRIFT_METRIC, THRESHOLD, STATUS)
-        VALUES ('POPULATION_STABILITY_INDEX', 0.25, 'THRESHOLD_EXCEEDED');</code></pre>
-  <p>Breaches are logged to a <code>DRIFT_ALERTS</code> table. When <code>monitor.notification_integration</code> and <code>notification_recipients</code> are set, the alert action also calls <code>SYSTEM$SEND_EMAIL</code>.</p>
-
-  <h3>Lifecycle</h3>
-  <table>
-    <thead><tr><th>Operation</th><th>When</th><th>What Happens</th></tr></thead>
-    <tbody>
-      <tr><td>Create</td><td>deploy-prod (if <code>ENABLE_MODEL_MONITOR=true</code> and batch is enabled)</td><td>Source view + baseline + <code>CREATE MODEL MONITOR</code> + drift alert</td></tr>
-      <tr><td>Version tracking</td><td>Each PROD deployment</td><td>If model version changed, drops and recreates the monitor (and alert)</td></tr>
-      <tr><td>Validate (STAGE)</td><td>deploy-stage</td><td>Creates monitor &rarr; verifies ACTIVE &rarr; drops (proves PROD will work)</td></tr>
-      <tr><td>Suspend / Resume</td><td>Manual</td><td><code>suspend_monitor()</code> / <code>resume_monitor()</code> for cost control</td></tr>
-      <tr><td>Query drift</td><td>Ad-hoc</td><td><code>query_drift(session, env, lookback_days=30)</code> returns drift metrics over time</td></tr>
-    </tbody>
-  </table>
-
-  <h3>Real-Time Inference Monitoring</h3>
-  <p>For SPCS services, the <code>autocapture=True</code> parameter on <code>mv.create_service()</code> enables automatic logging of all inference requests and responses. Query captured data with <code>INFERENCE_TABLE()</code>.</p>
-
-  <h3>Custom Metrics</h3>
-  <p>The native <code>MODEL MONITOR</code> handles built-in drift (PSI, Jensen&ndash;Shannon, Wasserstein), performance metrics (ROC_AUC, precision, recall), baseline comparison, segmentation, and the model monitoring dashboard. For a <strong>custom ML metric</strong> &mdash; such as a business score, dollar-weighted fraud loss, or a composite quality metric &mdash; use a different pattern:</p>
-  <ol>
-    <li><strong>Calculate</strong> &mdash; Use a Snowflake Task (scheduled SQL) or ML Job to compute the metric on a schedule.</li>
-    <li><strong>Store</strong> &mdash; Write timestamped results to a table (e.g., <code>CUSTOM_METRICS</code>).</li>
-    <li><strong>Alert</strong> &mdash; Create a Snowflake Alert that checks the latest value against a threshold.</li>
-  </ol>
-  <p>Example:</p>
-  <pre><code class="language-sql">-- 1. Create the metrics table
-CREATE TABLE IF NOT EXISTS CUSTOM_METRICS (
-    METRIC_TS TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
-    METRIC_NAME VARCHAR,
-    METRIC_VALUE FLOAT
-);
-
--- 2. Schedule a task to compute the metric daily
-CREATE OR REPLACE TASK COMPUTE_FRAUD_LOSS_TASK
-    WAREHOUSE = SNOW_MLOPS_PROD_WH
-    SCHEDULE = '1440 MINUTE'
-AS
-    INSERT INTO CUSTOM_METRICS (METRIC_NAME, METRIC_VALUE)
-    SELECT 'FRAUD_LOSS_DOLLARS',
-           SUM(CASE WHEN output_feature_1 > 0.5 AND IS_FRAUD = 1 THEN AMOUNT ELSE 0 END)
-    FROM BATCH_PREDICTIONS bp
-    JOIN RAW_TRANSACTIONS rt ON bp.TXN_ID = rt.TXN_ID
-    WHERE bp.SCORED_AT > DATEADD('DAY', -1, CURRENT_TIMESTAMP());
-
--- 3. Alert when metric crosses a threshold
-CREATE OR REPLACE ALERT FRAUD_LOSS_ALERT
-    WAREHOUSE = SNOW_MLOPS_PROD_WH
-    SCHEDULE = '1440 MINUTE'
-    IF (EXISTS (
-        SELECT 1 FROM CUSTOM_METRICS
-        WHERE METRIC_NAME = 'FRAUD_LOSS_DOLLARS'
-          AND METRIC_VALUE > 50000
-          AND METRIC_TS > DATEADD('DAY', -1, CURRENT_TIMESTAMP())
-    ))
-    THEN
-        INSERT INTO DRIFT_ALERTS (DRIFT_METRIC, THRESHOLD, STATUS)
-        VALUES ('FRAUD_LOSS_DOLLARS', 50000, 'CUSTOM_THRESHOLD_EXCEEDED');</code></pre>
-  <p>This pattern works for any metric that Snowflake&rsquo;s native <code>MODEL MONITOR</code> doesn&rsquo;t cover. Use the native monitor for what it does well (drift, performance, segmentation, dashboard), and custom Tasks + Alerts for business-specific metrics.</p>
-
-
-  <h2 id="experiment-tracking">Experiment Tracking</h2>
-
-  <p><a href="https://docs.snowflake.com/developer-guide/snowflake-ml/experiments">Snowflake Experiments</a> record training run parameters and metrics so you can compare models and select the best candidate for production.</p>
-
-  <h3>API Pattern</h3>
-  <pre><code class="language-python">from snowflake.ml.experiment import ExperimentTracking
-
-exp = ExperimentTracking(session=session, database_name=db, schema_name=schema)
-exp.set_experiment("FRAUD_DETECTION_TRAINING")
-
-run_name = f"pipeline_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-with exp.start_run(run_name):
-    exp.log_params({"n_estimators": 100, "max_depth": 6, "learning_rate": 0.1})
-    exp.log_params({"feature_view": "V1", "dataset_rows": "5000"})
-    exp.log_metrics({"auc_roc": 0.94, "f1_score": 0.82, "precision": 0.85})</code></pre>
-
-  <h3>Key Constraints</h3>
-  <ul>
-    <li><code>log_metrics()</code> only accepts numeric values (int/float). Filter non-numeric keys before calling.</li>
-    <li><code>log_params()</code> accepts any string value — use it for metadata like feature view names, dataset sizes.</li>
-    <li>Runs inside <code>@remote</code> functions (ML Jobs) — experiment tracking works from compute pools.</li>
-    <li>Controlled by <code>EXPERIMENT_CONFIG["enabled"]</code> — can be toggled off without code changes.</li>
-  </ul>
-
-  <h3>Configuration</h3>
-  <pre><code class="language-python">EXPERIMENT_CONFIG = {
-    "enabled": "true",
-    "experiment_name": "FRAUD_DETECTION_TRAINING",
-    "run_name_prefix": "pipeline",
-}</code></pre>
-
-
-  <h2 id="notebooks">Interactive Notebooks</h2>
-
-  <p>The <code>notebooks/</code> directory contains five Jupyter notebooks that mirror the pipeline stages. Use them to explore and prototype interactively before committing changes to the CI pipeline.</p>
-
-  <table>
-    <thead><tr><th>Notebook</th><th>What It Covers</th><th>Prerequisite</th></tr></thead>
-    <tbody>
-      <tr><td><code>01_setup_and_data.ipynb</code></td><td>Connect to Snowflake, verify infrastructure, inspect the synthetic dataset created by <code>generate_dataset.py</code></td><td><code>setup.sh</code> + <code>generate_dataset.py</code> must have run</td></tr>
-      <tr><td><code>02_feature_store.ipynb</code></td><td>Register entities and both feature views; inspect Dynamic Table refresh and feature schemas; generate a point-in-time correct training dataset</td><td>Notebook 01</td></tr>
-      <tr><td><code>03_model_training.ipynb</code></td><td>Train XGBoost interactively using the Feature Store dataset; evaluate metrics</td><td>Notebook 02</td></tr>
-      <tr><td><code>04_registry_and_deploy.ipynb</code></td><td>Register the trained model to the Model Registry; run batch inference on a warehouse; deploy a real-time SPCS service and test it</td><td>Notebook 03</td></tr>
-      <tr><td><code>05_pipeline_orchestration.ipynb</code></td><td>Deploy and execute the full Task DAG end-to-end; monitor task status; inspect experiment tracking results</td><td>Notebooks 01–04</td></tr>
-    </tbody>
-  </table>
-
-  <div class="note">
-    <strong>Notebooks vs CI pipeline</strong>
-    Notebooks are for exploration and development. The CI pipeline (<code>deploy.yml</code>) is the production path. Changes you make in notebooks should eventually be reflected in the corresponding source files under <code>source/</code> so the CI pipeline picks them up.
-  </div>
-
-
-  <h2 id="testing">Testing</h2>
-
-  <p>Unit tests run on every PR and push with no Snowflake connection; integration tests need a live PROD deployment.</p>
-
-  <h3>Unit Tests: <code>tests/test_config.py</code>, <code>test_pipeline_steps.py</code>, <code>test_gap_fillers.py</code></h3>
-  <p>Run on every PR and push — no Snowflake connection needed. Tests:</p>
-  <ul>
-    <li>Config values are the right types; required keys exist; every <code>STEPS</code> entry resolves to a step package exposing <code>run(session)</code></li>
-    <li><code>ML_RUNTIME_DEPS</code> matches <code>pyproject.toml [dependency-groups] ml-runtime</code> and every dep is pinned with <code>==</code></li>
-    <li>Gate rules reference metrics produced for the configured <code>task_type</code>; min/max rules, boundary values, and missing metrics</li>
-    <li>Champion/challenger: disabled, no champion, higher/lower-is-better, and improvement margins</li>
-    <li>Metrics per task type, signature-based output validation, data-check SQL and rules</li>
-    <li>Serving flags, gateway target parsing/weight validation/file round-trip, canary split, monitor source SQL, and batch Task wiring</li>
-  </ul>
-  <pre><code class="language-bash"># Run unit tests (no Snowflake required)
-uv run pytest tests/ -v --ignore=tests/test_endpoint.py</code></pre>
-
-  <h3>Integration Tests: <code>tests/test_endpoint.py</code></h3>
-  <p>Require a live PROD deployment — run manually after a successful <code>deploy-prod</code> job. Tests:</p>
-  <ul>
-    <li>Gateway exists and has a provisioned ingress URL</li>
-    <li>Active SPCS service behind the gateway is <code>READY</code></li>
-    <li>Service endpoint is publicly accessible</li>
-    <li><code>predict_proba</code> returns two columns (<code>output_feature_0</code>, <code>output_feature_1</code>)</li>
-    <li>Probabilities sum to 1.0 (within 0.01 tolerance)</li>
-    <li>Batch of 3 rows returns 3 results</li>
-    <li>A suspicious profile gets a higher fraud probability than a clean one</li>
-  </ul>
-  <pre><code class="language-bash"># Run integration tests (requires live PROD service)
-SNOWFLAKE_CONNECTION_NAME=your-connection uv run pytest tests/test_endpoint.py -v</code></pre>
-
-  <div class="note">
-    <strong>Integration tests are excluded from CI by default</strong>
-    The CI workflow runs <code>pytest tests/ -v --ignore=tests/test_endpoint.py</code>. Run <code>test_endpoint.py</code> manually after deployment to validate the live service, or add a post-deploy CI step if you want automated smoke testing.
-  </div>
-
-
-  <h2 id="config">Configuration</h2>
-
-  <p>All pipeline configuration lives in <code>source/configs/config.yml</code>. <code>source/config.py</code> is a thin loader that reads this YAML and re-exports the values as Python constants (<code>MODEL_NAME</code>, <code>TASK_TYPE</code>, <code>GATE_RULES</code>, <code>CHAMPION_CONFIG</code>, <code>BATCH_CONFIG</code>, <code>REALTIME_CONFIG</code>, <code>DATA_CHECKS</code>, <code>TRAINING_PARAMS</code>, <code>MONITOR_CONFIG</code>, &hellip;), so every module keeps one import surface.</p>
-
-  <pre><code class="language-yaml"># Target environment (where the pipeline WRITES)
-database: SNOW_MLOPS_DEV
-schema: ML
-warehouse: SNOW_MLOPS_DEV_WH
-compute_pool: SNOW_MLOPS_DEV_POOL
-
-# Source data (always PROD)
-source_database: SNOW_MLOPS_PROD
-source_schema: ML
-
-# Model identity and contract
-model:
-  name: MLOPS_FRAUD_DETECTOR
-  task_type: binary_classification   # binary_classification | multiclass | regression
-  predict_function: predict_proba    # predict_proba for classifiers, predict for regressors
-  id_columns: [CUSTOMER_ID]
-  label_column: IS_FRAUD
-
-# Feature Store
-feature_store:
-  view_name: CUSTOMER_RISK_FEATURES
-  view_version: V1
-  customer_features_refresh: "1 hour"
-  transaction_features_refresh: "1 hour"
-
-# Quality gate (evaluated in the EVALUATE step)
-quality_gate:
+<pre><code>quality_gate:
   metrics:
-    auc_roc: {min: 0.01}     # Template default; set your real bar for production
-    precision: {min: 0.01}
-    recall: {min: 0.01}
+    auc_roc: {min: 0.80}
+    recall: {min: 0.60}
   champion:
     enabled: true
     source_env: prod
     metric: auc_roc
     higher_is_better: true
-    min_improvement: -0.01
+    min_improvement: -0.01</code></pre>
+  <p>The STAGE job summary shows the result:</p>
+<pre><code>STAGE candidate MLOPS_FRAUD_DETECTOR/V5: quality gate PASSED
+Champion comparison: candidate auc_roc=0.5084 beats champion V4 auc_roc=0.5084 (improvement +0.0000, required >= -0.0100)
 
-# Training hyperparameters (read by the training step)
-training_params:
-  n_estimators: 100
-  learning_rate: 0.1
-  max_depth: 6
-  scale_pos_weight: 33
-  objective: "binary:logistic"
-  eval_metric: aucpr
-  random_state: 42
+| Metric           | Candidate (V5) | Champion (V4) | Change         | Gate rule | Result |
+| auc_roc (decision)| 0.5084        | 0.5084        | +0.0000 (same) | >= 0.01   | pass   |
+| log_loss         | 0.6748         | 0.6748        | +0.0000 (same) |           |        |
+...</code></pre>
 
-# Per-step compute: "warehouse" or "spcs"
-pipeline_steps:
-  feature_eng:
-    compute: spcs
-  train_model:
-    compute: spcs
-  evaluate:
-    compute: warehouse
+  <h2 id="serving">Serving</h2>
+  <p>Enable batch, real-time, or both with <code>serving.batch.enabled</code> and <code>serving.realtime.enabled</code>. CI skips the steps for disabled modes, so a batch-only use case never provisions an inference service.</p>
+  <h3 id="batch">Batch</h3>
+  <p>A scheduled task, <code>&lt;MODEL&gt;_BATCH_INFERENCE</code>, scores <code>serving.batch.input_table</code> (default: the training feature view) with the PROD default version and <strong>appends</strong> to <code>serving.batch.output_table</code> with <code>MODEL_VERSION</code>, <code>SCORED_AT</code>, and <code>RUN_ID</code>. Because it always uses the default version, it follows promotions and rollbacks automatically.</p>
+  <h3 id="realtime">Real-time</h3>
+  <p>Each PROD version gets its own inference service behind one gateway, which gives clients one stable URL while CI shifts traffic between versions. Traffic weights live in <code>gateway-config.yml</code>; edit them and merge to <code>main</code> to shift traffic.</p>
+  <p>Call the endpoint with a programmatic access token. Method names map to paths with dashes (<code>predict_proba</code> becomes <code>/predict-proba</code>):</p>
+<pre><code>curl -X POST "https://&lt;gateway-ingress-url&gt;/predict-proba" \
+  -H 'Authorization: Snowflake Token="&lt;PAT&gt;"' \
+  -H 'Content-Type: application/json' \
+  -d '{"dataframe_split": {"index": [0], "columns": ["TOTAL_TXN_COUNT", "..."], "data": [[20, "..."]]}}'</code></pre>
+  <p>The response is <code>{"data": [[row_index, {"output_feature_0": ..., "output_feature_1": ...}], ...]}</code>. Notebook <code>06</code> fetches features from the Feature Store, calls the gateway, and checks the results match <code>ModelVersion.run</code>.</p>
+  <div class="callout"><span class="t">Authentication</span><p>Use a PAT. Only the service owner can call the endpoint unless you grant the service role <code>ALL_ENDPOINTS_USAGE</code>; authorization failures return 404. See <a href="https://docs.snowflake.com/en/developer-guide/snowflake-ml/inference/real-time-inference-rest-api">Deploy models for real-time inference (REST API)</a> and <a href="https://docs.snowflake.com/en/developer-guide/snowpark-container-services/gateway">Gateways</a>.</p></div>
 
-# Serving
-serving:
-  batch:
-    enabled: true
-    schedule: "USING CRON 0 7 * * * America/Los_Angeles"
-    input_table: null          # null = the training feature view table
-    output_table: BATCH_PREDICTIONS
-  realtime:
-    enabled: true
-    gateway_name: FRAUD_DETECTOR_GATEWAY
-    min_instances: 1
-    max_instances: 2
-    canary_weight: 20
-    health_check_rows: 20
+  <h2 id="monitoring">Monitoring</h2>
+  <p>When <code>ENABLE_MODEL_MONITOR</code> is <code>true</code>, deploy-prod creates a model monitor on the PROD default version. Its source is a view over the batch predictions joined to ground truth (<code>monitor.actuals</code>), so it reports performance metrics as well as drift. Rows are identified by <code>id_columns</code> plus <code>RUN_ID</code>, because the append-only history repeats entity keys.</p>
+  <ul>
+    <li><strong>Baseline</strong>: <code>auto</code> snapshots the promotion-time validation scoring.</li>
+    <li><strong>Drift alert</strong>: a Snowflake alert checks <code>drift_metric</code> (default PSI) against <code>drift_threshold</code> on <code>alert_schedule</code>, writes to <code>DRIFT_ALERTS</code>, and optionally emails through a notification integration.</li>
+  </ul>
+  <p>See <a href="https://docs.snowflake.com/en/sql-reference/sql/create-model-monitor">CREATE MODEL MONITOR</a>.</p>
 
-# Data checks (run before feature engineering)
-data_checks:
-  RAW_TRANSACTIONS:
-    min_rows: 1000
-    max_null_pct: {CUSTOMER_ID: 0, IS_FRAUD: 0}
-    freshness_column: TIMESTAMP
-    max_age_hours: null        # synthetic data is static; set e.g. 26 for daily loads
-  CUSTOMER_PROFILES:
-    min_rows: 100
-    max_null_pct: {CUSTOMER_ID: 0}
+  <h2 id="workflows">CI/CD workflows reference</h2>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Workflow</th><th>Trigger</th><th>What it does</th></tr></thead>
+    <tbody>
+      <tr><td><code>deploy.yml</code></td><td>Pull request (checks only); push to <code>main</code>; manual dispatch (<code>promote_only</code>, <code>model_version</code>)</td><td>Code quality, deploy-stage, then deploy-prod after PROD approval</td></tr>
+      <tr><td><code>scheduled-retrain.yml</code></td><td>Weekly cron; manual</td><td>Retrain in STAGE on fresh data, write the job summary, open a GitHub issue for review</td></tr>
+      <tr><td><code>rollback.yml</code></td><td>Manual (<code>model_version</code>, <code>reason</code>)</td><td>Set the PROD default version back, route 100% of gateway traffic to that version's service, re-validate batch scoring</td></tr>
+      <tr><td><code>traffic-shift.yml</code></td><td>Push to <code>main</code> touching <code>gateway-config.yml</code>; manual</td><td>Apply gateway weights and drop services removed from the file. An empty file is a no-op.</td></tr>
+    </tbody>
+  </table></div>
 
-# Experiment Tracking
-experiment:
-  enabled: true
-  experiment_name: FRAUD_DETECTION_TRAINING
-  run_name_prefix: pipeline
+  <h2 id="access-control">Access control</h2>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Role</th><th>Used by</th><th>Access</th></tr></thead>
+    <tbody>
+      <tr><td><code>MLOPS_STAGE_ROLE</code></td><td>deploy-stage, scheduled retrain</td><td>Write DEV and STAGE; read PROD source data and PROD models (to score the champion)</td></tr>
+      <tr><td><code>MLOPS_PROD_ROLE</code></td><td>deploy-prod, rollback, traffic shift</td><td>Write PROD (models, tasks, services, gateways, monitors, alerts); read STAGE tables</td></tr>
+      <tr><td><code>MLOPS_STAGE_MODEL_OWNER</code></td><td>Granted to both roles above</td><td>Owns STAGE models. Copying a version with <code>... FROM MODEL</code> requires OWNERSHIP on the source model (USAGE only allows inference), so this role gives PROD exactly that without the rest of the STAGE role.</td></tr>
+    </tbody>
+  </table></div>
+  <p>Each service user has a default warehouse (OIDC sessions start without one) and the <code>GITHUB_ACTIONS_POLICY</code> network policy, which uses Snowflake's managed network rule for GitHub Actions runners.</p>
 
-# Model Monitor
-monitor:
-  monitor_name: FRAUD_DETECTOR_MONITOR
-  timestamp_column: SCORED_AT
-  prediction_column: output_feature_1
-  refresh_interval: "1 day"
-  aggregation_window: "7 days"
-  actuals:
-    table: RAW_TRANSACTIONS
-    join_keys: [CUSTOMER_ID]
-    label_sql: "MAX(IS_FRAUD::INT)"
-  baseline: auto
-  drift_metric: POPULATION_STABILITY_INDEX
-  drift_threshold: 0.25
-  alert_name: FRAUD_DETECTOR_DRIFT_ALERT
-  alert_schedule: "1440 MINUTE"
-  notification_integration: null
-  notification_recipients: []
-
-# Scheduled retraining
-retrain:
-  enabled: true
-  schedule: "USING CRON 0 6 * * MON America/Los_Angeles"
-  stage_only: true
-  notify_github_issue: true</code></pre>
-
-  <div class="note">
-    <strong>One setting stays in <code>pyproject.toml</code></strong>
-    <code>ML_RUNTIME_DEPS</code> is read from <code>[dependency-groups] ml-runtime</code> rather than YAML, because the same pins must feed the training job's <code>pip_requirements</code>, the warehouse sproc's <code>PACKAGES</code>, and <code>log_model(conda_dependencies=...)</code>.
-  </div>
-
-  <h3>Environment Overrides</h3>
-  <p>Per-environment infrastructure names live under <code>environments:</code> in the same file and are selected by <code>--env</code> on the DAG (<code>dev</code>, <code>stage</code>, or <code>prod</code>):</p>
-  <pre><code class="language-yaml">environments:
-  dev:
-    database: SNOW_MLOPS_DEV
-    warehouse: SNOW_MLOPS_DEV_WH
-    compute_pool: SNOW_MLOPS_DEV_POOL
-  stage:
-    database: SNOW_MLOPS_STAGE
-    warehouse: SNOW_MLOPS_STAGE_WH
-    compute_pool: SNOW_MLOPS_STAGE_POOL
-  prod:
-    database: SNOW_MLOPS_PROD
-    warehouse: SNOW_MLOPS_PROD_WH
-    compute_pool: SNOW_MLOPS_PROD_POOL</code></pre>
-  returning a flat dict of primitives:</p>
-  <pre><code class="language-python">from config import resolve_env_config
-
-cfg = resolve_env_config("stage")
-# {"env": "stage", "database": "SNOW_MLOPS_STAGE", "warehouse": ..., "compute_pool": ...}</code></pre>
-  <p>The DAG uses it to pick the target infrastructure and pins those names into each task's environment. <code>source/monitoring/model_monitor.py</code> uses the same function to resolve its environment.</p>
-
-  <h3>Adding a New Pipeline Step</h3>
-  <ol>
-    <li>Create <code>source/&lt;name&gt;/</code> with a logic module exposing <code>run(session) -&gt; dict</code> and an <code>entrypoint.py</code></li>
-    <li>Add an entry to <code>STEPS</code> in <code>source/pipeline/train_dag.py</code> (module, config key, pip deps), append it to <code>STEP_ORDER</code>, and add the package to <code>STAGED_PACKAGES</code></li>
-    <li>Add a <code>pipeline_steps.&lt;name&gt;</code> block to <code>source/configs/config.yml</code></li>
+  <h2 id="multi-account">Multi-account setup</h2>
+  <div class="callout warn"><span class="t">Not included in the template</span><p>The template promotes between databases in one account. Many organizations instead use a separate account per environment. The steps below describe how to adapt it; they aren't implemented or tested in the repository.</p></div>
+  <p>Across accounts, a model is promoted by replicating the database that contains it into the production account, then creating a production model from the replica. Based on <a href="https://docs.snowflake.com/en/user-guide/snowflake-cortex/copy-arctic-extract-models">Copy models between databases, schemas, and accounts</a>:</p>
+  <ol class="steps">
+    <li><strong>In the STAGE account</strong>, create a primary replication group for the STAGE database (ACCOUNTADMIN):
+<pre><code>CREATE REPLICATION GROUP mlops_models_rg
+  OBJECT_TYPES = DATABASES
+  ALLOWED_DATABASES = SNOW_MLOPS_STAGE
+  ALLOWED_ACCOUNTS = myorg.prod_account;</code></pre></li>
+    <li><strong>In the PROD account</strong>, create the secondary group, refresh it, and optionally schedule refreshes:
+<pre><code>CREATE REPLICATION GROUP mlops_models_rg AS REPLICA OF myorg.stage_account.mlops_models_rg;
+ALTER REPLICATION GROUP mlops_models_rg REFRESH;
+ALTER REPLICATION GROUP mlops_models_rg SET REPLICATION_SCHEDULE = '10 MINUTE';</code></pre></li>
+    <li><strong>Grant the PROD role</strong> access to the replica, including OWNERSHIP on its models (required to copy model files):
+<pre><code>GRANT USAGE ON DATABASE SNOW_MLOPS_STAGE TO ROLE MLOPS_PROD_ROLE;
+GRANT USAGE ON SCHEMA SNOW_MLOPS_STAGE.ML TO ROLE MLOPS_PROD_ROLE;
+GRANT OWNERSHIP ON ALL MODELS IN SCHEMA SNOW_MLOPS_STAGE.ML TO ROLE MLOPS_PROD_ROLE;</code></pre></li>
+    <li><strong>Promote from the replica</strong> in the PROD account. The production model is a separate object; each new version must be added explicitly:
+<pre><code>CREATE MODEL SNOW_MLOPS_PROD.ML.MLOPS_FRAUD_DETECTOR WITH VERSION V5
+  FROM MODEL SNOW_MLOPS_STAGE.ML.MLOPS_FRAUD_DETECTOR VERSION V5;
+-- later versions
+ALTER MODEL SNOW_MLOPS_PROD.ML.MLOPS_FRAUD_DETECTOR ADD VERSION V6
+  FROM MODEL SNOW_MLOPS_STAGE.ML.MLOPS_FRAUD_DETECTOR VERSION V6;</code></pre></li>
   </ol>
-  <p>No new dispatch code is required — both the ML Job and the stored procedure wrapper are built generically, and steps are chained in <code>STEP_ORDER</code>.</p>
+  <p>To wire this into the template:</p>
+  <ul>
+    <li>Add <code>deploy/strategies/multi_account.py</code> with a <code>promote(version)</code> that refreshes the replication group, waits for the candidate version to appear in the replica, and runs the statements above. Register it in <code>STRATEGIES</code> in <code>deploy/promote.py</code> and set the <code>TOPOLOGY</code> variable.</li>
+    <li>Run <code>setup.sh</code> and <code>setup_cicd.sh</code> in each account, with a separate <code>SNOWFLAKE_ACCOUNT</code> per GitHub environment. OIDC users are per account.</li>
+    <li>The champion comparison reads the PROD model from STAGE. Across accounts, either replicate the PROD database back to STAGE or disable <code>quality_gate.champion</code> and compare in deploy-prod instead.</li>
+    <li>Source data, feature views, services, the gateway, and monitors must exist in the PROD account. deploy-prod already registers PROD feature views before batch validation.</li>
+    <li>Secondary databases are read-only, and replication refresh adds latency between gating and promotion.</li>
+  </ul>
 
+  <h2 id="configuration">Configuration reference</h2>
+  <p>All pipeline settings live in <code>source/configs/config.yml</code>.</p>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Section</th><th>Purpose</th></tr></thead>
+    <tbody>
+      <tr><td><code>database</code>, <code>schema</code>, <code>warehouse</code>, <code>compute_pool</code></td><td>Defaults for the target environment (DEV)</td></tr>
+      <tr><td><code>source_database</code>, <code>source_schema</code></td><td>Where raw data lives (PROD)</td></tr>
+      <tr><td><code>model</code></td><td>Name, task type, predict function, ID and label columns</td></tr>
+      <tr><td><code>feature_store</code></td><td>Feature view name, version, refresh intervals</td></tr>
+      <tr><td><code>quality_gate</code></td><td>Metric rules and champion comparison</td></tr>
+      <tr><td><code>training_params</code></td><td>Hyperparameters passed to <code>train_model</code></td></tr>
+      <tr><td><code>pipeline_steps</code></td><td><code>warehouse</code> or <code>spcs</code> compute per step</td></tr>
+      <tr><td><code>serving</code></td><td>Batch schedule and tables; real-time gateway, instances, canary weight, health-check rows</td></tr>
+      <tr><td><code>data_checks</code></td><td>Per source table: <code>min_rows</code>, <code>max_null_pct</code>, freshness</td></tr>
+      <tr><td><code>environments</code></td><td>Database, warehouse, and compute pool for <code>dev</code>, <code>stage</code>, <code>prod</code></td></tr>
+      <tr><td><code>experiment</code></td><td>Experiment tracking name and run prefix</td></tr>
+      <tr><td><code>monitor</code></td><td>Columns, actuals join, baseline, drift metric and threshold, alert, notifications</td></tr>
+      <tr><td><code>retrain</code></td><td>Scheduled retraining settings</td></tr>
+    </tbody>
+  </table></div>
 
-  <script src="/libs/highlight.js@11.10.0/highlight.min.js"></script>
-  <script>
-    (function() {
-      var pyKw = /\b(from|import|as|def|class|return|if|elif|else|for|while|with|try|except|finally|raise|pass|yield|lambda|and|or|not|in|is|None|True|False|self|async|await)\b/g;
-      var sqlKw = /\b(SELECT|FROM|WHERE|INSERT|INTO|UPDATE|DELETE|CREATE|ALTER|DROP|TABLE|VIEW|INDEX|GRANT|REVOKE|SHOW|DESC|DESCRIBE|SET|USE|DATABASE|SCHEMA|WAREHOUSE|GATEWAY|SERVICE|MODEL|MONITOR|TASK|VALUES|AS|ON|TO|WITH|USING|CRON|AND|OR|NOT|IN|EXISTS|JOIN|LEFT|RIGHT|INNER|OUTER|GROUP|BY|ORDER|HAVING|LIMIT|UNION|ALL|CASE|WHEN|THEN|END|ELSE|IS|NULL|LIKE|BETWEEN|CURRENT_TIMESTAMP|PARSE_JSON|SPECIFICATION|TYPE|SPLIT_TYPE|TARGETS|WEIGHT|ENDPOINT|SPEC)\b/gi;
-      var strings = /(["'])(?:(?!\1|\\).|\\.)*?\1/g;
-      var comments = /(#[^\n]*|--[^\n]*)/g;
-      var decorators = /(@\w+)/g;
-      var numbers = /\b(\d+\.?\d*)\b/g;
-      var functions = /\b(\w+)\s*(?=\()/g;
+  <h2 id="troubleshooting">Troubleshooting</h2>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Symptom</th><th>Cause and fix</th></tr></thead>
+    <tbody>
+      <tr><td>Feature engineering fails with "already exists with a different schema"</td><td>Feature columns changed but <code>feature_store.view_version</code> didn't. Bump the version.</td></tr>
+      <tr><td><code>Stage 'bundle_module_code_...' does not exist or operation not authorized</code> during promotion</td><td>The PROD role lacks OWNERSHIP on the STAGE model. Re-run <code>setup_cicd.sh</code>, which grants <code>MLOPS_STAGE_MODEL_OWNER</code>.</td></tr>
+      <tr><td><code>No active warehouse selected</code> in CI</td><td>The service user has no default warehouse. Re-run <code>setup_cicd.sh</code>.</td></tr>
+      <tr><td>Gateway "does not exist" on the first PROD deploy</td><td>Fixed in the template: the first deploy creates the gateway. Upgrade <code>scripts/apply_gateway_config.py</code>.</td></tr>
+      <tr><td>Gateway shows "Endpoints provisioning in progress"</td><td>Normal for a few minutes after creation.</td></tr>
+      <tr><td>REST calls return 404</td><td>Wrong URL, or the PAT's role can't use the endpoint. Grant <code>ALL_ENDPOINTS_USAGE</code>.</td></tr>
+      <tr><td>REST calls return 500 with a connector session token</td><td>Use a PAT instead.</td></tr>
+      <tr><td><code>setup_cicd.sh</code> reports unfilled GitHub settings</td><td>Pass <code>GITHUB_OWNER</code>, <code>GITHUB_OWNER_ID</code>, <code>GITHUB_REPO</code>, and <code>GITHUB_REPO_ID</code>.</td></tr>
+      <tr><td>OIDC login fails in GitHub Actions</td><td>The subject must match <code>repo:&lt;owner&gt;@&lt;owner_id&gt;/&lt;repo&gt;@&lt;repo_id&gt;:environment:&lt;ENV&gt;</code>; the job's <code>environment</code> must be <code>STAGE</code> or <code>PROD</code>.</td></tr>
+    </tbody>
+  </table></div>
 
-      function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+  <h3 id="related">Related topics</h3>
+  <ul>
+    <li><a href="https://docs.snowflake.com/en/developer-guide/snowflake-ml/overview">Snowflake ML overview</a></li>
+    <li><a href="https://docs.snowflake.com/en/developer-guide/snowflake-ml/model-registry/model-management">Managing models with the Snowflake Model Registry</a></li>
+    <li><a href="https://docs.snowflake.com/en/sql-reference/sql/create-model">CREATE MODEL</a></li>
+    <li><a href="https://docs.snowflake.com/en/developer-guide/snowflake-ml/inference/real-time-inference-rest-api">Deploy models for real-time inference (REST API)</a></li>
+    <li><a href="https://docs.snowflake.com/en/sql-reference/sql/create-gateway">CREATE GATEWAY</a></li>
+    <li><a href="https://docs.snowflake.com/en/sql-reference/sql/create-model-monitor">CREATE MODEL MONITOR</a></li>
+  </ul>
+</main>
 
-      document.querySelectorAll('pre code[class*="language-"]').forEach(function(block) {
-        var lang = block.className.match(/language-(\w+)/);
-        if (!lang) return;
-        lang = lang[1];
-        if (lang === 'plaintext' || lang === 'bash') return;
-
-        var text = block.textContent;
-        var tokens = [];
-        var re, m;
-
-        // Extract strings first
-        re = new RegExp(strings.source, 'g');
-        while ((m = re.exec(text)) !== null) tokens.push({s:m.index, e:re.lastIndex, cls:'hl-str'});
-        // Comments
-        re = new RegExp(comments.source, 'g');
-        while ((m = re.exec(text)) !== null) tokens.push({s:m.index, e:re.lastIndex, cls:'hl-cm'});
-        // Decorators (Python)
-        if (lang === 'python') {
-          re = new RegExp(decorators.source, 'g');
-          while ((m = re.exec(text)) !== null) tokens.push({s:m.index, e:re.lastIndex, cls:'hl-dec'});
-        }
-
-        // Sort by position, longer matches win ties
-        tokens.sort(function(a,b) { return a.s - b.s || b.e - a.e; });
-        // Remove overlaps
-        var filtered = []; var last = 0;
-        tokens.forEach(function(t) { if (t.s >= last) { filtered.push(t); last = t.e; } });
-
-        // Build output with protected regions
-        var out = ''; var pos = 0;
-        filtered.forEach(function(t) {
-          var before = text.slice(pos, t.s);
-          // Highlight keywords in unprotected text
-          before = highlightKw(before, lang);
-          out += before + '<span class="' + t.cls + '">' + esc(text.slice(t.s, t.e)) + '</span>';
-          pos = t.e;
-        });
-        out += highlightKw(text.slice(pos), lang);
-        block.innerHTML = out;
-      });
-
-      function highlightKw(txt, lang) {
-        var escaped = esc(txt);
-        if (lang === 'python') {
-          escaped = escaped.replace(pyKw, '<span class="hl-kw">$1</span>');
-          escaped = escaped.replace(/\b(\w+)\s*(?=\()/g, '<span class="hl-fn">$1</span>');
-        } else if (lang === 'sql') {
-          escaped = escaped.replace(sqlKw, '<span class="hl-kw">$&</span>');
-        }
-        escaped = escaped.replace(/\b(\d+\.?\d*)\b/g, '<span class="hl-num">$1</span>');
-        return escaped;
-      }
-    })();
-  </script>
-  <a href="#top" class="back-to-top" title="Back to top">&uarr;</a>
+<nav class="toc" aria-label="On this page">
+  <strong>On this page</strong>
+  <ol>
+    <li class="grp">MLOps on Snowflake</li>
+    <li><a href="#overview">Overview</a></li>
+    <li><a href="#lifecycle">The ML lifecycle</a></li>
+    <li><a href="#reference-architecture">Reference architecture</a></li>
+    <li class="sub"><a href="#principles">Design principles</a></li>
+    <li><a href="#personas">Personas</a></li>
+    <li class="grp">The MLOps template</li>
+    <li><a href="#template">What it provides</a></li>
+    <li><a href="#template-architecture">Architecture</a></li>
+    <li><a href="#training-pipeline">Training pipeline</a></li>
+    <li><a href="#promotion">Promotion workflow</a></li>
+    <li><a href="#journeys">Persona journeys</a></li>
+    <li><a href="#get-started">Get started</a></li>
+    <li><a href="#bring-your-own-model">Bring your own model</a></li>
+    <li><a href="#versioning">Versioning and lineage</a></li>
+    <li><a href="#quality-gate">Quality gate</a></li>
+    <li><a href="#serving">Serving</a></li>
+    <li><a href="#monitoring">Monitoring</a></li>
+    <li><a href="#workflows">Workflows</a></li>
+    <li><a href="#access-control">Access control</a></li>
+    <li><a href="#multi-account">Multi-account setup</a></li>
+    <li><a href="#configuration">Configuration</a></li>
+    <li><a href="#troubleshooting">Troubleshooting</a></li>
+  </ol>
+</nav>
+</div>
 </body>
 </html>
