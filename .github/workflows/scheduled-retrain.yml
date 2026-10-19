@@ -63,6 +63,8 @@ jobs:
           METRICS_FILE: ${{ runner.temp }}/pipeline_metrics.json
 
       - name: "Quality gate: read candidate (STAGE only)"
+        # Run even if the DAG failed, so the summary reports the rejection or failing step
+        if: ${{ !cancelled() }}
         run: uv run python source/utils/read_candidate.py
         timeout-minutes: 10
         env:

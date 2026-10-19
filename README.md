@@ -280,7 +280,7 @@ snowflake-mlops/
 │       └── notify_candidate.py        # GitHub Issue notification for candidates
 ├── gateway-config.yml             # Real-time traffic split (edit + merge to shift)
 ├── tests/                         # Unit + integration tests
-├── notebooks/                     # Educational Jupyter notebooks (01-05)
+├── notebooks/                     # Educational Jupyter notebooks (01-06; 06 = Feature Store + REST inference)
 └── docs/
     └── docs.html                  # Detailed architecture documentation
 ```
@@ -411,7 +411,7 @@ curl -X POST "https://<ingress-url>/predict-proba" \
         "data": [[20, 150.5, 500.0, 100.0, 10, 30, 0.05, 700, 365, 80000]]}}'
 ```
 
-By default only the service owner can call the endpoint; grant another role access with the service role `ALL_ENDPOINTS_USAGE`. Authorization failures return 404. Callers supply the feature values themselves; Snowflake also offers request-time feature lookup from an online feature store (`create_service(feature_sources_per_function=...)`, public preview), which this template does not configure. See [Deploy models for real-time inference](https://docs.snowflake.com/en/developer-guide/snowflake-ml/inference/real-time-inference-rest-api).
+By default only the service owner can call the endpoint; grant another role access with the service role `ALL_ENDPOINTS_USAGE`. Authorization failures return 404. Use a PAT: in testing, connector session tokens passed authentication but the ingress returned HTTP 500. `notebooks/06_feature_store_and_rest_inference.ipynb` walks through the full client flow: fetch features from the Feature Store, call the gateway over REST, and check parity with warehouse scoring. Callers supply the feature values themselves; Snowflake also offers request-time feature lookup from an online feature store (`create_service(feature_sources_per_function=...)`, public preview), which this template does not configure. See [Deploy models for real-time inference](https://docs.snowflake.com/en/developer-guide/snowflake-ml/inference/real-time-inference-rest-api).
 
 ## Monitoring
 
