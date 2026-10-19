@@ -3,7 +3,7 @@ name: Traffic Shift
 on:
   push:
     branches: [main]
-    paths: ['gateway-config.yml']
+    paths: ['deploy/gateway-config.yml']
   workflow_dispatch:
     inputs:
       targets:
@@ -18,6 +18,7 @@ on:
 permissions:
   id-token: write
   contents: write
+  pull-requests: write
 
 concurrency:
   group: gateway-traffic
@@ -52,14 +53,14 @@ jobs:
       - name: Install dependencies
         run: uv sync --group snow --no-default-groups
 
-      - name: Update gateway-config.yml from inputs
+      - name: Update deploy/gateway-config.yml from inputs
         if: inputs.targets != ''
         env:
           TARGETS: ${{ inputs.targets }}
         run: uv run python scripts/apply_gateway_config.py --targets "$TARGETS"
         timeout-minutes: 5
 
-      - name: Apply gateway-config.yml (push-triggered)
+      - name: Apply deploy/gateway-config.yml (push-triggered)
         if: inputs.targets == ''
         run: uv run python scripts/apply_gateway_config.py
         timeout-minutes: 5
@@ -68,20 +69,11 @@ jobs:
         run: uv run python scripts/smoke_test_endpoint.py
         timeout-minutes: 15
 
-      - name: Commit updated gateway-config.yml
+      # main is protected: record the live split through a PR instead of a push
+      - name: Open PR syncing deploy/gateway-config.yml
         if: inputs.targets != ''
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
-          SHIFT_TARGETS: ${{ inputs.targets }}
-          SHIFT_REASON: ${{ inputs.reason }}
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add gateway-config.yml
-          if git diff --cached --quiet; then
-            echo "No changes to gateway-config.yml"
-          else
-            git commit -m "Traffic shift: ${SHIFT_TARGETS}${SHIFT_REASON:+ — $SHIFT_REASON}"
-            git push || echo "::warning::Could not push gateway-config.yml (branch protection)."
-          fi
+          bash scripts/sync_gateway_config.sh "Traffic shift: ${{ inputs.targets }}"

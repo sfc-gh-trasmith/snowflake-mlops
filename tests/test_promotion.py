@@ -149,9 +149,16 @@ def test_deploy_prod_smoke_tests_then_rolls_back_on_failure():
     names = [s.get("name", "") for s in steps]
     idx = {
         key: next(i for i, n in enumerate(names) if key in n)
-        for key in ("Capture", "Promote", "gateway traffic", "smoke", "Sync", "rollback")
+        for key in ("Capture", "Promote", "gateway traffic", "smoke", "Open PR syncing", "rollback")
     }
-    assert idx["Capture"] < idx["Promote"] < idx["gateway traffic"] < idx["smoke"] < idx["Sync"] < idx["rollback"]
+    assert (
+        idx["Capture"]
+        < idx["Promote"]
+        < idx["gateway traffic"]
+        < idx["smoke"]
+        < idx["Open PR syncing"]
+        < idx["rollback"]
+    )
     rollback = steps[idx["rollback"]]
     assert rollback["if"] == "failure() && steps.promote.outcome == 'success'"
     assert "prod_state.py --restore" in rollback["run"]

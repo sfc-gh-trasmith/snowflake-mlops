@@ -243,10 +243,11 @@ snowflake-mlops/
 ├── .github/workflows/
 │   ├── deploy.yml                 # PR checks + deploy (code quality → stage → prod)
 │   ├── scheduled-retrain.yml      # Cron: retrain → STAGE candidate → notify
-│   ├── traffic-shift.yml          # Gateway traffic allocation (gateway-config.yml)
+│   ├── traffic-shift.yml          # Gateway traffic allocation (deploy/gateway-config.yml)
 │   └── rollback.yml               # Manual: revert to previous version
 ├── deploy/
 │   ├── promote.py                 # STAGE → PROD model copy (FROM MODEL), sets default
+│   ├── gateway-config.yml         # Real-time traffic split (edit + merge to shift)
 │   └── set_default_version.py     # Used by the rollback workflow
 ├── scripts/
 │   ├── setup.sh                   # Infrastructure provisioning (incl. PyPI integration)
@@ -285,7 +286,6 @@ snowflake-mlops/
 │       ├── setup_model_monitor.py     # Model monitoring setup/validation
 │       ├── retention.py               # Prune old model / Dataset versions
 │       └── notify_candidate.py        # GitHub Issue notification for candidates
-├── gateway-config.yml             # Real-time traffic split (edit + merge to shift)
 ├── tests/                         # Unit tests; test_endpoint.py = live REST tests against PROD
 ├── notebooks/                     # Educational Jupyter notebooks (01-06; 06 = Feature Store + REST inference)
 └── docs/
@@ -399,7 +399,7 @@ Each model version records the Dataset version and feature view in its lineage a
 
 ### Real-time
 
-Each PROD version gets its own inference service (`<MODEL_NAME>_SERVICE_<VERSION>`) behind one Gateway. `gateway-config.yml` holds the traffic split; edit the weights and merge to `main` to shift traffic. Whenever a split is applied, every model service that isn't a gateway target is dropped, so only versions taking traffic use compute. Any registered version can be redeployed by the rollback workflow.
+Each PROD version gets its own inference service (`<MODEL_NAME>_SERVICE_<VERSION>`) behind one Gateway. `deploy/gateway-config.yml` holds the traffic split; edit the weights and merge to `main` to shift traffic. Whenever a split is applied, every model service that isn't a gateway target is dropped, so only versions taking traffic use compute. Any registered version can be redeployed by the rollback workflow.
 
 To call the endpoint:
 
@@ -450,7 +450,7 @@ Callers supply the feature values themselves; Snowflake also offers request-time
 | Push to `main` | Code quality → train → gate (vs PROD champion) → register → validate batch/monitor → PROD deploy → REST smoke test (auto-rollback on failure) | Required for PROD |
 | Weekly cron | Retrain on fresh data → register candidate → GitHub Issue | Manual promote via `promote_only` |
 | Manual dispatch | Promote existing candidate or full retrain | Required for PROD |
-| Merge to `main` touching `gateway-config.yml` (or manual dispatch) | Apply gateway traffic allocation across model versions | Merge review |
+| Merge to `main` touching `deploy/gateway-config.yml` (or manual dispatch) | Apply gateway traffic allocation across model versions | Merge review |
 | Rollback dispatch | Revert PROD to previous version | Immediate |
 
 ## Extending This Template
