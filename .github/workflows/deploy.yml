@@ -56,7 +56,7 @@ jobs:
         run: uv python install 3.12
 
       - name: Install dependencies
-        run: uv sync
+        run: uv sync --group ml-runtime  # metrics tests need scikit-learn
 
       - name: Lint (ruff)
         run: uv run ruff check source/ scripts/ deploy/ tests/
