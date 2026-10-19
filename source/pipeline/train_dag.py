@@ -133,7 +133,7 @@ def runtime_env(cfg: dict) -> dict:
     }
 
 
-def _remote_def(task_name: str, cfg: dict, job_stage: str, source_zip: Path):
+def _remote_def(task_name: str, cfg: dict, job_stage: str, source_zip: Path, session):
     """SPCS: an ML Job running on a container compute pool."""
     from snowflake.ml.jobs import remote
 
@@ -150,6 +150,8 @@ def _remote_def(task_name: str, cfg: dict, job_stage: str, source_zip: Path):
         external_access_integrations=[PYPI_ACCESS_INTEGRATION] if PYPI_ACCESS_INTEGRATION else None,
         imports=[str(source_zip)],
         name=task_name,
+        # Explicit: callers such as notebooks may already hold another session
+        session=session,
     )
     def run_step() -> str:
         import importlib
@@ -200,7 +202,9 @@ def _sproc_def(task_name: str, cfg: dict, imports_clause: str, packages_clause: 
     return sproc_definition(STEPS[task_name]["module"], runtime_env(cfg), imports_clause, packages_clause)
 
 
-def _task_def(task_name: str, cfg: dict, job_stage: str, source_zip: Path, imports_clause: str, packages_clause: str):
+def _task_def(
+    task_name: str, cfg: dict, job_stage: str, source_zip: Path, imports_clause: str, packages_clause: str, session
+):
     """Return the DAGTask definition for a step, based on its configured compute."""
     mode = step_compute(STEPS[task_name]["config_key"])
 
@@ -210,7 +214,7 @@ def _task_def(task_name: str, cfg: dict, job_stage: str, source_zip: Path, impor
                 f"Step '{task_name}' is configured for spcs but no compute_pool is set for this environment"
             )
         print(f"    {task_name}: spcs (compute pool: {cfg['compute_pool']})")
-        return _remote_def(task_name, cfg, job_stage, source_zip)
+        return _remote_def(task_name, cfg, job_stage, source_zip, session)
 
     print(f"    {task_name}: warehouse ({cfg['warehouse']})")
     return _sproc_def(task_name, cfg, imports_clause, packages_clause)
@@ -288,7 +292,9 @@ def deploy_dag(env: str):
             tasks = {
                 name: DAGTask(
                     name,
-                    definition=_task_def(name, cfg, pipeline_stage, source_zip, imports_clause, packages_clause),
+                    definition=_task_def(
+                        name, cfg, pipeline_stage, source_zip, imports_clause, packages_clause, session
+                    ),
                     warehouse=wh,
                 )
                 for name in STEP_ORDER
