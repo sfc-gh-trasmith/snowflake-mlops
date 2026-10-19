@@ -9,6 +9,7 @@ PIPELINE_RESULTS (STEP='evaluation').
             raises, so the DAG (and CI) fails and nothing can be promoted
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -72,6 +73,11 @@ def run(session) -> dict:
         "gate_passed": passed,
         "gate_failures": failures,
         "pipeline_status": "READY_FOR_REVIEW" if passed else "REJECTED",
+        # Lineage, surfaced in the CI job summary
+        "feature_view": training.get("feature_view"),
+        "dataset": training.get("dataset"),
+        "dataset_rows": training.get("dataset_rows"),
+        "git_sha": os.getenv("GITHUB_SHA", "local")[:7],
     }
     session.sql(f"""
         INSERT INTO {DATABASE}.{SCHEMA}.PIPELINE_RESULTS (STEP, STATUS, RESULT, CREATED_AT)

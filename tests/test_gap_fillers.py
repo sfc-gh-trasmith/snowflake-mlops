@@ -273,3 +273,55 @@ def test_comment_literal_escapes_quotes():
 
     assert _sql_string("it's") == "'it\\'s'"
     assert _sql_string(None) == "''"
+
+
+# ─── CI job summary ─────────────────────────────────────────────────────────
+
+
+def _evaluation(**overrides):
+    ev = {
+        "model_version": "V5",
+        "gate_passed": True,
+        "metrics": {"auc_roc": 0.91, "log_loss": 0.30, "recall": 0.70},
+        "gate_rules": {"auc_roc": {"min": 0.8}, "recall": {"min": 0.75}},
+        "champion": {
+            "available": True,
+            "version": "V4",
+            "source": "PROD.ML.M",
+            "metrics": {"auc_roc": 0.88, "log_loss": 0.35, "recall": 0.72},
+        },
+        "champion_comparison": "candidate auc_roc=0.9100 beats champion V4 auc_roc=0.8800",
+        "dataset": "D/V1_20261019_000000",
+        "feature_view": "FV$V1",
+        "git_sha": "abc1234",
+    }
+    ev.update(overrides)
+    return ev
+
+
+def test_summary_compares_candidate_with_champion():
+    from utils.read_candidate import summary_markdown
+
+    md = summary_markdown(_evaluation())
+    assert "Champion (V4)" in md and "quality gate PASSED" in md
+    assert "+0.0300 (better)" in md  # auc_roc up
+    assert "-0.0500 (better)" in md  # log_loss down is better
+    assert "| **FAIL** |" in md  # recall 0.70 < 0.75 rule
+    assert "`D/V1_20261019_000000`" in md and "approve the `PROD` environment" in md
+
+
+def test_summary_without_champion_and_on_rejection():
+    from utils.read_candidate import summary_markdown
+
+    md = summary_markdown(
+        _evaluation(champion={"available": False}, gate_passed=False, gate_failures=["recall=0.7000 < min 0.75"])
+    )
+    assert "No champion in PROD yet" in md and "quality gate FAILED" in md
+    assert "recall=0.7000 < min 0.75" in md and "removed from the STAGE registry" in md
+
+
+def test_failure_summary_names_failed_task():
+    from utils.read_candidate import failure_markdown
+
+    md = failure_markdown({"failed_tasks": {"MLOPS_DEMO_TASK$TRAIN_MODEL": "Job failed"}})
+    assert "TRAIN_MODEL" in md and "FAILED" in md

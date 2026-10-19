@@ -26,10 +26,17 @@ POLL_INTERVAL = 30  # seconds
 MAX_WAIT = 3600  # 1 hour
 
 
-def _latest_evaluation(session) -> dict:
+def _latest_evaluation(session, since=None) -> dict:
+    """Evaluation written by this run (on or after the root task's scheduled time).
+
+    Without the time bound, a run that failed before EVALUATE would report the
+    previous run's candidate. CREATED_AT is TIMESTAMP_NTZ (session-local), so
+    this assumes the pipeline and CI sessions share the account TIMEZONE.
+    """
+    where = f"AND CREATED_AT >= '{since}'::TIMESTAMP_LTZ" if since else ""
     rows = session.sql(f"""
         SELECT RESULT FROM {DATABASE}.{SCHEMA}.PIPELINE_RESULTS
-        WHERE STEP = 'evaluation'
+        WHERE STEP = 'evaluation' {where}
         ORDER BY CREATED_AT DESC LIMIT 1
     """).collect()
     return json.loads(rows[0]["RESULT"]) if rows else {}
@@ -90,7 +97,10 @@ def main():
         session.close()
         sys.exit(1)
 
-    evaluation = _latest_evaluation(session)
+    evaluation = _latest_evaluation(session, since)
+    if failed:
+        # Lets the CI summary say which step failed when EVALUATE never ran.
+        evaluation.setdefault("failed_tasks", {k: v["error"] for k, v in failed.items()})
     metrics_file = os.getenv("METRICS_FILE", "/tmp/pipeline_metrics.json")
     with open(metrics_file, "w") as f:
         json.dump(evaluation, f)
