@@ -10,7 +10,7 @@ Flow:
        - outputs are valid for the task type
        - parity: service outputs match warehouse mv.run() for the same version
        - agreement with the incumbent service (reported, not gated)
-  5. Write a canary split to gateway-config.yml (applied by apply_gateway_config.py)
+  5. Write a canary split to deploy/gateway-config.yml (applied by apply_gateway_config.py)
 
 All model-specific inputs come from the model signature and config, so no
 feature names or model types are hardcoded here.
@@ -201,7 +201,9 @@ def main():
                 f.write(f"| Mean abs diff vs incumbent | {report['incumbent_mean_abs_diff']:.4f} |\n")
             f.write("\n" + "\n".join(f"- `{t['service']}`: {t['weight']}%" for t in targets) + "\n")
 
-    print("\nNext: apply_gateway_config.py applies the split. Edit gateway-config.yml to 100% and merge to cut over.")
+    print(
+        "\nNext: apply_gateway_config.py applies the split. Edit deploy/gateway-config.yml to 100% and merge to cut over."
+    )
     session.close()
 
 

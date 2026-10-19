@@ -100,7 +100,7 @@ def test_repo_gateway_config_is_valid():
     """Shipped config is either empty (fresh template) or a valid split."""
     from apply_gateway_config import CONFIG_PATH, load_config, validate_weights
 
-    assert CONFIG_PATH == ROOT / "gateway-config.yml"
+    assert CONFIG_PATH == ROOT / "deploy" / "gateway-config.yml"
     targets = load_config()["targets"]
     assert targets == [] or validate_weights(targets) == []
 
@@ -264,3 +264,18 @@ def test_rest_outputs_must_match_warehouse_scoring():
     assert check_outputs(warehouse.copy(), warehouse) == []
     assert any("differ" in p for p in check_outputs(np.array([[0.8, 0.2], [0.2, 0.8]]), warehouse))
     assert any("sum to 1" in p for p in check_outputs(np.array([[0.9, 0.9], [0.2, 0.8]]), warehouse))
+
+
+def test_stale_split_cannot_drop_the_default_versions_service():
+    from apply_gateway_config import service_name, stale_split_problem
+
+    live = [service_name("V4"), service_name("V5")]
+    stale = [{"service": service_name("V4"), "weight": 100}]
+    canary = [{"service": service_name("V4"), "weight": 80}, {"service": service_name("V5"), "weight": 20}]
+    assert "stale" in stale_split_problem(stale, "V5", live)
+    assert stale_split_problem(canary, "V5", live) is None
+    # Rollback sets the default first, so routing to it is allowed
+    assert stale_split_problem(stale, "V4", live) is None
+    # First deploy: the default version has no service yet
+    assert stale_split_problem(stale, "V5", [service_name("V4")]) is None
+    assert stale_split_problem(stale, None, live) is None

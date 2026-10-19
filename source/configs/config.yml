@@ -119,7 +119,7 @@ serving:
     gateway_name: FRAUD_DETECTOR_GATEWAY
     min_instances: 1
     max_instances: 2
-    # Initial traffic % for a new version; raise it in gateway-config.yml
+    # Initial traffic % for a new version; raise it in deploy/gateway-config.yml
     canary_weight: 20
     # Rows from the batch input table used for the pre-canary health check
     health_check_rows: 20

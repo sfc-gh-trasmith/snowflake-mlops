@@ -20,7 +20,7 @@ import yaml
 from config import MODEL_NAME, REALTIME_CONFIG, SCHEMA, env_database, env_setting
 from snowpark_session import create_snowpark_session
 
-CONFIG_PATH = Path(__file__).resolve().parent.parent / "gateway-config.yml"
+CONFIG_PATH = Path(__file__).resolve().parent.parent / "deploy" / "gateway-config.yml"
 GATEWAY_NAME = REALTIME_CONFIG.get("gateway_name", f"{MODEL_NAME}_GATEWAY")
 PROD_DATABASE = os.getenv("SNOWFLAKE_DATABASE", env_database("prod"))
 PROD_SCHEMA = os.getenv("SNOWFLAKE_SCHEMA", SCHEMA)
@@ -164,6 +164,32 @@ def parse_targets_arg(targets_str):
     return targets
 
 
+def stale_split_problem(targets: list[dict], default_version: str | None, existing: list[str]) -> str | None:
+    """Refuse a split that would drop the PROD default version's live service.
+
+    The default version is what batch scoring and the monitor use, and every
+    deploy and rollback sets it before changing traffic. A split without it is
+    almost always a stale gateway-config.yml (e.g. one that predates the last
+    deploy). To move traffic off the default version, use the rollback
+    workflow, which changes the default first.
+    """
+    if not default_version:
+        return None
+    default_service = service_name(default_version)
+    if default_service in existing and default_service not in {t["service"] for t in targets}:
+        return (
+            f"split omits {default_service}, the PROD default version's live service; applying it would drop "
+            "that service. gateway-config.yml is probably stale: update it from the live gateway, or run the "
+            "rollback workflow to change the default version first."
+        )
+    return None
+
+
+def default_version(session, db, schema) -> str | None:
+    rows = session.sql(f"SHOW MODELS LIKE '{MODEL_NAME}' IN {db}.{schema}").collect()
+    return rows[0]["default_version_name"] if rows else None
+
+
 def update_config_file(targets, path=None):
     """Write targets back to gateway-config.yml, preserving the header comment."""
     p = Path(path) if path else CONFIG_PATH
@@ -222,6 +248,11 @@ def main():
     # Validate all target services exist
     print("\n[2/4] Validating target services...")
     validate_services(session, db, schema, targets)
+    problem = stale_split_problem(targets, default_version(session, db, schema), model_services(session, db, schema))
+    if problem:
+        session.close()
+        print(f"ERROR: {problem}")
+        sys.exit(1)
 
     # Apply the gateway change
     print("\n[3/4] Applying gateway traffic split...")
