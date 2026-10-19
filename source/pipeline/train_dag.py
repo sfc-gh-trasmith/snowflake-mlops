@@ -20,6 +20,7 @@ Usage:
 """
 
 import argparse
+import json
 import os
 import sys
 import tempfile
@@ -31,6 +32,7 @@ sys.path.insert(0, str(_SOURCE_DIR))
 
 from config import (
     ML_RUNTIME_DEPS,
+    PYPI_ACCESS_INTEGRATION,
     RETRAIN_CONFIG,
     resolve_env_config,
     step_compute,
@@ -49,17 +51,14 @@ STEPS = {
     "FEATURE_ENG": {
         "module": "feature_engineering.feature_engineering",
         "config_key": "feature_eng",
-        "pip": ["snowflake-ml-python"],
     },
     "TRAIN_MODEL": {
         "module": "model_training.training",
         "config_key": "train_model",
-        "pip": ML_RUNTIME_DEPS + ["snowflake-ml-python"],
     },
     "EVALUATE": {
         "module": "evaluate.evaluation",
         "config_key": "evaluate",
-        "pip": ["snowflake-ml-python"],
     },
 }
 
@@ -69,8 +68,11 @@ STEP_ORDER = ["FEATURE_ENG", "TRAIN_MODEL", "EVALUATE"]
 STAGED_PACKAGES = ["feature_engineering", "model_training", "evaluate", "serving"]
 STAGED_MODULES = ["config.py", "snowpark_session.py"]
 
-# Packages for warehouse stored procedures (Snowflake Anaconda channel).
-SP_PACKAGES = ["snowflake-snowpark-python", "snowflake-ml-python", "pyyaml"] + ML_RUNTIME_DEPS
+# Every step runs on the same pinned versions (pyproject.toml ml-runtime):
+# pip from PyPI for ML Jobs, the Snowflake Anaconda channel for warehouse
+# stored procedures.
+PIP_REQUIREMENTS = ML_RUNTIME_DEPS + ["pyyaml"]
+SP_PACKAGES = ["snowflake-snowpark-python", "pyyaml"] + ML_RUNTIME_DEPS
 
 # ─── Source packaging ────────────────────────────────────────────────────────
 
@@ -127,6 +129,7 @@ def runtime_env(cfg: dict) -> dict:
         "SNOWFLAKE_WAREHOUSE": cfg["warehouse"],
         "SNOWFLAKE_COMPUTE_POOL": cfg["compute_pool"],
         "GITHUB_SHA": _git_sha(),  # model version lineage: code -> model
+        "ML_RUNTIME_DEPS": json.dumps(ML_RUNTIME_DEPS),  # log_model pins (no pyproject in the zip)
     }
 
 
@@ -135,15 +138,16 @@ def _remote_def(task_name: str, cfg: dict, job_stage: str, source_zip: Path):
     from snowflake.ml.jobs import remote
 
     module = STEPS[task_name]["module"]
-    pip_requirements = STEPS[task_name]["pip"]
     pool = cfg["compute_pool"]
     env = runtime_env(cfg)
+    pins = list(ML_RUNTIME_DEPS)
 
     # A local .zip passed to imports= is uploaded as-is and placed on sys.path.
     @remote(
         pool,
         stage_name=job_stage,
-        pip_requirements=pip_requirements + ["pyyaml"],
+        pip_requirements=PIP_REQUIREMENTS,
+        external_access_integrations=[PYPI_ACCESS_INTEGRATION] if PYPI_ACCESS_INTEGRATION else None,
         imports=[str(source_zip)],
         name=task_name,
     )
@@ -155,6 +159,9 @@ def _remote_def(task_name: str, cfg: dict, job_stage: str, source_zip: Path):
         from snowflake.snowpark import Session
 
         os.environ.update(env)
+        from config import verify_pinned_versions
+
+        print(f"Runtime versions: {verify_pinned_versions(pins)}")
         session = Session.builder.getOrCreate()
         session.sql(f"USE WAREHOUSE {env['SNOWFLAKE_WAREHOUSE']}").collect()
 
@@ -165,7 +172,8 @@ def _remote_def(task_name: str, cfg: dict, job_stage: str, source_zip: Path):
 
 
 def sproc_definition(module: str, env: dict, imports_clause: str, packages_clause: str) -> str:
-    """Anonymous stored procedure that pins env vars, imports module, calls run()."""
+    """Anonymous stored procedure: pin env vars, verify versions, import module, call run()."""
+    pins = list(ML_RUNTIME_DEPS)
     return f"""
 WITH task_handler_sp AS PROCEDURE ()
 RETURNS STRING
@@ -179,6 +187,8 @@ import importlib, json, os
 
 def compute(session):
     os.environ.update({env!r})
+    from config import verify_pinned_versions
+    verify_pinned_versions({pins!r})
     step = importlib.import_module("{module}")
     return json.dumps(step.run(session))
 $$

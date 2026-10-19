@@ -1,6 +1,7 @@
 """Tests for the pipeline step contract and per-step compute configuration."""
 
 import inspect
+import json
 import sys
 from pathlib import Path
 
@@ -153,11 +154,42 @@ def test_step_packages_are_staged():
         assert pkg in STAGED_PACKAGES, f"Step '{pkg}' is not staged"
 
 
-def test_training_step_pins_ml_runtime_deps():
+def test_all_compute_paths_use_the_same_pins():
+    from config import ML_RUNTIME_DEPS, MODEL_DEPS
+    from pipeline.train_dag import PIP_REQUIREMENTS, SP_PACKAGES, runtime_env
+
+    assert any(d.startswith("snowflake-ml-python==") for d in ML_RUNTIME_DEPS), "snowflake-ml-python must be pinned"
+    for dep in ML_RUNTIME_DEPS:
+        assert "==" in dep, f"ml-runtime dependency must be an exact pin: {dep}"
+        assert dep in PIP_REQUIREMENTS, f"ML Jobs missing pin: {dep}"
+        assert dep in SP_PACKAGES, f"stored procedures missing pin: {dep}"
+    assert all(d in ML_RUNTIME_DEPS for d in MODEL_DEPS)
+    assert not any(d.startswith("snowflake-ml-python") for d in MODEL_DEPS)
+    env = runtime_env({"database": "D", "schema": "S", "warehouse": "W", "compute_pool": "P"})
+    assert json.loads(env["ML_RUNTIME_DEPS"]) == ML_RUNTIME_DEPS
+
+
+def test_client_pin_matches_runtime_pin():
+    """CI/local client and Snowflake runtimes must run the same snowflake-ml-python."""
+    import tomllib
+
     from config import ML_RUNTIME_DEPS
 
-    for dep in ML_RUNTIME_DEPS:
-        assert dep in STEPS["TRAIN_MODEL"]["pip"], f"TRAIN_MODEL is missing pinned dependency: {dep}"
+    pyproject = tomllib.loads((Path(__file__).resolve().parent.parent / "pyproject.toml").read_text())
+    runtime_pin = next(d for d in ML_RUNTIME_DEPS if d.startswith("snowflake-ml-python"))
+    assert runtime_pin in pyproject["project"]["dependencies"]
+    assert runtime_pin in pyproject["dependency-groups"]["snow"]
+
+
+def test_verify_pinned_versions():
+    from importlib.metadata import version
+
+    from config import verify_pinned_versions
+
+    have = version("pyyaml")
+    assert verify_pinned_versions([f"pyyaml=={have}", "unpinned-pkg"]) == {"pyyaml": have}
+    with pytest.raises(RuntimeError, match="pinned"):
+        verify_pinned_versions(["pyyaml==0.0.1"])
 
 
 def test_env_resolution_defined_in_one_place():

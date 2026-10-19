@@ -65,6 +65,11 @@ jobs:
           uv run python scripts/apply_gateway_config.py --targets "${MODEL_VERSION}:100"
         timeout-minutes: 25
 
+      - name: REST smoke test (gateway + services)
+        if: steps.serving.outputs.realtime_enabled == 'true'
+        run: uv run python scripts/smoke_test_endpoint.py
+        timeout-minutes: 15
+
       - name: Sync gateway-config.yml to repo
         if: steps.serving.outputs.realtime_enabled == 'true'
         continue-on-error: true

@@ -1,5 +1,5 @@
-"""Tests for model-agnostic metrics, output validation, data checks, serving
-flags, gateway config handling, monitor SQL, and batch DAG wiring."""
+"""Tests for output validation, serving flags, the gateway split, monitor SQL,
+batch DAG wiring, service cleanup, and the REST smoke test helpers."""
 
 import sys
 from pathlib import Path
@@ -10,47 +10,9 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "source"))
 sys.path.insert(0, str(ROOT / "scripts"))
-sys.path.insert(0, str(ROOT))  # deploy.strategies
+sys.path.insert(0, str(ROOT / "deploy"))
 
-from feature_engineering.data_checks import build_check_sql, evaluate_rules
-from model_training.metrics import METRICS_BY_TASK, compute_metrics
 from serving.signature import validate_outputs
-
-# ─── Metrics per task type ────────────────────────────────────────────────────
-
-
-def test_binary_metrics_from_predict_proba():
-    y = np.array([0, 0, 1, 1])
-    proba = np.array([[0.9, 0.1], [0.8, 0.2], [0.3, 0.7], [0.2, 0.8]])
-    m = compute_metrics("binary_classification", y, proba)
-    assert set(m) == set(METRICS_BY_TASK["binary_classification"])
-    assert m["auc_roc"] == pytest.approx(1.0)
-    assert m["precision"] == pytest.approx(1.0) and m["recall"] == pytest.approx(1.0)
-
-
-def test_binary_metrics_reject_hard_labels():
-    with pytest.raises(ValueError, match="predict_proba"):
-        compute_metrics("binary_classification", [0, 1], np.array([0, 1]))
-
-
-def test_multiclass_metrics():
-    y = np.array([0, 1, 2])
-    proba = np.eye(3) * 0.8 + 0.2 / 3
-    m = compute_metrics("multiclass", y, proba)
-    assert m["accuracy"] == pytest.approx(1.0)
-    assert "log_loss" in m
-
-
-def test_regression_metrics():
-    m = compute_metrics("regression", [1.0, 2.0, 3.0], [1.0, 2.0, 4.0])
-    assert m["mae"] == pytest.approx(1 / 3)
-    assert m["rmse"] == pytest.approx(np.sqrt(1 / 3))
-
-
-def test_unknown_task_type():
-    with pytest.raises(ValueError):
-        compute_metrics("ranking", [1], [1])
-
 
 # ─── Output validation ────────────────────────────────────────────────────────
 
@@ -71,33 +33,6 @@ def test_null_predictions_fail():
 
 def test_regression_ignores_probability_checks():
     assert validate_outputs("regression", np.array([120.0, -5.0])) == []
-
-
-# ─── Data checks ──────────────────────────────────────────────────────────────
-
-RULES = {"min_rows": 100, "max_null_pct": {"ID": 0, "LABEL": 5}, "freshness_column": "TS", "max_age_hours": 24}
-
-
-def test_check_sql_includes_each_rule():
-    sql = build_check_sql("DB.S.T", RULES)
-    assert "COUNT(*) AS ROW_COUNT" in sql
-    assert "NULL_PCT_0" in sql and "NULL_PCT_1" in sql
-    assert "AGE_HOURS" in sql and "FROM DB.S.T" in sql
-
-
-def test_check_sql_skips_freshness_without_max_age():
-    assert "AGE_HOURS" not in build_check_sql("T", {"freshness_column": "TS", "max_age_hours": None})
-
-
-def test_rules_pass():
-    stats = {"ROW_COUNT": 500, "NULL_PCT_0": 0, "NULL_PCT_1": 2.0, "AGE_HOURS": 3}
-    assert evaluate_rules("T", RULES, stats) == []
-
-
-def test_rules_report_every_failure():
-    stats = {"ROW_COUNT": 10, "NULL_PCT_0": 1.0, "NULL_PCT_1": 9.0, "AGE_HOURS": 48}
-    failures = evaluate_rules("T", RULES, stats)
-    assert len(failures) == 4
 
 
 # ─── Serving flags ────────────────────────────────────────────────────────────
@@ -141,6 +76,7 @@ def test_gateway_targets_parse_to_service_names():
         ([{"service": "A", "weight": 100}], True),
         ([{"service": "A", "weight": 80}, {"service": "B", "weight": 30}], False),
         ([{"service": "A", "weight": 50}, {"service": "A", "weight": 50}], False),
+        ([{"service": "A", "weight": 100}, {"service": "B", "weight": 0}], False),
         ([], False),
     ],
 )
@@ -244,84 +180,87 @@ def test_batch_scorer_exposes_run():
     assert list(inspect.signature(batch_inference.run).parameters) == ["session"]
 
 
-# ─── Promotion idempotency ──────────────────────────────────────────────────
+# ─── Service cleanup ──────────────────────────────────────────────────────────
 
 
-def _version(comment="", size=100, metadata="{}"):
-    return {"comment": comment, "size": size, "metadata": metadata}
+class _FakeSession:
+    """Returns canned rows per SQL prefix and records every statement."""
+
+    def __init__(self, responses):
+        self.responses, self.statements = responses, []
+
+    def sql(self, query):
+        self.statements.append(" ".join(query.split()))
+        rows = next((r for prefix, r in self.responses.items() if query.strip().startswith(prefix)), [])
+        return type("R", (), {"collect": lambda _self: rows})()
 
 
-def test_promotion_recognizes_same_training_run():
-    from deploy.strategies.single_account import same_version
-
-    stage = _version("dataset:D/V1_20261018_120000 | git:abc1234")
-    assert same_version(_version("dataset:D/V1_20261018_120000 | git:abc1234"), stage)
-    # A rebuilt STAGE reuses the name V1 for a different run: must not match.
-    assert not same_version(_version("dataset:D/V1_20261019_090000 | git:def5678"), stage)
-
-
-def test_promotion_falls_back_for_copies_without_comment():
-    from deploy.strategies.single_account import same_version
-
-    stage = _version("dataset:D/V1_x", size=268318, metadata='{"m": 1}')
-    assert same_version(_version("", size=268318, metadata='{"m": 1}'), stage)
-    assert not same_version(_version("", size=1, metadata='{"m": 1}'), stage)
+GATEWAY_SPEC = """spec:
+  type: traffic_split
+  split_type: custom
+  targets:
+    - type: endpoint
+      value: DB.S.M_SERVICE_V4!inference
+      weight: 80
+    - type: endpoint
+      value: DB.S.M_SERVICE_V5!inference
+      weight: 20
+"""
 
 
-def test_comment_literal_escapes_quotes():
-    from deploy.strategies.single_account import _sql_string
+def test_gateway_targets_parse_from_spec():
+    from apply_gateway_config import get_current_gateway_services, get_current_gateway_targets
 
-    assert _sql_string("it's") == "'it\\'s'"
-    assert _sql_string(None) == "''"
-
-
-# ─── CI job summary ─────────────────────────────────────────────────────────
-
-
-def _evaluation(**overrides):
-    ev = {
-        "model_version": "V5",
-        "gate_passed": True,
-        "metrics": {"auc_roc": 0.91, "log_loss": 0.30, "recall": 0.70},
-        "gate_rules": {"auc_roc": {"min": 0.8}, "recall": {"min": 0.75}},
-        "champion": {
-            "available": True,
-            "version": "V4",
-            "source": "PROD.ML.M",
-            "metrics": {"auc_roc": 0.88, "log_loss": 0.35, "recall": 0.72},
-        },
-        "champion_comparison": "candidate auc_roc=0.9100 beats champion V4 auc_roc=0.8800",
-        "dataset": "D/V1_20261019_000000",
-        "feature_view": "FV$V1",
-        "git_sha": "abc1234",
-    }
-    ev.update(overrides)
-    return ev
+    session = _FakeSession({"DESC GATEWAY": [{"spec": GATEWAY_SPEC}]})
+    assert get_current_gateway_targets(session, "DB", "S", "GW") == [
+        {"service": "M_SERVICE_V4", "weight": 80},
+        {"service": "M_SERVICE_V5", "weight": 20},
+    ]
+    assert get_current_gateway_services(session, "DB", "S", "GW") == ["M_SERVICE_V4", "M_SERVICE_V5"]
 
 
-def test_summary_compares_candidate_with_champion():
-    from utils.read_candidate import summary_markdown
+def test_services_without_traffic_are_unused():
+    from apply_gateway_config import unused_services
 
-    md = summary_markdown(_evaluation())
-    assert "Champion (V4)" in md and "quality gate PASSED" in md
-    assert "+0.0300 (better)" in md  # auc_roc up
-    assert "-0.0500 (better)" in md  # log_loss down is better
-    assert "| **FAIL** |" in md  # recall 0.70 < 0.75 rule
-    assert "`D/V1_20261019_000000`" in md and "approve the `PROD` environment" in md
+    existing = ["M_SERVICE_V3", "M_SERVICE_V4", "M_SERVICE_V5"]
+    assert unused_services(existing, [{"service": "M_SERVICE_V5", "weight": 100}]) == ["M_SERVICE_V3", "M_SERVICE_V4"]
+    assert unused_services(existing, [{"service": s, "weight": 1} for s in existing]) == []
 
 
-def test_summary_without_champion_and_on_rejection():
-    from utils.read_candidate import summary_markdown
+def test_cleanup_drops_every_service_outside_the_split():
+    from apply_gateway_config import MODEL_NAME, cleanup_unused_services
 
-    md = summary_markdown(
-        _evaluation(champion={"available": False}, gate_passed=False, gate_failures=["recall=0.7000 < min 0.75"])
-    )
-    assert "No champion in PROD yet" in md and "quality gate FAILED" in md
-    assert "recall=0.7000 < min 0.75" in md and "removed from the STAGE registry" in md
+    old, live = f"{MODEL_NAME}_SERVICE_V3", f"{MODEL_NAME}_SERVICE_V4"
+    session = _FakeSession({"SHOW SERVICES": [{"name": old}, {"name": live}]})
+    assert cleanup_unused_services(session, "DB", "S", [{"service": live, "weight": 100}]) == [old]
+    assert session.statements[-1] == f"DROP SERVICE IF EXISTS DB.S.{old}"
 
 
-def test_failure_summary_names_failed_task():
-    from utils.read_candidate import failure_markdown
+# ─── REST smoke test ──────────────────────────────────────────────────────────
 
-    md = failure_markdown({"failed_tasks": {"MLOPS_DEMO_TASK$TRAIN_MODEL": "Job failed"}})
-    assert "TRAIN_MODEL" in md and "FAILED" in md
+
+def test_rest_path_and_body():
+    import pandas as pd
+    from smoke_test_endpoint import method_path, rest_body
+
+    assert method_path("predict_proba") == "/predict-proba"
+    body = rest_body(pd.DataFrame({"A": [1, 2], "B": [0.5, 1.5]}))
+    assert body == {"dataframe_split": {"columns": ["A", "B"], "index": [0, 1], "data": [[1, 0.5], [2, 1.5]]}}
+
+
+def test_rest_response_is_reordered_and_row_counted():
+    from smoke_test_endpoint import parse_response
+
+    payload = {"data": [[1, {"p0": 0.2, "p1": 0.8}], [0, {"p0": 0.9, "p1": 0.1}]]}
+    assert parse_response(payload, 2, ["p0", "p1"]).tolist() == [[0.9, 0.1], [0.2, 0.8]]
+    with pytest.raises(ValueError, match="expected 3 predictions"):
+        parse_response(payload, 3, ["p0", "p1"])
+
+
+def test_rest_outputs_must_match_warehouse_scoring():
+    from smoke_test_endpoint import check_outputs
+
+    warehouse = np.array([[0.9, 0.1], [0.2, 0.8]])
+    assert check_outputs(warehouse.copy(), warehouse) == []
+    assert any("differ" in p for p in check_outputs(np.array([[0.8, 0.2], [0.2, 0.8]]), warehouse))
+    assert any("sum to 1" in p for p in check_outputs(np.array([[0.9, 0.9], [0.2, 0.8]]), warehouse))

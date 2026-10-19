@@ -1,9 +1,10 @@
 """Apply gateway traffic configuration from gateway-config.yml.
 
 Reads the YAML file, validates all services exist and are READY,
-validates weights sum to 100, applies ALTER GATEWAY, and drops
-any services that were previously in the gateway but are no longer
-in the config.
+validates weights sum to 100, applies ALTER GATEWAY, and drops every
+per-version inference service that is not a gateway target. A service
+receiving no traffic only costs compute, and any version can be redeployed
+from the registry (rollback workflow).
 
 Called by .github/workflows/traffic-shift.yml on push to main.
 """
@@ -46,28 +47,34 @@ def validate_weights(targets: list[dict]) -> list[str]:
     total = sum(int(t.get("weight", 0)) for t in targets)
     if total != 100:
         problems.append(f"weights sum to {total}, must be 100")
-    if any(int(t.get("weight", 0)) < 0 for t in targets):
-        problems.append("negative weight")
+    if any(int(t.get("weight", 0)) <= 0 for t in targets):
+        problems.append("weights must be > 0 (remove a target to stop serving it)")
     names = [t.get("service") for t in targets]
     if len(set(names)) != len(names):
         problems.append("duplicate services")
     return problems
 
 
-def get_current_gateway_services(session, db, schema, gateway_name):
-    """Parse the current gateway spec to find all active service names."""
+def get_current_gateway_targets(session, db, schema, gateway_name) -> list[dict]:
+    """Current gateway split as [{"service", "weight"}] (empty if no gateway)."""
     try:
         rows = session.sql(f"DESC GATEWAY {db}.{schema}.{gateway_name}").collect()
     except Exception:
         return []
-    spec = rows[0]["spec"]
-    services = []
-    for line in spec.split("\n"):
+    targets = []
+    for line in (rows[0]["spec"] if rows else "").split("\n"):
         line = line.strip()
         if line.startswith("value:"):
             fqn = line.split("value:")[1].strip().split("!")[0].strip()
-            services.append(fqn.split(".")[-1])
-    return services
+            targets.append({"service": fqn.split(".")[-1], "weight": None})
+        elif line.startswith("weight:") and targets:
+            targets[-1]["weight"] = int(line.split("weight:")[1])
+    return targets
+
+
+def get_current_gateway_services(session, db, schema, gateway_name) -> list[str]:
+    """Services currently behind the gateway."""
+    return [t["service"] for t in get_current_gateway_targets(session, db, schema, gateway_name)]
 
 
 def validate_services(session, db, schema, targets):
@@ -117,13 +124,32 @@ def apply_gateway(session, db, schema, gateway_name, targets):
     """).collect()
 
 
-def cleanup_removed_services(session, db, schema, old_services, new_targets):
-    """Drop services that were in the gateway but are no longer in the config."""
-    new_set = {t["service"] for t in new_targets}
-    for svc in old_services:
-        if svc not in new_set:
-            print(f"  Dropping removed service: {svc}")
-            session.sql(f"DROP SERVICE IF EXISTS {db}.{schema}.{svc}").collect()
+def model_services(session, db, schema) -> list[str]:
+    """All per-version inference services for this model (<MODEL>_SERVICE_<V>)."""
+    rows = session.sql(f"SHOW SERVICES LIKE '{MODEL_NAME}_SERVICE_%' IN SCHEMA {db}.{schema}").collect()
+    return [r["name"] for r in rows]
+
+
+def unused_services(existing: list[str], targets: list[dict]) -> list[str]:
+    """Services that exist but receive no gateway traffic."""
+    serving = {t["service"] for t in targets}
+    return [s for s in existing if s not in serving]
+
+
+def cleanup_unused_services(session, db, schema, targets) -> list[str]:
+    """Drop every model service the gateway doesn't route traffic to.
+
+    Covers services removed from the config, services left behind by older
+    deploys, and canaries that never made it into the gateway.
+    """
+    dropped = []
+    for svc in unused_services(model_services(session, db, schema), targets):
+        print(f"  Dropping unused service: {svc}")
+        session.sql(f"DROP SERVICE IF EXISTS {db}.{schema}.{svc}").collect()
+        dropped.append(svc)
+    if not dropped:
+        print("  No unused services.")
+    return dropped
 
 
 def parse_targets_arg(targets_str):
@@ -202,9 +228,9 @@ def main():
     apply_gateway(session, db, schema, gateway_name, targets)
     print("  Gateway updated.")
 
-    # Cleanup services removed from config
-    print("\n[4/4] Cleaning up removed services...")
-    cleanup_removed_services(session, db, schema, old_services, targets)
+    # Drop services that no longer receive traffic
+    print("\n[4/4] Dropping services with no gateway traffic...")
+    dropped = cleanup_unused_services(session, db, schema, targets)
 
     # Write to Job Summary if in CI
     summary_path = os.getenv("GITHUB_STEP_SUMMARY")
@@ -214,6 +240,8 @@ def main():
             f.write("| Service | Weight |\n|---------|--------|\n")
             for t in targets:
                 f.write(f"| `{t['service']}` | {t['weight']}% |\n")
+            if dropped:
+                f.write("\nDropped (no traffic): " + ", ".join(f"`{s}`" for s in dropped) + "\n")
 
     print("\n" + "=" * 60)
     print("TRAFFIC SHIFT COMPLETE")

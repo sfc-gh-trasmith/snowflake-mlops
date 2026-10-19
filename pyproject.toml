@@ -5,8 +5,7 @@ description = "End-to-end MLOps pipeline on Snowflake: Feature Store, ML Jobs, M
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "llvmlite>=0.48.0",
-    "snowflake-ml-python>=1.47.0",
+    "snowflake-ml-python==2.4.0",
     "pyyaml>=6.0",
 ]
 
@@ -17,15 +16,20 @@ dev = [
 ]
 snow = [
     "snowflake-snowpark-python>=1.53.1",
-    "snowflake-ml-python>=1.47.0",
+    "snowflake-ml-python==2.4.0",
     "snowflake>=1.0.0",
 ]
 ml-runtime = [
-    # Pinned to the versions preinstalled in the Snowflake ML Job runtime image,
-    # so SPCS training needs no network access (no PyPI external access
-    # integration). The same pins feed warehouse training and Model Registry
-    # serving, keeping train/serve versions identical. When the runtime image
-    # updates, bump these to match.
+    # Single source of truth for library versions on every compute path:
+    #   - CI / local client (this lockfile)
+    #   - ML Jobs on SPCS: installed from PyPI via the external access
+    #     integration in config.yml (compute.pypi_access_integration)
+    #   - warehouse stored procedures: Snowflake Anaconda channel
+    #   - Model Registry serving: log_model(conda_dependencies=)
+    # Each pipeline step verifies the installed versions match these pins
+    # before running. Bump in one place; versions must exist on both PyPI and
+    # the Anaconda channel (SELECT * FROM INFORMATION_SCHEMA.PACKAGES).
+    "snowflake-ml-python==2.4.0",
     "xgboost==3.3.0",
     "scikit-learn==1.8.0",
 ]

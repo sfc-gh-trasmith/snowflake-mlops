@@ -27,10 +27,6 @@ CREATE COMPUTE POOL IF NOT EXISTS SNOW_MLOPS_DEV_POOL
     AUTO_SUSPEND_SECS = 300
     AUTO_RESUME = TRUE;
 
-USE SCHEMA SNOW_MLOPS_DEV.ML;
-CREATE STAGE IF NOT EXISTS ML_ARTIFACTS ENCRYPTION = (TYPE = 'SNOWFLAKE_SSE');
-CREATE STAGE IF NOT EXISTS DAG_STAGE ENCRYPTION = (TYPE = 'SNOWFLAKE_SSE');
-CREATE STAGE IF NOT EXISTS JOB_STAGE ENCRYPTION = (TYPE = 'SNOWFLAKE_SSE');
 
 -- =============================================================================
 -- STAGE Environment
@@ -51,10 +47,6 @@ CREATE COMPUTE POOL IF NOT EXISTS SNOW_MLOPS_STAGE_POOL
     AUTO_SUSPEND_SECS = 300
     AUTO_RESUME = TRUE;
 
-USE SCHEMA SNOW_MLOPS_STAGE.ML;
-CREATE STAGE IF NOT EXISTS ML_ARTIFACTS ENCRYPTION = (TYPE = 'SNOWFLAKE_SSE');
-CREATE STAGE IF NOT EXISTS DAG_STAGE ENCRYPTION = (TYPE = 'SNOWFLAKE_SSE');
-CREATE STAGE IF NOT EXISTS JOB_STAGE ENCRYPTION = (TYPE = 'SNOWFLAKE_SSE');
 
 -- =============================================================================
 -- PROD Environment
@@ -75,10 +67,23 @@ CREATE COMPUTE POOL IF NOT EXISTS SNOW_MLOPS_PROD_POOL
     AUTO_SUSPEND_SECS = 300
     AUTO_RESUME = TRUE;
 
-USE SCHEMA SNOW_MLOPS_PROD.ML;
-CREATE STAGE IF NOT EXISTS ML_ARTIFACTS ENCRYPTION = (TYPE = 'SNOWFLAKE_SSE');
-CREATE STAGE IF NOT EXISTS DAG_STAGE ENCRYPTION = (TYPE = 'SNOWFLAKE_SSE');
-CREATE STAGE IF NOT EXISTS JOB_STAGE ENCRYPTION = (TYPE = 'SNOWFLAKE_SSE');
+
+-- =============================================================================
+-- PyPI egress for ML Jobs
+-- =============================================================================
+-- ML Jobs pip-install the exact versions pinned in pyproject.toml [ml-runtime].
+-- Without this integration pip cannot reach PyPI and the job silently keeps
+-- the runtime image's preinstalled versions (the pipeline's version check
+-- then fails the step). Name must match pypi_access_integration in config.yml.
+CREATE NETWORK RULE IF NOT EXISTS SNOW_MLOPS_PROD.ML.MLOPS_PYPI_NETWORK_RULE
+    MODE = EGRESS
+    TYPE = HOST_PORT
+    VALUE_LIST = ('pypi.org', 'pypi.python.org', 'pythonhosted.org', 'files.pythonhosted.org');
+
+CREATE EXTERNAL ACCESS INTEGRATION IF NOT EXISTS MLOPS_PYPI_ACCESS_INTEGRATION
+    ALLOWED_NETWORK_RULES = (SNOW_MLOPS_PROD.ML.MLOPS_PYPI_NETWORK_RULE)
+    ENABLED = TRUE
+    COMMENT = 'PyPI egress for snowflake-mlops ML Jobs (pinned pip_requirements)';
 
 -- =============================================================================
 -- Account-level grants
@@ -106,4 +111,4 @@ echo "  Database:      SNOW_MLOPS_PROD"
 echo "  Warehouse:     SNOW_MLOPS_PROD_WH"
 echo "  Compute Pool:  SNOW_MLOPS_PROD_POOL"
 echo ""
-echo "Stages (all):    ML_ARTIFACTS, DAG_STAGE, JOB_STAGE"
+echo "PyPI access:     MLOPS_PYPI_ACCESS_INTEGRATION (ML Jobs install pinned versions)"

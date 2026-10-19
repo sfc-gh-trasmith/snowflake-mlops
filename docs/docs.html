@@ -332,7 +332,7 @@
     <div class="card"><h4>Pipeline</h4><p>A Snowflake task graph: data checks and feature engineering, training and registration, evaluation and gating. Each step runs on a warehouse or a compute pool, chosen in config.</p></div>
     <div class="card"><h4>Promotion</h4><p>Code-driven (merge to main) and data-driven (weekly retrain). PROD requires approval and receives the exact STAGE version.</p></div>
     <div class="card"><h4>Serving</h4><p>Batch, real-time, or both. A scheduled scoring task, and per-version inference services behind a gateway with canary weights in Git.</p></div>
-    <div class="card"><h4>Operations</h4><p>Model monitor with ground truth, drift alerts, one-click rollback, release tags, and a job summary comparing every candidate with the champion.</p></div>
+    <div class="card"><h4>Operations</h4><p>Model monitor with ground truth, drift alerts, one-click and automatic rollback, a REST smoke test, release tags, and a job summary comparing every candidate with the champion.</p></div>
   </div>
   <div class="callout"><span class="t">Scope</span><p>The template targets a single Snowflake account with one database per environment. For separate accounts per environment, see <a href="#multi-account">Multi-account setup</a>.</p></div>
 
@@ -454,9 +454,9 @@
 
   <h3 id="project-layout">Project layout</h3>
 <pre><code>.github/workflows/      deploy.yml, scheduled-retrain.yml, rollback.yml, traffic-shift.yml
-deploy/                 promote.py, set_default_version.py, strategies/single_account.py
-scripts/                setup.sh, setup_cicd.sh, generate_dataset.py,
-                        deploy_prod_service.py, apply_gateway_config.py
+deploy/                 promote.py, set_default_version.py
+scripts/                setup.sh, setup_cicd.sh, generate_dataset.py, deploy_prod_service.py,
+                        apply_gateway_config.py, smoke_test_endpoint.py, prod_state.py
 source/
   configs/config.yml    single source of truth for pipeline settings
   config.py             loads config.yml, resolves per-environment names
@@ -466,10 +466,10 @@ source/
   serving/              batch_inference.py, signature.py
   monitoring/           model_monitor.py
   pipeline/             train_dag.py, batch_inference_dag.py
-  utils/                CI helpers (wait_for_task, read_candidate, serving_flags, ...)
+  utils/                CI helpers (wait_for_task, read_candidate, retention, ...)
 gateway-config.yml      real-time traffic weights (edit + merge to shift traffic)
 notebooks/              01-06: setup, feature store, training, registry, DAG, REST inference
-tests/                  unit tests (no Snowflake) + endpoint integration tests</code></pre>
+tests/                  unit tests (no Snowflake) + live REST tests (test_endpoint.py)</code></pre>
 
   <h2 id="training-pipeline">Training pipeline</h2>
   <p>The training pipeline is a Snowflake task graph named <code>MLOPS_DEMO_TASK</code>, deployed and run by <code>source/pipeline/train_dag.py</code>. Each step is a package under <code>source/</code> exposing <code>run(session) -&gt; dict</code>. At deploy time the step code and configuration are zipped and staged; each step then runs either as an <strong>ML Job</strong> on a compute pool or as a <strong>stored procedure</strong> on a warehouse, according to <code>pipeline_steps</code> in <code>config.yml</code>. Steps hand results to each other through the <code>PIPELINE_RESULTS</code> table.</p>
@@ -552,17 +552,22 @@ uv run python source/pipeline/train_dag.py --execute --env dev</code></pre>
     <li>Write the <strong>job summary</strong>: every metric for the candidate and the PROD champion side by side, the change, the decision metric, per-rule results, and lineage. It is written even if the pipeline fails, so rejections are reported.</li>
     <li>If batch serving is enabled, score with the candidate and validate the outputs.</li>
     <li>If monitoring is enabled, create the monitor and drift alert, verify them, then drop them.</li>
+    <li><strong>Retention</strong>: prune STAGE model and Dataset versions beyond the newest N (see <a href="#versioning">Versioning and lineage</a>).</li>
   </ol>
 
   <h3 id="deploy-prod">deploy-prod (after approval)</h3>
   <ol class="steps">
+    <li><strong>Capture</strong> the current PROD default version and gateway split, for automatic rollback.</li>
     <li><strong>Promote</strong>: copy the gated version into the PROD registry with <code>CREATE MODEL ... FROM MODEL</code> or <code>ALTER MODEL ... ADD VERSION ... FROM MODEL</code>, copy the lineage comment, and set it as the default version. Re-running is safe: an identical version already in PROD is kept.</li>
     <li><strong>Batch</strong>: register PROD feature views, validate scoring with the promoted version, and deploy the scheduled scoring task.</li>
-    <li><strong>Real-time</strong>: create <code>&lt;MODEL&gt;_SERVICE_&lt;VERSION&gt;</code>, health-check it (valid outputs, parity with warehouse scoring within 1e-4, agreement with the incumbent), then route <code>canary_weight</code>% of gateway traffic to it. The first deploy creates the gateway with 100% to the new version.</li>
+    <li><strong>Real-time</strong>: create <code>&lt;MODEL&gt;_SERVICE_&lt;VERSION&gt;</code>, health-check it (valid outputs, parity with warehouse scoring within 1e-4, agreement with the incumbent), then route <code>canary_weight</code>% of gateway traffic to it. The first deploy creates the gateway with 100% to the new version. Applying the split drops every model service that isn't a gateway target; a service that fails its health check is dropped before it takes traffic.</li>
+    <li><strong>REST smoke test</strong>: real HTTPS calls to the gateway and to each service behind it, authenticated with a one-day PAT that the job issues for its own service user and removes afterwards. Each response must have one valid prediction per row and match warehouse scoring of the same version.</li>
     <li>Commit the new weights to <code>gateway-config.yml</code>.</li>
     <li>Create or update the PROD model monitor and drift alert.</li>
+    <li><strong>Retention</strong>: prune old PROD model versions.</li>
     <li>Tag the release as <code>prod/&lt;VERSION&gt;-&lt;timestamp&gt;</code>.</li>
   </ol>
+  <div class="callout"><span class="t">Automatic rollback</span><p>If any step after promotion fails (service, health check, gateway, smoke test, or monitor), deploy-prod restores the captured default version and gateway split, which also drops the failed version's service. Batch scoring follows the default version, so it is restored too. On the very first deployment there is nothing to restore, and the job just fails.</p></div>
 
   <h2 id="journeys">Persona journeys</h2>
   <h3 id="journey-ds">Data scientist: ship a model improvement</h3>
@@ -615,7 +620,6 @@ GITHUB_OWNER=&lt;owner&gt; GITHUB_OWNER_ID=&lt;owner_id&gt; GITHUB_REPO=&lt;repo
           <tr><td><code>SNOWFLAKE_DATABASE_STAGE</code> / <code>SNOWFLAKE_DATABASE_PROD</code></td><td><code>SNOW_MLOPS_STAGE</code> / <code>SNOW_MLOPS_PROD</code></td></tr>
           <tr><td><code>SNOWFLAKE_SCHEMA</code></td><td><code>ML</code></td></tr>
           <tr><td><code>SNOWFLAKE_USER_STAGE</code> / <code>SNOWFLAKE_USER_PROD</code></td><td><code>SVC_GITHUB_ACTIONS_STAGE</code> / <code>SVC_GITHUB_ACTIONS</code></td></tr>
-          <tr><td><code>TOPOLOGY</code></td><td><code>single-account</code></td></tr>
           <tr><td><code>ENABLE_MODEL_MONITOR</code></td><td><code>true</code></td></tr>
         </tbody>
       </table></div></li>
@@ -636,7 +640,7 @@ GITHUB_OWNER=&lt;owner&gt; GITHUB_OWNER_ID=&lt;owner_id&gt; GITHUB_REPO=&lt;repo
     <li><strong>Replace two functions</strong> in <code>source/model_training/training.py</code>: <code>build_dataset(session)</code> (returns the Dataset and a pandas frame) and <code>train_model(X_train, y_train)</code> (returns a fitted model). Any model type the Model Registry supports works.</li>
     <li><strong>Define your features</strong> in <code>source/feature_engineering/feature_views.py</code>.</li>
     <li><strong>Set your bar</strong> under <code>quality_gate</code>. The shipped thresholds are deliberately low so the synthetic demo passes; replace them before production use.</li>
-    <li><strong>Pin training libraries</strong> in the <code>ml-runtime</code> dependency group of <code>pyproject.toml</code>. The same pins are used for training and for the registered model's serving environment.</li>
+    <li><strong>Pin libraries</strong> in the <code>ml-runtime</code> dependency group of <code>pyproject.toml</code> (see <a href="#library-versions">Library versions</a>).</li>
   </ol>
 
   <h2 id="versioning">Versioning and lineage</h2>
@@ -650,6 +654,22 @@ GITHUB_OWNER=&lt;owner&gt; GITHUB_OWNER_ID=&lt;owner_id&gt; GITHUB_REPO=&lt;repo
     </tbody>
   </table></div>
   <p>Each model version carries a comment such as <code>features:CUSTOMER_RISK_FEATURES$V1 | dataset:MLOPS_FRAUD_DETECTOR_TRAINING_DATA/V1_20261018_235217 | git:6878199</code>, its metrics, the gate decision, and registry lineage to the Dataset. Promotion copies the comment to PROD.</p>
+  <p><strong>Retention.</strong> Every run adds a model version and a Dataset version. After each successful STAGE and PROD deploy, <code>source/utils/retention.py</code> keeps the newest <code>retention.keep_model_versions</code> and <code>retention.keep_dataset_versions</code> per environment. It never removes the default version, a version with an inference service or a model monitor, or a Dataset that a remaining version's lineage references, including PROD versions that point at STAGE Datasets. Preview with <code>--dry-run</code>.</p>
+
+  <h3 id="library-versions">Library versions</h3>
+  <p>Each library is pinned once, in the <code>ml-runtime</code> group of <code>pyproject.toml</code>:</p>
+<pre><code>ml-runtime = ["snowflake-ml-python==2.4.0", "xgboost==3.3.0", "scikit-learn==1.8.0"]</code></pre>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Where code runs</th><th>How the pins are applied</th></tr></thead>
+    <tbody>
+      <tr><td>CI runner and laptops</td><td><code>uv.lock</code> (the same <code>snowflake-ml-python</code> pin is in the project dependencies)</td></tr>
+      <tr><td>ML Jobs on a compute pool</td><td><code>pip_requirements</code>, installed from PyPI through the <code>pypi_access_integration</code> external access integration</td></tr>
+      <tr><td>Stored procedures on a warehouse</td><td><code>PACKAGES</code> from the Snowflake Anaconda channel</td></tr>
+      <tr><td>Model Registry serving</td><td><code>log_model(conda_dependencies=...)</code>; the Registry adds <code>snowflake-ml-python</code> at the logging client's version</td></tr>
+    </tbody>
+  </table></div>
+  <p>Every pipeline step checks the installed versions against the pins before it runs and fails on a mismatch.</p>
+  <div class="callout warn"><span class="t">Without PyPI access, pins are silently ignored</span><p>An ML Job that can't reach PyPI keeps the runtime image's preinstalled versions and doesn't fail on its own. In testing, a job pinned to <code>snowflake-ml-python==2.4.0</code> ran with the image's 1.54.0. <code>setup.sh</code> creates <code>MLOPS_PYPI_ACCESS_INTEGRATION</code> (egress to <code>pypi.org</code> and <code>files.pythonhosted.org</code>) and <code>setup_cicd.sh</code> grants it to <code>MLOPS_STAGE_ROLE</code>; the version check catches any gap. When you bump a pin, choose a version available on both PyPI and the Anaconda channel (<code>SELECT * FROM INFORMATION_SCHEMA.PACKAGES WHERE LANGUAGE = 'python'</code>).</p></div>
 
   <h2 id="quality-gate">Quality gate</h2>
   <p>A candidate must pass two checks, both evaluated in the <code>EVALUATE</code> step:</p>
@@ -681,13 +701,15 @@ Champion comparison: candidate auc_roc=0.5084 beats champion V4 auc_roc=0.5084 (
   <h3 id="batch">Batch</h3>
   <p>A scheduled task, <code>&lt;MODEL&gt;_BATCH_INFERENCE</code>, scores <code>serving.batch.input_table</code> (default: the training feature view) with the PROD default version and <strong>appends</strong> to <code>serving.batch.output_table</code> with <code>MODEL_VERSION</code>, <code>SCORED_AT</code>, and <code>RUN_ID</code>. Because it always uses the default version, it follows promotions and rollbacks automatically.</p>
   <h3 id="realtime">Real-time</h3>
-  <p>Each PROD version gets its own inference service behind one gateway, which gives clients one stable URL while CI shifts traffic between versions. Traffic weights live in <code>gateway-config.yml</code>; edit them and merge to <code>main</code> to shift traffic.</p>
+  <p>Each PROD version gets its own inference service behind one gateway, which gives clients one stable URL while CI shifts traffic between versions. Traffic weights live in <code>gateway-config.yml</code>; edit them and merge to <code>main</code> to shift traffic. Whenever a split is applied, every model service that isn't a gateway target is dropped, so only versions taking traffic use compute; the rollback workflow redeploys a dropped version on demand.</p>
   <p>Call the endpoint with a programmatic access token. Method names map to paths with dashes (<code>predict_proba</code> becomes <code>/predict-proba</code>):</p>
 <pre><code>curl -X POST "https://&lt;gateway-ingress-url&gt;/predict-proba" \
   -H 'Authorization: Snowflake Token="&lt;PAT&gt;"' \
   -H 'Content-Type: application/json' \
   -d '{"dataframe_split": {"index": [0], "columns": ["TOTAL_TXN_COUNT", "..."], "data": [[20, "..."]]}}'</code></pre>
-  <p>The response is <code>{"data": [[row_index, {"output_feature_0": ..., "output_feature_1": ...}], ...]}</code>. Notebook <code>06</code> fetches features from the Feature Store, calls the gateway, and checks the results match <code>ModelVersion.run</code>.</p>
+  <p>The response is <code>{"data": [[row_index, {"output_feature_0": ..., "output_feature_1": ...}], ...]}</code>. Notebook <code>06</code> fetches features from the Feature Store, calls the gateway, and checks the results match <code>ModelVersion.run</code>. The same checks run after every PROD deploy, traffic shift, and rollback (<code>scripts/smoke_test_endpoint.py</code>), and as live tests you can run against PROD:</p>
+<pre><code>SNOWFLAKE_DATABASE=SNOW_MLOPS_PROD SNOWFLAKE_WAREHOUSE=SNOW_MLOPS_PROD_WH \
+  uv run pytest tests/test_endpoint.py -v</code></pre>
   <div class="callout"><span class="t">Authentication</span><p>Use a PAT. Only the service owner can call the endpoint unless you grant the service role <code>ALL_ENDPOINTS_USAGE</code>; authorization failures return 404. See <a href="https://docs.snowflake.com/en/developer-guide/snowflake-ml/inference/real-time-inference-rest-api">Deploy models for real-time inference (REST API)</a> and <a href="https://docs.snowflake.com/en/developer-guide/snowpark-container-services/gateway">Gateways</a>.</p></div>
 
   <h2 id="monitoring">Monitoring</h2>
@@ -702,10 +724,10 @@ Champion comparison: candidate auc_roc=0.5084 beats champion V4 auc_roc=0.5084 (
   <div class="table-wrap"><table>
     <thead><tr><th>Workflow</th><th>Trigger</th><th>What it does</th></tr></thead>
     <tbody>
-      <tr><td><code>deploy.yml</code></td><td>Pull request (checks only); push to <code>main</code>; manual dispatch (<code>promote_only</code>, <code>model_version</code>)</td><td>Code quality, deploy-stage, then deploy-prod after PROD approval</td></tr>
+      <tr><td><code>deploy.yml</code></td><td>Pull request (checks only); push to <code>main</code>; manual dispatch (<code>promote_only</code>, <code>model_version</code>)</td><td>Code quality, deploy-stage, then deploy-prod after PROD approval, ending with a REST smoke test; any failure after promotion rolls PROD back</td></tr>
       <tr><td><code>scheduled-retrain.yml</code></td><td>Weekly cron; manual</td><td>Retrain in STAGE on fresh data, write the job summary, open a GitHub issue for review</td></tr>
-      <tr><td><code>rollback.yml</code></td><td>Manual (<code>model_version</code>, <code>reason</code>)</td><td>Set the PROD default version back, route 100% of gateway traffic to that version's service, re-validate batch scoring</td></tr>
-      <tr><td><code>traffic-shift.yml</code></td><td>Push to <code>main</code> touching <code>gateway-config.yml</code>; manual</td><td>Apply gateway weights and drop services removed from the file. An empty file is a no-op.</td></tr>
+      <tr><td><code>rollback.yml</code></td><td>Manual (<code>model_version</code>, <code>reason</code>)</td><td>Set the PROD default version back, redeploy and route 100% of gateway traffic to that version's service, run the REST smoke test, re-validate batch scoring</td></tr>
+      <tr><td><code>traffic-shift.yml</code></td><td>Push to <code>main</code> touching <code>gateway-config.yml</code>; manual</td><td>Apply gateway weights, drop services with no traffic, run the REST smoke test. An empty file is a no-op.</td></tr>
     </tbody>
   </table></div>
 
@@ -746,7 +768,7 @@ ALTER MODEL SNOW_MLOPS_PROD.ML.MLOPS_FRAUD_DETECTOR ADD VERSION V6
   </ol>
   <p>To wire this into the template:</p>
   <ul>
-    <li>Add <code>deploy/strategies/multi_account.py</code> with a <code>promote(version)</code> that refreshes the replication group, waits for the candidate version to appear in the replica, and runs the statements above. Register it in <code>STRATEGIES</code> in <code>deploy/promote.py</code> and set the <code>TOPOLOGY</code> variable.</li>
+    <li>Add a promotion script (for example <code>deploy/promote_multi_account.py</code>) with a <code>promote(version)</code> that refreshes the replication group, waits for the candidate version to appear in the replica, and runs the statements above. Use it from deploy-prod in place of <code>deploy/promote.py</code>.</li>
     <li>Run <code>setup.sh</code> and <code>setup_cicd.sh</code> in each account, with a separate <code>SNOWFLAKE_ACCOUNT</code> per GitHub environment. OIDC users are per account.</li>
     <li>The champion comparison reads the PROD model from STAGE. Across accounts, either replicate the PROD database back to STAGE or disable <code>quality_gate.champion</code> and compare in deploy-prod instead.</li>
     <li>Source data, feature views, services, the gateway, and monitors must exist in the PROD account. deploy-prod already registers PROD feature views before batch validation.</li>
@@ -765,12 +787,14 @@ ALTER MODEL SNOW_MLOPS_PROD.ML.MLOPS_FRAUD_DETECTOR ADD VERSION V6
       <tr><td><code>quality_gate</code></td><td>Metric rules and champion comparison</td></tr>
       <tr><td><code>training_params</code></td><td>Hyperparameters passed to <code>train_model</code></td></tr>
       <tr><td><code>pipeline_steps</code></td><td><code>warehouse</code> or <code>spcs</code> compute per step</td></tr>
-      <tr><td><code>serving</code></td><td>Batch schedule and tables; real-time gateway, instances, canary weight, health-check rows</td></tr>
+      <tr><td><code>serving</code></td><td>Batch schedule and tables; real-time gateway, instances, canary weight, health-check and smoke-test rows</td></tr>
+      <tr><td><code>pypi_access_integration</code></td><td>External access integration ML Jobs use to install the pinned library versions</td></tr>
       <tr><td><code>data_checks</code></td><td>Per source table: <code>min_rows</code>, <code>max_null_pct</code>, freshness</td></tr>
       <tr><td><code>environments</code></td><td>Database, warehouse, and compute pool for <code>dev</code>, <code>stage</code>, <code>prod</code></td></tr>
       <tr><td><code>experiment</code></td><td>Experiment tracking name and run prefix</td></tr>
       <tr><td><code>monitor</code></td><td>Columns, actuals join, baseline, drift metric and threshold, alert, notifications</td></tr>
       <tr><td><code>retrain</code></td><td>Scheduled retraining settings</td></tr>
+      <tr><td><code>retention</code></td><td>Model and Dataset versions to keep per environment</td></tr>
     </tbody>
   </table></div>
 
@@ -785,6 +809,8 @@ ALTER MODEL SNOW_MLOPS_PROD.ML.MLOPS_FRAUD_DETECTOR ADD VERSION V6
       <tr><td>Gateway shows "Endpoints provisioning in progress"</td><td>Normal for a few minutes after creation.</td></tr>
       <tr><td>REST calls return 404</td><td>Wrong URL, or the PAT's role can't use the endpoint. Grant <code>ALL_ENDPOINTS_USAGE</code>.</td></tr>
       <tr><td>REST calls return 500 with a connector session token</td><td>Use a PAT instead.</td></tr>
+      <tr><td><code>Runtime does not match pyproject.toml ml-runtime pins</code></td><td>The ML Job couldn't install the pinned versions. Check that <code>pypi_access_integration</code> names an integration that exists and is granted to the job's role (<code>setup.sh</code>, <code>setup_cicd.sh</code>).</td></tr>
+      <tr><td>Smoke test fails with <code>ALTER USER ADD PROGRAMMATIC ACCESS TOKEN</code> errors</td><td>Service users need a network policy to hold PATs; <code>setup_cicd.sh</code> sets <code>GITHUB_ACTIONS_POLICY</code>. Or provide <code>SNOWFLAKE_PAT</code>.</td></tr>
       <tr><td><code>setup_cicd.sh</code> reports unfilled GitHub settings</td><td>Pass <code>GITHUB_OWNER</code>, <code>GITHUB_OWNER_ID</code>, <code>GITHUB_REPO</code>, and <code>GITHUB_REPO_ID</code>.</td></tr>
       <tr><td>OIDC login fails in GitHub Actions</td><td>The subject must match <code>repo:&lt;owner&gt;@&lt;owner_id&gt;/&lt;repo&gt;@&lt;repo_id&gt;:environment:&lt;ENV&gt;</code>; the job's <code>environment</code> must be <code>STAGE</code> or <code>PROD</code>.</td></tr>
     </tbody>
@@ -819,6 +845,7 @@ ALTER MODEL SNOW_MLOPS_PROD.ML.MLOPS_FRAUD_DETECTOR ADD VERSION V6
     <li><a href="#get-started">Get started</a></li>
     <li><a href="#bring-your-own-model">Bring your own model</a></li>
     <li><a href="#versioning">Versioning and lineage</a></li>
+    <li class="sub"><a href="#library-versions">Library versions</a></li>
     <li><a href="#quality-gate">Quality gate</a></li>
     <li><a href="#serving">Serving</a></li>
     <li><a href="#monitoring">Monitoring</a></li>
