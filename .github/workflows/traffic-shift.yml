@@ -64,6 +64,10 @@ jobs:
         run: uv run python scripts/apply_gateway_config.py
         timeout-minutes: 5
 
+      - name: REST smoke test (gateway + services)
+        run: uv run python scripts/smoke_test_endpoint.py
+        timeout-minutes: 15
+
       - name: Commit updated gateway-config.yml
         if: inputs.targets != ''
         continue-on-error: true

@@ -7,6 +7,7 @@ Environment variables override infrastructure names, which is how CI targets
 DEV / STAGE / PROD with the same code.
 """
 
+import json
 import os
 import tomllib
 from pathlib import Path
@@ -118,8 +119,10 @@ TRAINING_PARAMS = dict(_cfg["training_params"])
 
 def _read_ml_runtime_deps() -> list[str]:
     # pyproject.toml is only present in the repo checkout (local dev and CI).
-    # Inside a staged container the deps are already resolved, so an empty list
-    # is correct there -- the DAG reads this value at deploy time, not runtime.
+    # Pipeline steps run from a staged source.zip without it, so the DAG
+    # forwards the pins in ML_RUNTIME_DEPS (see train_dag.runtime_env).
+    if os.getenv("ML_RUNTIME_DEPS"):
+        return json.loads(os.environ["ML_RUNTIME_DEPS"])
     pyproject = _ROOT / "pyproject.toml"
     if not pyproject.is_file():
         return []
@@ -128,6 +131,42 @@ def _read_ml_runtime_deps() -> list[str]:
 
 
 ML_RUNTIME_DEPS = _read_ml_runtime_deps()
+
+# Registry models get the same pins minus snowflake-ml-python, which log_model
+# adds itself at the version of the client that logged the model.
+MODEL_DEPS = [d for d in ML_RUNTIME_DEPS if not d.startswith("snowflake-ml-python")]
+
+# External access integration that lets ML Jobs pip-install the pins above.
+# Without it, pip cannot reach PyPI and the job silently keeps the versions
+# preinstalled in the runtime image -- verify_pinned_versions() catches that.
+PYPI_ACCESS_INTEGRATION = _cfg.get("pypi_access_integration")
+
+
+def verify_pinned_versions(pins: list[str]) -> dict:
+    """Fail if installed package versions differ from the '==' pins.
+
+    Called at the start of every pipeline step (ML Job or stored procedure) so
+    a runtime that didn't honor the pins fails loudly instead of training or
+    serving on a different library version than CI and the Registry expect.
+    """
+    from importlib.metadata import version
+
+    installed, problems = {}, []
+    for spec in pins:
+        if "==" not in spec:
+            continue
+        name, want = (s.strip() for s in spec.split("==", 1))
+        installed[name] = have = version(name)
+        if have != want:
+            problems.append(f"{name} {have} installed, {want} pinned")
+    if problems:
+        raise RuntimeError(
+            "Runtime does not match pyproject.toml ml-runtime pins: "
+            + "; ".join(problems)
+            + ". For ML Jobs, check that pypi_access_integration is set and granted to this role."
+        )
+    return installed
+
 
 # ─── Per-step compute selection ──────────────────────────────────────────────
 # {"feature_eng": {"compute": "spcs"}, "train_model": {...}, "evaluate": {...}}
@@ -213,3 +252,6 @@ EXPERIMENT_CONFIG = _str_bools(_cfg["experiment"])
 
 # ─── Scheduled Retraining configuration ──────────────────────────────────────
 RETRAIN_CONFIG = _str_bools(_cfg["retrain"])
+
+# ─── Retention (model and Dataset versions) ──────────────────────────────────
+RETENTION_CONFIG = _str_bools(_cfg.get("retention") or {"enabled": False})

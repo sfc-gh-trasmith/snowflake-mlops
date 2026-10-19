@@ -87,6 +87,13 @@ training_params:
 #
 # NOTE: SPCS mode requires the deploying environment's Python version to be
 # supported by the compute pool runtime image (3.11 or 3.12).
+#
+# Library versions on both paths come from pyproject.toml [ml-runtime]. ML Jobs
+# install them from PyPI through this external access integration (created by
+# scripts/setup.sh). Without it the job keeps the image's preinstalled
+# versions, and the version check at the start of each step fails the run.
+pypi_access_integration: MLOPS_PYPI_ACCESS_INTEGRATION
+
 pipeline_steps:
   feature_eng:
     compute: spcs
@@ -116,6 +123,8 @@ serving:
     canary_weight: 20
     # Rows from the batch input table used for the pre-canary health check
     health_check_rows: 20
+    # Rows sent over HTTPS by the post-deploy REST smoke test
+    smoke_test_rows: 10
 
 # ─── Data checks (run before feature engineering) ──────────────────────────────
 # Fail the pipeline early on bad upstream data. Keys are tables in the source
@@ -195,3 +204,15 @@ retrain:
   schedule: "USING CRON 0 6 * * MON America/Los_Angeles"
   stage_only: true
   notify_github_issue: true
+
+# ─── Retention ───────────────────────────────────────────────────────────────
+# Each pipeline run registers a model version and a Dataset version. After a
+# successful deploy, source/utils/retention.py keeps the newest N of each per
+# environment. Never removed: the default version, versions with an inference
+# service or a model monitor, and Datasets referenced by a remaining version's
+# lineage. Inference services with no gateway traffic are dropped separately,
+# whenever the gateway split is applied (scripts/apply_gateway_config.py).
+retention:
+  enabled: true
+  keep_model_versions: 5
+  keep_dataset_versions: 5

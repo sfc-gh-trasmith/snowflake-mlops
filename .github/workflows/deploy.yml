@@ -56,7 +56,7 @@ jobs:
         run: uv python install 3.12
 
       - name: Install dependencies
-        run: uv sync
+        run: uv sync --group ml-runtime  # metrics tests need scikit-learn
 
       - name: Lint (ruff)
         run: uv run ruff check source/ scripts/ deploy/ tests/
@@ -83,7 +83,6 @@ jobs:
       SNOWFLAKE_SCHEMA: ${{ vars.SNOWFLAKE_SCHEMA }}
       SNOWFLAKE_USER: ${{ vars.SNOWFLAKE_USER_STAGE }}
       SNOWFLAKE_ROLE: MLOPS_STAGE_ROLE
-      TOPOLOGY: ${{ vars.TOPOLOGY || 'single-account' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -146,6 +145,13 @@ jobs:
         env:
           MODEL_VERSION: ${{ steps.quality_gate.outputs.model_version }}
 
+      # Keeps the newest N model/Dataset versions (retention.* in config.yml);
+      # never the candidate, the default, or anything PROD lineage points at.
+      - name: Retention (STAGE model and dataset versions)
+        continue-on-error: true
+        run: uv run python source/utils/retention.py --env stage
+        timeout-minutes: 5
+
   # ──────────────────────────────────────────────────────────────────────
   # PROD: Model deployment (requires approval)
   # Gated by: PROD environment requires reviewer approval
@@ -165,7 +171,6 @@ jobs:
       SNOWFLAKE_SCHEMA: ${{ vars.SNOWFLAKE_SCHEMA }}
       SNOWFLAKE_USER: ${{ vars.SNOWFLAKE_USER_PROD }}
       SNOWFLAKE_ROLE: MLOPS_PROD_ROLE
-      TOPOLOGY: ${{ vars.TOPOLOGY || 'single-account' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -186,7 +191,13 @@ jobs:
       - name: Install dependencies
         run: uv sync --group snow --group ml-runtime --no-default-groups
 
+      # Recorded before anything changes, for the automatic rollback below.
+      - name: Capture current PROD state
+        id: before
+        run: uv run python scripts/prod_state.py --capture
+
       - name: "Promote model to PROD (replicate from STAGE)"
+        id: promote
         run: |
           if [ -z "$BLESSED_VERSION" ]; then
             echo "::error::No model version provided. Either deploy-stage must pass the quality gate, or specify model_version input for promote_only."
@@ -223,6 +234,13 @@ jobs:
         run: uv run python scripts/apply_gateway_config.py
         timeout-minutes: 5
 
+      # Real HTTPS calls through the gateway and to each service behind it,
+      # authenticated with a temporary PAT. A failure here rolls PROD back.
+      - name: "REST smoke test (gateway + services)"
+        if: steps.serving.outputs.realtime_enabled == 'true'
+        run: uv run python scripts/smoke_test_endpoint.py
+        timeout-minutes: 15
+
       - name: "Sync gateway-config.yml to repo"
         if: steps.serving.outputs.realtime_enabled == 'true'
         continue-on-error: true
@@ -244,7 +262,14 @@ jobs:
         run: uv run python source/utils/setup_model_monitor.py --env prod
         timeout-minutes: 5
 
+      - name: Retention (PROD model versions)
+        continue-on-error: true
+        run: uv run python source/utils/retention.py --env prod
+        timeout-minutes: 5
+
       - name: Tag production release
+        # A tagging problem shouldn't roll back a healthy deployment
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
           BLESSED_VERSION: ${{ needs.deploy-stage.outputs.model_version || inputs.model_version }}
@@ -253,3 +278,15 @@ jobs:
           TAG="prod/${MODEL_VERSION}-$(date +%Y%m%d-%H%M%S)"
           gh api repos/${{ github.repository }}/git/refs -f ref="refs/tags/${TAG}" -f sha="${GITHUB_SHA}"
           echo "Tagged release: $TAG"
+
+      # Any failure after promotion moved the default version (service deploy,
+      # health check, gateway, smoke test, monitor) restores the previous
+      # default version and gateway split. Dropping the failed canary service
+      # happens as part of re-applying the previous split.
+      - name: Automatic rollback
+        if: failure() && steps.promote.outcome == 'success'
+        env:
+          PREV_VERSION: ${{ steps.before.outputs.default_version }}
+          PREV_TARGETS: ${{ steps.before.outputs.gateway_targets }}
+        run: uv run python scripts/prod_state.py --restore --version "$PREV_VERSION" --targets "$PREV_TARGETS"
+        timeout-minutes: 10

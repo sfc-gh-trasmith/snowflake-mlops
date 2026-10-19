@@ -1,214 +1,133 @@
-"""Integration tests for the MLOPS_FRAUD_DETECTOR inference endpoint.
+"""Live integration tests for the PROD real-time endpoint over HTTPS REST.
 
-Tests both the deployed SPCS inference service and the Snowflake Gateway
-(stable production URL). Validates predictions, probability ranges,
-and the gateway routing layer.
+The same checks the deploy-prod smoke test runs (scripts/smoke_test_endpoint.py),
+as pytest cases you can run against PROD from a laptop. Inputs are real rows
+from the batch input table and expectations come from the model signature, so
+nothing here is specific to the example model.
+
+Not part of the unit suite (CI runs it as the post-deploy smoke test step).
 
 Usage:
-    SNOWFLAKE_CONNECTION_NAME=$YOUR_CONNECTION uv run pytest tests/test_endpoint.py -v
+    SNOWFLAKE_DATABASE=SNOW_MLOPS_PROD SNOWFLAKE_WAREHOUSE=SNOW_MLOPS_PROD_WH \\
+        uv run pytest tests/test_endpoint.py -v
+
+Auth: SNOWFLAKE_PAT if set, otherwise a temporary 1-day PAT is issued for the
+connected user and removed afterwards.
 """
 
-import json
 import sys
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "source"))
-from config import MODEL_NAME, REALTIME_CONFIG, SCHEMA, env_setting
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "source"))
+sys.path.insert(0, str(ROOT / "scripts"))
+
+import smoke_test_endpoint as smoke
+from apply_gateway_config import GATEWAY_NAME, get_current_gateway_targets
+from config import MODEL_NAME, PREDICT_FUNCTION, TASK_TYPE, batch_input_table
+from serving.signature import cast_pandas, input_features, output_columns, run_outputs, validate_outputs
 from snowpark_session import create_snowpark_session
 
-PROD_DATABASE = env_setting("prod", "database")
-PROD_SCHEMA = SCHEMA
-PROD_WAREHOUSE = env_setting("prod", "warehouse")
-GATEWAY_NAME = REALTIME_CONFIG.get("gateway_name", f"{MODEL_NAME}_GATEWAY")
+DB, SCHEMA = smoke.PROD_DATABASE, smoke.PROD_SCHEMA
 
 
 @pytest.fixture(scope="module")
 def session():
-    """Create and share a Snowpark session across all tests."""
     sess = create_snowpark_session()
-    sess.sql(f"USE WAREHOUSE {PROD_WAREHOUSE}").collect()
+    sess.sql(f"USE WAREHOUSE {smoke.PROD_WAREHOUSE}").collect()
     yield sess
     sess.close()
 
 
 @pytest.fixture(scope="module")
-def model_version(session):
-    """Get the current default model version."""
-    from snowflake.ml.registry import Registry
-
-    reg = Registry(session=session, database_name=PROD_DATABASE, schema_name=PROD_SCHEMA)
-    model = reg.get_model(MODEL_NAME)
-
-    # Use the default (latest) version
-    models = session.sql(f"SHOW MODELS LIKE '{MODEL_NAME}' IN {PROD_DATABASE}.{PROD_SCHEMA}").collect()
-    default_version = models[0]["default_version_name"]
-    return model.version(default_version)
+def targets(session):
+    targets = get_current_gateway_targets(session, DB, SCHEMA, GATEWAY_NAME)
+    if not targets:
+        pytest.skip(f"No gateway {DB}.{SCHEMA}.{GATEWAY_NAME} (realtime not deployed)")
+    return targets
 
 
 @pytest.fixture(scope="module")
-def active_service_name(session):
-    """Get the service currently targeted by the gateway."""
-    rows = session.sql(f"DESC GATEWAY {PROD_DATABASE}.{PROD_SCHEMA}.{GATEWAY_NAME}").collect()
-    spec = rows[0]["spec"]
-    for line in spec.split("\n"):
-        line = line.strip()
-        if line.startswith("value:"):
-            full_value = line.split("value:")[1].strip()
-            service_fqn = full_value.split("!")[0].strip()
-            return service_fqn.split(".")[-1]
-    pytest.fail("Could not determine active service from gateway spec")
+def model(session):
+    from snowflake.ml.registry import Registry
+
+    return Registry(session=session, database_name=DB, schema_name=SCHEMA).get_model(MODEL_NAME)
 
 
-def _make_sample(
-    txn_count=20,
-    avg_amount=150.5,
-    max_amount=500.0,
-    stddev=100.0,
-    merchants=10,
-    active_days=30,
-    late_night_ratio=0.05,
-    credit_score=700,
-    account_age=365,
-    income=80000,
-):
-    """Create a single-row sample DataFrame matching model input schema."""
-    return pd.DataFrame(
-        [
-            {
-                "TOTAL_TXN_COUNT": txn_count,
-                "AVG_TXN_AMOUNT": avg_amount,
-                "MAX_TXN_AMOUNT": max_amount,
-                "STDDEV_TXN_AMOUNT": stddev,
-                "UNIQUE_MERCHANTS": merchants,
-                "ACTIVE_DAYS": active_days,
-                "LATE_NIGHT_TXN_RATIO": late_night_ratio,
-                "CREDIT_SCORE": credit_score,
-                "ACCOUNT_AGE_DAYS": account_age,
-                "ANNUAL_INCOME": income,
-            }
-        ]
-    )
+@pytest.fixture(scope="module")
+def token(session):
+    with smoke.EphemeralPAT(session) as tok:
+        yield tok
 
 
-def _cast_to_model_signature(df, mv, function_name="predict_proba"):
-    """Cast DataFrame columns to match model signature types."""
-    _NUMPY_DTYPE = {
-        "INT8": np.int8,
-        "INT16": np.int16,
-        "INT32": np.int32,
-        "INT64": np.int64,
-        "FLOAT": np.float32,
-        "DOUBLE": np.float64,
-    }
-    functions = mv.show_functions()
-    match = [f for f in functions if f["name"].upper() == function_name.upper()]
-    if match:
-        for feat in match[0]["signature"].inputs:
-            if feat.name in df.columns:
-                np_type = _NUMPY_DTYPE.get(str(feat._dtype).split(".")[-1])
-                if np_type:
-                    df[feat.name] = df[feat.name].astype(np_type)
+@pytest.fixture(scope="module")
+def sample(session, model, targets):
+    mv = model.version(targets[0]["service"].rsplit("_SERVICE_", 1)[-1])
+    feats = input_features(mv, PREDICT_FUNCTION)
+    df = session.table(batch_input_table(DB, SCHEMA)).select(*feats).limit(smoke.SMOKE_ROWS).to_pandas()
+    assert not df.empty, "batch input table is empty"
     return df
 
 
-class TestGatewayHealth:
-    """Test that the gateway and underlying service are operational."""
-
-    def test_gateway_exists(self, session):
-        """Gateway should exist and have an ingress URL."""
-        rows = session.sql(f"DESC GATEWAY {PROD_DATABASE}.{PROD_SCHEMA}.{GATEWAY_NAME}").collect()
-        assert len(rows) > 0, "Gateway not found"
-        url = rows[0]["ingress_url"]
-        assert url and "provisioning" not in url.lower(), f"Gateway not ready: {url}"
-
-    def test_active_service_is_running(self, session, active_service_name):
-        """The service behind the gateway should be READY."""
-        status_json = session.sql(
-            f"SELECT SYSTEM$GET_SERVICE_STATUS('{PROD_DATABASE}.{PROD_SCHEMA}.{active_service_name}')"
-        ).collect()[0][0]
-        statuses = json.loads(status_json)
-        ready = [s for s in statuses if s["status"] == "READY"]
-        assert len(ready) > 0, f"No READY containers: {statuses}"
-
-    def test_service_has_public_endpoint(self, session, active_service_name):
-        """Active service should have ingress enabled."""
-        rows = session.sql(f"SHOW ENDPOINTS IN SERVICE {PROD_DATABASE}.{PROD_SCHEMA}.{active_service_name}").collect()
-        assert len(rows) > 0, "No endpoints found"
-        assert str(rows[0]["is_public"]).lower() == "true"
+def _url(session, sql, where=None):
+    return f"https://{smoke._ingress_host(session, sql, 'ingress_url', where)}{smoke.method_path(PREDICT_FUNCTION)}"
 
 
-class TestPredictions:
-    """Test model predictions via the service behind the gateway."""
+def _service_url(session, service):
+    return _url(session, f"SHOW ENDPOINTS IN SERVICE {DB}.{SCHEMA}.{service}", lambda r: r["name"] == "inference")
 
-    def test_predict_proba_returns_two_columns(self, model_version, active_service_name):
-        """predict_proba should return probabilities for both classes."""
-        sample = _cast_to_model_signature(_make_sample(), model_version)
-        result = model_version.run(sample, function_name="predict_proba", service_name=active_service_name)
-        assert "output_feature_0" in result.columns
-        assert "output_feature_1" in result.columns
 
-    def test_probabilities_sum_to_one(self, model_version, active_service_name):
-        """Class probabilities should sum to approximately 1.0."""
-        sample = _cast_to_model_signature(_make_sample(), model_version)
-        result = model_version.run(sample, function_name="predict_proba", service_name=active_service_name)
-        prob_sum = result["output_feature_0"].iloc[0] + result["output_feature_1"].iloc[0]
-        assert abs(prob_sum - 1.0) < 0.01, f"Probabilities sum to {prob_sum}, not 1.0"
+def test_gateway_weights_sum_to_100(targets):
+    assert sum(t["weight"] for t in targets) == 100
 
-    def test_probabilities_in_valid_range(self, model_version, active_service_name):
-        """All probabilities should be between 0 and 1."""
-        sample = _cast_to_model_signature(_make_sample(), model_version)
-        result = model_version.run(sample, function_name="predict_proba", service_name=active_service_name)
-        for col in ["output_feature_0", "output_feature_1"]:
-            val = result[col].iloc[0]
-            assert 0.0 <= val <= 1.0, f"{col} = {val} is outside [0, 1]"
 
-    def test_predict_returns_binary(self, model_version, active_service_name):
-        """predict should return 0 or 1."""
-        sample = _cast_to_model_signature(_make_sample(), model_version, "predict")
-        result = model_version.run(sample, function_name="predict", service_name=active_service_name)
-        pred = result["output_feature_0"].iloc[0]
-        assert pred in (0, 1), f"Prediction {pred} is not binary"
+def test_every_target_service_is_ready(session, targets):
+    import json
 
-    def test_batch_prediction(self, model_version, active_service_name):
-        """Service should handle multiple rows in a single request."""
-        batch = pd.concat(
-            [
-                _make_sample(),
-                _make_sample(txn_count=3, avg_amount=2000, credit_score=350),
-                _make_sample(txn_count=50, avg_amount=25, credit_score=800),
-            ],
-            ignore_index=True,
+    for t in targets:
+        status = json.loads(
+            session.sql(f"SELECT SYSTEM$GET_SERVICE_STATUS('{DB}.{SCHEMA}.{t['service']}')").collect()[0][0]
         )
-        batch = _cast_to_model_signature(batch, model_version)
-        result = model_version.run(batch, function_name="predict_proba", service_name=active_service_name)
-        assert len(result) == 3, f"Expected 3 rows, got {len(result)}"
+        assert any(s["status"] == "READY" for s in status), f"{t['service']}: {status}"
 
-    def test_high_risk_gets_higher_fraud_probability(self, model_version, active_service_name):
-        """A suspicious profile should get higher fraud probability than a clean one."""
-        clean = _cast_to_model_signature(_make_sample(credit_score=800, late_night_ratio=0.0), model_version)
-        suspicious = _cast_to_model_signature(
-            _make_sample(
-                txn_count=3,
-                avg_amount=3000,
-                max_amount=10000,
-                active_days=5,
-                late_night_ratio=0.9,
-                credit_score=350,
-                account_age=30,
-                income=20000,
-            ),
-            model_version,
-        )
 
-        clean_result = model_version.run(clean, function_name="predict_proba", service_name=active_service_name)
-        sus_result = model_version.run(suspicious, function_name="predict_proba", service_name=active_service_name)
+def test_only_gateway_targets_are_running(session, targets):
+    """Services outside the split only cost compute; apply_gateway_config drops them."""
+    from apply_gateway_config import model_services, unused_services
 
-        clean_fraud_prob = clean_result["output_feature_1"].iloc[0]
-        sus_fraud_prob = sus_result["output_feature_1"].iloc[0]
-        assert sus_fraud_prob > clean_fraud_prob, (
-            f"Suspicious ({sus_fraud_prob:.4f}) should have higher fraud prob than clean ({clean_fraud_prob:.4f})"
-        )
+    assert unused_services(model_services(session, DB, SCHEMA), targets) == []
+
+
+def test_gateway_rest_predictions_are_valid(session, model, targets, token, sample):
+    mv = model.version(targets[0]["service"].rsplit("_SERVICE_", 1)[-1])
+    url = _url(session, f"DESC GATEWAY {DB}.{SCHEMA}.{GATEWAY_NAME}")
+    out, _ = smoke.post(url, token, cast_pandas(sample, mv, PREDICT_FUNCTION), output_columns(mv, PREDICT_FUNCTION))
+    assert out.shape[0] == len(sample)
+    assert validate_outputs(TASK_TYPE, out) == []
+
+
+def test_each_service_matches_warehouse_scoring(session, model, targets, token, sample):
+    for t in targets:
+        mv = model.version(t["service"].rsplit("_SERVICE_", 1)[-1])
+        X = cast_pandas(sample, mv, PREDICT_FUNCTION)
+        out, _ = smoke.post(_service_url(session, t["service"]), token, X, output_columns(mv, PREDICT_FUNCTION))
+        assert smoke.check_outputs(out, run_outputs(mv, sample, PREDICT_FUNCTION)) == [], t["service"]
+
+
+def test_single_row_request(session, model, targets, token, sample):
+    """Online use case: one entity per request."""
+    mv = model.version(targets[0]["service"].rsplit("_SERVICE_", 1)[-1])
+    X = cast_pandas(sample.head(1), mv, PREDICT_FUNCTION)
+    out, latency_ms = smoke.post(
+        _service_url(session, targets[0]["service"]), token, X, output_columns(mv, PREDICT_FUNCTION)
+    )
+    assert out.shape[0] == 1 and np.isfinite(out).all()
+    print(f"single-row latency: {latency_ms:.0f} ms")
+
+
+def test_invalid_token_is_rejected(session, targets, sample):
+    with pytest.raises(RuntimeError, match="HTTP 40"):
+        smoke.post(_service_url(session, targets[0]["service"]), "not-a-token", sample.head(1), ["x"])

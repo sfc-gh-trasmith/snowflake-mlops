@@ -24,7 +24,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "source"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from apply_gateway_config import GATEWAY_NAME, load_config, service_name, update_config_file
+from apply_gateway_config import (
+    GATEWAY_NAME,
+    get_current_gateway_services,
+    load_config,
+    service_name,
+    update_config_file,
+)
 from config import (
     MODEL_NAME,
     PREDICT_FUNCTION,
@@ -49,16 +55,7 @@ PARITY_TOLERANCE = 1e-4
 
 def current_gateway_targets(session) -> list[str]:
     """Services currently behind the gateway (empty if the gateway doesn't exist)."""
-    try:
-        rows = session.sql(f"DESC GATEWAY {PROD_DATABASE}.{PROD_SCHEMA}.{GATEWAY_NAME}").collect()
-    except Exception:
-        return []
-    services = []
-    for line in (rows[0]["spec"] if rows else "").split("\n"):
-        line = line.strip()
-        if line.startswith("value:"):
-            services.append(line.split("value:")[1].strip().split("!")[0].split(".")[-1])
-    return services
+    return get_current_gateway_services(session, PROD_DATABASE, PROD_SCHEMA, GATEWAY_NAME)
 
 
 def wait_for_service_ready(session, name, timeout=READY_TIMEOUT_SECONDS) -> bool:
@@ -151,6 +148,7 @@ def main():
         return
 
     print(f"\n[2/5] Creating service {new_service}...")
+    created = False
     try:
         mv.create_service(
             service_name=new_service,
@@ -161,19 +159,28 @@ def main():
             max_instances=int(REALTIME_CONFIG.get("max_instances", 2)),
             autocapture=True,
         )
+        created = True
     except Exception as e:
         if "already exists" not in str(e).lower():
             raise
         print("  Service already exists — verifying readiness.")
 
-    print("\n[3/5] Waiting for READY...")
-    if not wait_for_service_ready(session, new_service):
-        raise RuntimeError(f"Service {new_service} did not become READY within {READY_TIMEOUT_SECONDS}s")
+    try:
+        print("\n[3/5] Waiting for READY...")
+        if not wait_for_service_ready(session, new_service):
+            raise RuntimeError(f"Service {new_service} did not become READY within {READY_TIMEOUT_SECONDS}s")
 
-    print("\n[4/5] Health check...")
-    incumbent = next((s for s in incumbents if s != new_service), None)
-    report = health_check(session, mv, new_service, incumbent)
-    print(f"  PASSED: {report}")
+        print("\n[4/5] Health check...")
+        incumbent = next((s for s in incumbents if s != new_service), None)
+        report = health_check(session, mv, new_service, incumbent)
+        print(f"  PASSED: {report}")
+    except Exception:
+        # A service that never takes traffic only costs compute. Leave services
+        # the gateway already routes to alone.
+        if created and new_service not in incumbents:
+            print(f"  Dropping failed service {new_service}")
+            session.sql(f"DROP SERVICE IF EXISTS {PROD_DATABASE}.{PROD_SCHEMA}.{new_service}").collect()
+        raise
 
     print("\n[5/5] Writing canary split to gateway-config.yml...")
     weight = int(REALTIME_CONFIG.get("canary_weight", 20))

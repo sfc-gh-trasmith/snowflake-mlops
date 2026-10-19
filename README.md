@@ -70,9 +70,12 @@ This template provides:
 9. **PROD Deployment** (steps for disabled serving modes are skipped):
     - **Promote model** — replicates the exact gated version from STAGE to PROD (no re-resolution), sets as DEFAULT
     - **Batch** — validates `model.run()` in PROD, then deploys the scheduled scoring Task (`serving.batch.schedule`) that appends to `BATCH_PREDICTIONS`
-    - **Real-time** — deploys a versioned inference service, health-checks it on real rows (valid outputs, parity with warehouse `run()`, agreement with the incumbent), and routes a canary share of Gateway traffic to it
+    - **Real-time** — deploys a versioned inference service, health-checks it on real rows (valid outputs, parity with warehouse `run()`, agreement with the incumbent), and routes a canary share of Gateway traffic to it. Services that receive no gateway traffic are dropped.
+    - **REST smoke test** — real HTTPS calls through the gateway and to each service behind it, authenticated with a temporary PAT; outputs must be valid and match warehouse scoring
     - Sets up the persistent ModelMonitor (drift + performance, automatic baseline, drift alert)
+    - **Retention** — prunes old model and Dataset versions (keeps the newest N and anything in use)
     - Tags release: `prod/V3-20260812-...`
+    - **Automatic rollback** — if any step fails after promotion (service, health check, gateway, smoke test, monitor), PROD's previous default version and gateway split are restored
 
 ### Data-Driven Promotion (scheduled retrain)
 
@@ -85,7 +88,7 @@ This template provides:
 
 ### Rollback
 
-Manual dispatch of the rollback workflow: sets the DEFAULT version back, routes 100% of Gateway traffic to that version's service (if real-time is enabled), and re-validates batch scoring. The scheduled batch Task always uses the default version, so it follows the rollback automatically.
+Manual dispatch of the rollback workflow: sets the DEFAULT version back, redeploys that version's service if it was dropped, routes 100% of Gateway traffic to it (if real-time is enabled), runs the REST smoke test, and re-validates batch scoring. The scheduled batch Task always uses the default version, so it follows the rollback automatically.
 
 ## Snowflake Services Used
 
@@ -125,7 +128,7 @@ uv sync
 bash scripts/setup.sh
 ```
 
-Creates three environments (`SNOW_MLOPS_DEV`, `SNOW_MLOPS_STAGE`, `SNOW_MLOPS_PROD`) with databases, warehouses, compute pools, and stages.
+Creates three environments (`SNOW_MLOPS_DEV`, `SNOW_MLOPS_STAGE`, `SNOW_MLOPS_PROD`) with databases, warehouses, and compute pools, plus `MLOPS_PYPI_ACCESS_INTEGRATION` (PyPI egress so ML Jobs install the pinned library versions).
 
 ### 3. Generate Sample Data
 
@@ -190,7 +193,6 @@ Then configure your GitHub repo (**Settings → Secrets and variables → Action
 | `SNOWFLAKE_SCHEMA` | Schema (shared across envs) | `ML` |
 | `SNOWFLAKE_USER_STAGE` | OIDC service user for STAGE | `SVC_GITHUB_ACTIONS_STAGE` |
 | `SNOWFLAKE_USER_PROD` | OIDC service user for PROD | `SVC_GITHUB_ACTIONS` |
-| `TOPOLOGY` | Promotion strategy | `single-account` |
 | `ENABLE_MODEL_MONITOR` | Set up model monitoring (STAGE validates, PROD creates) | `true` |
 
 Then create **GitHub Environments** (**Settings → Environments**):
@@ -243,13 +245,17 @@ snowflake-mlops/
 │   ├── scheduled-retrain.yml      # Cron: retrain → STAGE candidate → notify
 │   ├── traffic-shift.yml          # Gateway traffic allocation (gateway-config.yml)
 │   └── rollback.yml               # Manual: revert to previous version
-├── deploy/                        # Promotion strategies (single-account)
+├── deploy/
+│   ├── promote.py                 # STAGE → PROD model copy (FROM MODEL), sets default
+│   └── set_default_version.py     # Used by the rollback workflow
 ├── scripts/
-│   ├── setup.sh                   # Infrastructure provisioning
+│   ├── setup.sh                   # Infrastructure provisioning (incl. PyPI integration)
 │   ├── setup_cicd.sh              # OIDC users + network policy
 │   ├── generate_dataset.py        # Synthetic data generation
-│   ├── apply_gateway_config.py    # Gateway traffic allocation
-│   └── deploy_prod_service.py     # PROD canary SPCS deployment
+│   ├── apply_gateway_config.py    # Gateway traffic split; drops services with no traffic
+│   ├── deploy_prod_service.py     # PROD canary SPCS deployment
+│   ├── smoke_test_endpoint.py     # Post-deploy HTTPS REST smoke test
+│   └── prod_state.py              # Capture/restore PROD state (automatic rollback)
 ├── source/
 │   ├── configs/config.yml         # Pipeline configuration (single source of truth)
 │   ├── config.py                  # YAML loader + env resolution (resolve_env_config)
@@ -277,9 +283,10 @@ snowflake-mlops/
 │       ├── read_candidate.py          # Publish gate decision + gated version to CI
 │       ├── serving_flags.py           # Serving modes from config → GITHUB_OUTPUT
 │       ├── setup_model_monitor.py     # Model monitoring setup/validation
+│       ├── retention.py               # Prune old model / Dataset versions
 │       └── notify_candidate.py        # GitHub Issue notification for candidates
 ├── gateway-config.yml             # Real-time traffic split (edit + merge to shift)
-├── tests/                         # Unit + integration tests
+├── tests/                         # Unit tests; test_endpoint.py = live REST tests against PROD
 ├── notebooks/                     # Educational Jupyter notebooks (01-06; 06 = Feature Store + REST inference)
 └── docs/
     └── docs.html                  # Detailed architecture documentation
@@ -353,18 +360,20 @@ pipeline_steps:
 
 ### ML Runtime Dependencies
 
-Training and serving dependency versions are pinned in `pyproject.toml` under the `[dependency-groups] ml-runtime` group:
+Every library version is pinned once, in `pyproject.toml` under the `[dependency-groups] ml-runtime` group:
 
 ```toml
-ml-runtime = ["xgboost==3.3.0", "scikit-learn==1.8.0"]
+ml-runtime = ["snowflake-ml-python==2.4.0", "xgboost==3.3.0", "scikit-learn==1.8.0"]
 ```
 
-This ensures SPCS training, warehouse training, and the Model Registry serving environment all use the same library versions. The pins match the versions preinstalled in the ML Job runtime image, so training containers need no internet access. Installing other versions in SPCS would require an external access integration to PyPI.
+The same pins are used by the CI/local client (`uv.lock`), ML Jobs on SPCS (pip from PyPI), warehouse stored procedures (Snowflake Anaconda channel), and Model Registry serving (`log_model(conda_dependencies=...)`, which records `snowflake-ml-python` at the logging client's version). Every pipeline step checks the installed versions against the pins before it runs and fails if they differ.
+
+ML Jobs reach PyPI through the external access integration named by `pypi_access_integration` in `config.yml` (created by `scripts/setup.sh`, granted to `MLOPS_STAGE_ROLE` by `setup_cicd.sh`). Without it, pip can't reach PyPI and the job silently keeps the runtime image's preinstalled versions; the version check turns that into a clear failure.
 
 To update:
-1. Check the runtime image's versions (or confirm your target version is reachable)
-2. Edit the versions in `pyproject.toml` and run `uv lock`
-3. Commit — training and serving both pick up the new versions
+1. Pick versions available on both PyPI and the Anaconda channel (`SELECT * FROM INFORMATION_SCHEMA.PACKAGES WHERE LANGUAGE = 'python'`)
+2. Edit `pyproject.toml` (the `snowflake-ml-python` pin appears in the project dependencies, the `snow` group, and `ml-runtime`) and run `uv lock`
+3. Commit — every compute path and the Registry pick up the new versions
 
 To install locally for development: `uv sync --group ml-runtime`
 
@@ -380,6 +389,8 @@ Every artifact the pipeline produces is versioned, and each model version links 
 
 Each model version records the Dataset version and feature view in its lineage and comment, plus the git commit it was trained from (`git:<sha>`).
 
+**Retention.** After each successful STAGE and PROD deploy, `source/utils/retention.py` keeps the newest `retention.keep_model_versions` model versions and `retention.keep_dataset_versions` Dataset versions per environment. It never removes the default version, a version with an inference service or a model monitor, or a Dataset referenced by a remaining version's lineage (including PROD versions that point at STAGE Datasets). Preview with `--dry-run`. Feature view versions only change when you bump `view_version`, so they aren't pruned.
+
 ## Serving
 
 ### Batch
@@ -388,7 +399,7 @@ Each model version records the Dataset version and feature view in its lineage a
 
 ### Real-time
 
-Each PROD version gets its own inference service (`<MODEL_NAME>_SERVICE_<VERSION>`) behind one Gateway. `gateway-config.yml` holds the traffic split; edit the weights and merge to `main` to shift traffic (the traffic-shift workflow applies it and drops services you removed).
+Each PROD version gets its own inference service (`<MODEL_NAME>_SERVICE_<VERSION>`) behind one Gateway. `gateway-config.yml` holds the traffic split; edit the weights and merge to `main` to shift traffic. Whenever a split is applied, every model service that isn't a gateway target is dropped, so only versions taking traffic use compute. Any registered version can be redeployed by the rollback workflow.
 
 To call the endpoint:
 
@@ -411,7 +422,17 @@ curl -X POST "https://<ingress-url>/predict-proba" \
         "data": [[20, 150.5, 500.0, 100.0, 10, 30, 0.05, 700, 365, 80000]]}}'
 ```
 
-By default only the service owner can call the endpoint; grant another role access with the service role `ALL_ENDPOINTS_USAGE`. Authorization failures return 404. Use a PAT: in testing, connector session tokens passed authentication but the ingress returned HTTP 500. `notebooks/06_feature_store_and_rest_inference.ipynb` walks through the full client flow: fetch features from the Feature Store, call the gateway over REST, and check parity with warehouse scoring. Callers supply the feature values themselves; Snowflake also offers request-time feature lookup from an online feature store (`create_service(feature_sources_per_function=...)`, public preview), which this template does not configure. See [Deploy models for real-time inference](https://docs.snowflake.com/en/developer-guide/snowflake-ml/inference/real-time-inference-rest-api).
+By default only the service owner can call the endpoint; grant another role access with the service role `ALL_ENDPOINTS_USAGE`. Authorization failures return 404. Use a PAT: in testing, connector session tokens passed authentication but the ingress returned HTTP 500. `notebooks/06_feature_store_and_rest_inference.ipynb` walks through the full client flow: fetch features from the Feature Store, call the gateway over REST, and check parity with warehouse scoring.
+
+The same REST checks run automatically after every PROD deploy, traffic shift, and rollback (`scripts/smoke_test_endpoint.py`), and as live pytest cases you can run against PROD:
+
+```bash
+SNOWFLAKE_DATABASE=SNOW_MLOPS_PROD SNOWFLAKE_WAREHOUSE=SNOW_MLOPS_PROD_WH uv run pytest tests/test_endpoint.py -v
+```
+
+Both issue a 1-day PAT for the connected user (restricted to its current role) and remove it afterwards, unless `SNOWFLAKE_PAT` is set.
+
+Callers supply the feature values themselves; Snowflake also offers request-time feature lookup from an online feature store (`create_service(feature_sources_per_function=...)`, public preview), which this template does not configure. See [Deploy models for real-time inference](https://docs.snowflake.com/en/developer-guide/snowflake-ml/inference/real-time-inference-rest-api).
 
 ## Monitoring
 
@@ -426,7 +447,7 @@ By default only the service owner can call the endpoint; grant another role acce
 | Trigger | What Happens | Human Approval |
 |---------|-------------|----------------|
 | PR to `main` | Code quality (lint + format + tests) | Merge requires passing checks |
-| Push to `main` | Code quality → train → gate (vs PROD champion) → register → validate batch/monitor → PROD deploy | Required for PROD |
+| Push to `main` | Code quality → train → gate (vs PROD champion) → register → validate batch/monitor → PROD deploy → REST smoke test (auto-rollback on failure) | Required for PROD |
 | Weekly cron | Retrain on fresh data → register candidate → GitHub Issue | Manual promote via `promote_only` |
 | Manual dispatch | Promote existing candidate or full retrain | Required for PROD |
 | Merge to `main` touching `gateway-config.yml` (or manual dispatch) | Apply gateway traffic allocation across model versions | Merge review |
@@ -436,7 +457,7 @@ By default only the service owner can call the endpoint; grant another role acce
 
 **Add a new pipeline step:**
 1. Create `source/<name>/` with a logic module exposing `run(session) -> dict` and an `entrypoint.py`
-2. Add an entry to `STEPS` in `source/pipeline/train_dag.py` (module, config key, pip deps), append it to `STEP_ORDER`, and add the package to `STAGED_PACKAGES`
+2. Add an entry to `STEPS` in `source/pipeline/train_dag.py` (module, config key), append it to `STEP_ORDER`, and add the package to `STAGED_PACKAGES`
 3. Add a `pipeline_steps.<name>` block to `source/configs/config.yml`
 
 No new dispatch code is needed — the DAG builds the warehouse or SPCS wrapper generically and chains steps in `STEP_ORDER`.
