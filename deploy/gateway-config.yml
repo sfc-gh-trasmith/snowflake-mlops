@@ -9,7 +9,5 @@
 # Empty until the first PROD deployment; deploy-prod writes the initial target.
 
 targets:
-  - service: MLOPS_FRAUD_DETECTOR_SERVICE_V4
-    weight: 80
   - service: MLOPS_FRAUD_DETECTOR_SERVICE_V8
-    weight: 20
+    weight: 100
