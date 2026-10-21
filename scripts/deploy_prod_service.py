@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "source"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from apply_gateway_config import (
     GATEWAY_NAME,
-    get_current_gateway_services,
+    get_current_gateway_targets,
     load_config,
     service_name,
     update_config_file,
@@ -51,11 +51,6 @@ PROD_COMPUTE_POOL = os.getenv("SNOWFLAKE_COMPUTE_POOL", env_setting("prod", "com
 READY_TIMEOUT_SECONDS = 600
 READY_POLL_INTERVAL = 15
 PARITY_TOLERANCE = 1e-4
-
-
-def current_gateway_targets(session) -> list[str]:
-    """Services currently behind the gateway (empty if the gateway doesn't exist)."""
-    return get_current_gateway_services(session, PROD_DATABASE, PROD_SCHEMA, GATEWAY_NAME)
 
 
 def wait_for_service_ready(session, name, timeout=READY_TIMEOUT_SECONDS) -> bool:
@@ -116,6 +111,20 @@ def health_check(session, mv, new_service: str, incumbent_service: str | None) -
     return report
 
 
+def pick_incumbent(gateway_targets: list[dict], new_service: str, previous_version: str | None) -> str | None:
+    """Service that keeps the non-canary traffic.
+
+    The previous default version is the champion the candidate was gated
+    against, so it stays the incumbent when it's serving. Otherwise fall back
+    to the gateway target with the most traffic.
+    """
+    serving = [t for t in gateway_targets if t["service"] != new_service]
+    if previous_version and service_name(previous_version) in {t["service"] for t in serving}:
+        return service_name(previous_version)
+    serving.sort(key=lambda t: t.get("weight") or 0, reverse=True)
+    return serving[0]["service"] if serving else None
+
+
 def canary_targets(new_service: str, incumbents: list[str], weight: int) -> list[dict]:
     """New service at `weight`%, remainder to the first incumbent (or 100% if none)."""
     old = next((s for s in incumbents if s != new_service), None)
@@ -138,7 +147,8 @@ def main():
     mv = Registry(session=session, database_name=PROD_DATABASE, schema_name=PROD_SCHEMA).get_model(MODEL_NAME).default
     version = mv.version_name
     new_service = service_name(version)
-    incumbents = current_gateway_targets(session)
+    gateway_targets = get_current_gateway_targets(session, PROD_DATABASE, PROD_SCHEMA, GATEWAY_NAME)
+    incumbents = [t["service"] for t in gateway_targets]
     print(f"  Model: {MODEL_NAME}/{version}")
     print(f"  New service: {new_service} | gateway targets: {incumbents or 'none'}")
 
@@ -171,7 +181,8 @@ def main():
             raise RuntimeError(f"Service {new_service} did not become READY within {READY_TIMEOUT_SECONDS}s")
 
         print("\n[4/5] Health check...")
-        incumbent = next((s for s in incumbents if s != new_service), None)
+        # deploy-prod passes the default version captured before promotion
+        incumbent = pick_incumbent(gateway_targets, new_service, os.getenv("PREVIOUS_VERSION"))
         report = health_check(session, mv, new_service, incumbent)
         print(f"  PASSED: {report}")
     except Exception:
@@ -184,7 +195,9 @@ def main():
 
     print("\n[5/5] Writing canary split to gateway-config.yml...")
     weight = int(REALTIME_CONFIG.get("canary_weight", 20))
-    targets = canary_targets(new_service, incumbents or [t["service"] for t in load_config()["targets"]], weight)
+    if incumbent is None:
+        incumbent = next((t["service"] for t in load_config()["targets"] if t["service"] != new_service), None)
+    targets = canary_targets(new_service, [incumbent] if incumbent else [], weight)
     update_config_file(targets)
     for t in targets:
         print(f"    {t['service']}: {t['weight']}%")
