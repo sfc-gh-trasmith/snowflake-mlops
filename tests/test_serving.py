@@ -279,3 +279,18 @@ def test_stale_split_cannot_drop_the_default_versions_service():
     # First deploy: the default version has no service yet
     assert stale_split_problem(stale, "V5", [service_name("V4")]) is None
     assert stale_split_problem(stale, None, live) is None
+
+
+def test_canary_incumbent_is_the_previous_default_version():
+    from apply_gateway_config import service_name
+    from deploy_prod_service import pick_incumbent
+
+    v4, v5, v8 = service_name("V4"), service_name("V5"), service_name("V8")
+    split = [{"service": v4, "weight": 80}, {"service": v5, "weight": 20}]
+    # The champion V8 was gated against keeps the traffic, not the first target
+    assert pick_incumbent(split, v8, "V5") == v5
+    # Previous default not serving: fall back to the busiest target
+    assert pick_incumbent(split, v8, "V3") == v4
+    assert pick_incumbent([{"service": v4, "weight": 30}, {"service": v5, "weight": 70}], v8, None) == v5
+    assert pick_incumbent([], v8, "V5") is None
+    assert pick_incumbent([{"service": v8, "weight": 100}], v8, "V5") is None

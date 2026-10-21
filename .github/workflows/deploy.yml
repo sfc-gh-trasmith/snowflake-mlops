@@ -228,6 +228,9 @@ jobs:
       - name: "Deploy real-time service (SPCS canary)"
         if: steps.serving.outputs.realtime_enabled == 'true'
         run: uv run python scripts/deploy_prod_service.py
+        env:
+          # The champion before promotion keeps the non-canary traffic
+          PREVIOUS_VERSION: ${{ steps.before.outputs.default_version }}
         timeout-minutes: 20
 
       - name: "Apply gateway traffic split"
