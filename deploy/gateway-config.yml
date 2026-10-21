@@ -11,5 +11,5 @@
 targets:
   - service: MLOPS_FRAUD_DETECTOR_SERVICE_V4
     weight: 80
-  - service: MLOPS_FRAUD_DETECTOR_SERVICE_V5
+  - service: MLOPS_FRAUD_DETECTOR_SERVICE_V8
     weight: 20
